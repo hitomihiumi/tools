@@ -41,14 +41,22 @@ PLANNER_PORT=8000
 # tensor-parallel-size must divide the model's vocab size (151552 for
 # GLM 4.7 - vLLM shards the vocab embedding layer evenly across the TP
 # group). 151552 = 2^12 * 37, so only powers of 2 (1/2/4/8/...) or
-# multiples of 37 are valid - 3 is NOT, and fails at model-load time with
-# "AssertionError: 151552 is not divisible by 3", not at startup/config
-# time, so this only shows up once you've already waited through
-# download + partial load. On a 5-GPU pod: TP=4 for the planner (~45 GiB/
-# GPU for the ~181 GiB of AWQ weights - comfortable headroom for KV cache
-# and CUDA graphs), leaving GPU 4 for flash.
-PLANNER_GPUS="0,1,2,3"
-PLANNER_TP_SIZE=4
+# multiples of 37 are valid - neither 3 nor 6 is, and either fails at
+# model-load time with "AssertionError: 151552 is not divisible by N",
+# not at startup/config time, so this only shows up once you've already
+# waited through download + partial load.
+#
+# On an 8-GPU pod (6 for the planner, 2 for flash): TP=6 is invalid per
+# the above, so the planner's 6 GPUs are split TP=2 x PP=3 instead
+# (tensor-parallel-size x pipeline-parallel-size must multiply out to
+# PLANNER_GPUS' count - runpod_check_gpu_topology below asserts this).
+# Pipeline parallelism has its own overhead (bubble time between stages)
+# that plain TP doesn't, and this is the first time this script has used
+# it - if it misbehaves, the fallback in the plan-review discussion was
+# TP=4 with 2 of the 6 GPUs left idle (proven, no PP involved).
+PLANNER_GPUS="0,1,2,3,4,5"
+PLANNER_TP_SIZE=2
+PLANNER_PP_SIZE=3
 # vLLM refuses to start if this doesn't match what's actually in the
 # checkpoint's own config: cyankiwi's AWQ-4bit repack is serialized in the
 # compressed-tensors container format (a common way checkpoints package
@@ -80,8 +88,16 @@ FLASH_PORT=8002
 # while this was still "3" from an older 4-GPU config - a leftover from
 # resizing the pod that runpod_check_gpu_overlap below now catches
 # immediately instead of hanging through the full HEALTH_TIMEOUT_SECONDS).
-FLASH_GPUS="4"
-FLASH_TP_SIZE=1
+#
+# TP=2 (both of flash's 2 GPUs, no pipeline parallelism needed here - 2
+# divides 151552 cleanly). This doubles flash's old 1-GPU allocation,
+# which is exactly the trigger condition the FLASH_MAX_MODEL_LEN and
+# FLASH_ENFORCE_EAGER comments below call out for revisiting those - not
+# changed automatically here since neither has been verified on this
+# specific 2-GPU shape yet, but worth trying once this launches cleanly.
+FLASH_GPUS="6,7"
+FLASH_TP_SIZE=2
+FLASH_PP_SIZE=1
 FLASH_QUANTIZATION=""  # weights are already FP8 in the checkpoint - vLLM auto-detects
 # --kv-cache-dtype fp8 is known to make this specific checkpoint loop/repeat
 # garbage output on vLLM (https://huggingface.co/unsloth/GLM-4.7-Flash-FP8-Dynamic/discussions/2,
@@ -208,9 +224,25 @@ runpod_check_gpu_overlap() {
     fi
 }
 
+runpod_check_gpu_topology() {
+    # tensor-parallel-size x pipeline-parallel-size must equal the number
+    # of GPUs handed to that server, or vLLM either errors immediately
+    # (TP too high for CUDA_VISIBLE_DEVICES) or silently leaves GPUs idle
+    # (TP*PP too low) - catch a mismatch here, in seconds, rather than
+    # after a 45-minute wait for the wrong outcome.
+    local name="$1" gpus="$2" tp="$3" pp="$4"
+    local gpu_count
+    gpu_count="$(echo "$gpus" | tr ',' '\n' | grep -c .)"
+    if [ "$((tp * pp))" -ne "$gpu_count" ]; then
+        echo "!! $name: TP=$tp x PP=$pp = $((tp * pp)), but ${name^^}_GPUS (\"$gpus\") lists $gpu_count GPU(s)." >&2
+        echo "!! Fix the CONFIG block above - tensor-parallel-size x pipeline-parallel-size must equal the GPU count." >&2
+        exit 1
+    fi
+}
+
 start_vllm() {
-    local name="$1" model="$2" served_name="$3" port="$4" gpus="$5" tp="$6" quant="$7" kv_dtype="$8" max_len="$9"
-    local enforce_eager="${10}"
+    local name="$1" model="$2" served_name="$3" port="$4" gpus="$5" tp="$6" pp="$7" quant="$8" kv_dtype="$9" max_len="${10}"
+    local enforce_eager="${11}"
 
     echo "==> Starting $name ($model) on GPUs [$gpus], port $port, max-model-len $max_len"
     # A prefix env-assignment like `NAME=value cmd` is only recognized by
@@ -230,6 +262,7 @@ start_vllm() {
     nohup vllm serve "$model" \
         --served-model-name "$served_name" \
         --tensor-parallel-size "$tp" \
+        --pipeline-parallel-size "$pp" \
         ${quant:+--quantization "$quant"} \
         --kv-cache-dtype "$kv_dtype" \
         --tool-call-parser glm47 \

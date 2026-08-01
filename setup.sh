@@ -62,6 +62,8 @@ if [ "$(uname -m)" != "x86_64" ]; then
 fi
 
 runpod_check_gpu_overlap
+runpod_check_gpu_topology "planner" "$PLANNER_GPUS" "$PLANNER_TP_SIZE" "$PLANNER_PP_SIZE"
+runpod_check_gpu_topology "flash" "$FLASH_GPUS" "$FLASH_TP_SIZE" "$FLASH_PP_SIZE"
 
 # ---------------------------------------------------------------------------
 # Build (or reuse a cached build of) vLLM from source
@@ -192,10 +194,10 @@ echo "==> Downloading $FLASH_MODEL_REPO"
 hf download "$FLASH_MODEL_REPO" 2>&1 | tee "$LOG_DIR/download-flash.log"
 
 start_vllm "planner" "$PLANNER_MODEL_REPO" "$PLANNER_SERVED_NAME" "$PLANNER_PORT" \
-    "$PLANNER_GPUS" "$PLANNER_TP_SIZE" "$PLANNER_QUANTIZATION" "$PLANNER_KV_CACHE_DTYPE" "$PLANNER_MAX_MODEL_LEN" ""
+    "$PLANNER_GPUS" "$PLANNER_TP_SIZE" "$PLANNER_PP_SIZE" "$PLANNER_QUANTIZATION" "$PLANNER_KV_CACHE_DTYPE" "$PLANNER_MAX_MODEL_LEN" ""
 
 start_vllm "flash" "$FLASH_MODEL_REPO" "$FLASH_SERVED_NAME" "$FLASH_PORT" \
-    "$FLASH_GPUS" "$FLASH_TP_SIZE" "$FLASH_QUANTIZATION" "$FLASH_KV_CACHE_DTYPE" "$FLASH_MAX_MODEL_LEN" "$FLASH_ENFORCE_EAGER"
+    "$FLASH_GPUS" "$FLASH_TP_SIZE" "$FLASH_PP_SIZE" "$FLASH_QUANTIZATION" "$FLASH_KV_CACHE_DTYPE" "$FLASH_MAX_MODEL_LEN" "$FLASH_ENFORCE_EAGER"
 
 wait_for_health "planner" "$PLANNER_PORT"
 wait_for_health "flash" "$FLASH_PORT"
