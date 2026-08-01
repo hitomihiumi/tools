@@ -171,7 +171,7 @@ export HF_HUB_ENABLE_HF_TRANSFER=1
 # huggingface_hub/issues/3266) - actually uninstalling the package is the
 # only fix confirmed to work, forcing a fall back to plain HTTP/hf_transfer.
 uv pip uninstall --system hf_xet 2>/dev/null || true
-export HF_HUB_DISABLE_XET=1
+export HF_HUB_DISABLE_XET=0
 
 # One-time migration: earlier runs before HF_HOME pointed at /workspace may
 # have left partial/complete downloads under the default root-disk cache -

@@ -126,7 +126,7 @@ FLASH_ENFORCE_EAGER="true"
 # lowering GPU_MEM_UTILIZATION won't fix it, there's just not enough room
 # left after the weights on a single card at 200k context.
 PLANNER_MAX_MODEL_LEN=200000
-FLASH_MAX_MODEL_LEN=65536
+FLASH_MAX_MODEL_LEN=200000
 GPU_MEM_UTILIZATION=0.90
 # The FIRST run on a given pod needs much longer than model loading alone:
 # FlashInfer JIT-compiles/downloads its kernel cubins for this GPU arch on
