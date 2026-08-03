@@ -3,6 +3,8 @@ set -euo pipefail
 
 source ./common.sh
 
+export VLLM_USE_V1=0
+
 PLANNER_GPUS="0,1,2,3,4,5,6,7"
 PLANNER_TP_SIZE=8
 PLANNER_PP_SIZE=1
