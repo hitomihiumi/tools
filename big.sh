@@ -3,6 +3,8 @@ set -euo pipefail
 
 source ./common.sh
 
+export VLLM_ALLOW_LONG_MAX_MODEL_LEN=1
+
 PLANNER_GPUS="0,1,2,3,4,5,6,7"
 PLANNER_TP_SIZE=8
 PLANNER_PP_SIZE=1
