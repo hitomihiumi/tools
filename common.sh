@@ -333,7 +333,7 @@ wait_for_health() {
             _diagnose_known_failures "$LOG_DIR/$name.log"
             exit 1
         fi
-        if [ $((waited % 60)) -eq 0 ] && [ "$waited" -gt 0 ]; then
+        if [ $((waited % 30)) -eq 0 ] && [ "$waited" -gt 0 ]; then
             echo "   ... still waiting on $name (${waited}s elapsed) - last log line:"
             tail -n 1 "$LOG_DIR/$name.log"
         fi
