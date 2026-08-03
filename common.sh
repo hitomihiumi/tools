@@ -114,7 +114,7 @@ FLASH_KV_CACHE_DTYPE="auto"
 # throughput for a guaranteed lower memory footprint - set to "" to
 # re-enable graphs once you've confirmed there's headroom to spare
 # (e.g. after giving flash 2 GPUs instead of 1).
-FLASH_ENFORCE_EAGER="true"
+FLASH_ENFORCE_EAGER=""
 
 # Separate max-model-len per server, not a shared one: the planner has 4
 # GPUs (384 GiB) to spread weights + KV cache across, flash has 1 (96 GiB)
@@ -125,8 +125,8 @@ FLASH_ENFORCE_EAGER="true"
 # FLASH_TP_SIZE and FLASH_GPUS, taking GPUs away from the planner) -
 # lowering GPU_MEM_UTILIZATION won't fix it, there's just not enough room
 # left after the weights on a single card at 200k context.
-PLANNER_MAX_MODEL_LEN=200000
-FLASH_MAX_MODEL_LEN=200000
+PLANNER_MAX_MODEL_LEN=80000
+FLASH_MAX_MODEL_LEN=132000
 GPU_MEM_UTILIZATION=0.90
 # The FIRST run on a given pod needs much longer than model loading alone:
 # FlashInfer JIT-compiles/downloads its kernel cubins for this GPU arch on
@@ -270,6 +270,8 @@ start_vllm() {
         --enable-auto-tool-choice \
         --trust-remote-code \
         --max-model-len "$max_len" \
+        --enable-prefix-caching \
+        --enable-chunked-prefill \
         --gpu-memory-utilization "$GPU_MEM_UTILIZATION" \
         ${enforce_eager:+--enforce-eager} \
         --host 0.0.0.0 \
