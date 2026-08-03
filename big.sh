@@ -3,13 +3,11 @@ set -euo pipefail
 
 source ./common.sh
 
-export VLLM_USE_V1=0
-
 PLANNER_GPUS="0,1,2,3,4,5,6,7"
 PLANNER_TP_SIZE=8
 PLANNER_PP_SIZE=1
 PLANNER_MAX_MODEL_LEN=202752
-PLANNER_KV_CACHE_DTYPE="nvfp4"
+PLANNER_KV_CACHE_DTYPE="int4_per_token_head"
 GPU_MEM_UTILIZATION=0.95
 
 mkdir -p "$LOG_DIR"
