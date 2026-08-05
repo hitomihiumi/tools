@@ -130,6 +130,29 @@ MAX_MODEL_LEN=524288
 # larger blocks cut paging overhead on very long contexts.
 BLOCK_SIZE=256
 
+# Multi-token prediction (self-speculative decoding). The checkpoint ships
+# the MTP head itself - config.json has num_nextn_predict_layers=1 and
+# mtp_num_hidden_layers=1, and the weight index lists ~4700 mtp.* tensors -
+# so no separate draft model is downloaded or configured: with "model"
+# omitted, vLLM reuses the target checkpoint as its own drafter. The fork
+# maps deepseek_v4 -> deepseek_mtp/DeepSeekV4MTPModel explicitly.
+#
+# "method" must be spelled out. Left unset it defaults to "draft_model",
+# which is not what we want here. num_speculative_tokens=1 matches the
+# single MTP layer this checkpoint provides; more would have to be drafted
+# autoregressively from that one head, which lowers acceptance.
+#
+# NOT the official model card's '{"method":"dspark",...}': "dspark" is not
+# among this fork's accepted methods (ngram, medusa, mlp_speculator,
+# draft_model, suffix, eagle/eagle3/mtp variants, ngram_gpu) and would be
+# rejected at startup.
+#
+# Set to "" to disable speculation entirely. Speculative decoding is a
+# latency win only while draft tokens are accepted - if throughput drops
+# instead of rising, check the acceptance rate in the server log before
+# tuning anything else.
+SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'
+
 # No deepseek_v4 parser exists in vLLM yet - these are the newest DeepSeek
 # ones available (deepseek_v31 tool-calling / deepseek_v3 reasoning, both
 # documented against DeepSeek-V3.1) and are unverified against V4's actual
@@ -368,6 +391,7 @@ start_vllm() {
         ${QUANTIZATION:+--quantization "$QUANTIZATION"} \
         --kv-cache-dtype "$KV_CACHE_DTYPE" \
         --block-size "$BLOCK_SIZE" \
+        ${SPECULATIVE_CONFIG:+--speculative-config "$SPECULATIVE_CONFIG"} \
         ${TOOL_CALL_PARSER:+--tool-call-parser "$TOOL_CALL_PARSER"} \
         ${REASONING_PARSER:+--reasoning-parser "$REASONING_PARSER"} \
         ${TOOL_CALL_PARSER:+--enable-auto-tool-choice} \
