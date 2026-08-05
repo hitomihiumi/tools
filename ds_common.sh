@@ -95,8 +95,8 @@ PORT=8000
 # substantially different (and here unproven) topology. Plain TP=8 is one
 # process, one set of failure modes, and known-valid for this vocab size -
 # switch to the DP/EP recipe as a throughput upgrade once this is stable.
-GPUS="0,1,2,3,4,5,6,7"
-TP_SIZE=8
+GPUS="0,1,2,3"
+TP_SIZE=4
 PP_SIZE=1
 # Left empty on purpose: vLLM reads the real quant method out of the
 # checkpoint's own config. Forcing a value that disagrees with the
@@ -151,15 +151,46 @@ BLOCK_SIZE=256
 # latency win only while draft tokens are accepted - if throughput drops
 # instead of rising, check the acceptance rate in the server log before
 # tuning anything else.
-SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'
+# DISABLED - tried and does not work with this checkpoint + this vLLM build.
+#
+# The weights are genuinely there (config.json: num_nextn_predict_layers=1,
+# mtp_num_hidden_layers=1; ~4700 mtp.* tensors in the index), but vLLM's V4
+# MTP loader looks for a different naming scheme than the release uses:
+#   KeyError: 'model.layers.43.mtp_block.main_norm.weight'
+# while both deepseek-ai's and unsloth's checkpoints name those tensors
+# mtp.0.hc_attn_base / mtp.0.hc_ffn_base / ... - checked both indexes, and
+# "mtp_block" appears in neither, so this is not an unsloth packaging quirk
+# and switching to the original repo would fail identically. Nothing here
+# can bridge that; it needs a vLLM build whose loader matches the release.
+#
+# Re-test after a vLLM upgrade by restoring:
+#   SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}'
+# (method must be spelled out - unset defaults to "draft_model"; and the
+# official card's "dspark" method does not exist in this fork at all.)
+SPECULATIVE_CONFIG=""
 
-# No deepseek_v4 parser exists in vLLM yet - these are the newest DeepSeek
-# ones available (deepseek_v31 tool-calling / deepseek_v3 reasoning, both
-# documented against DeepSeek-V3.1) and are unverified against V4's actual
-# output format. If opencode's tool calls come back as plain text instead
-# of structured tool_calls, this pairing is the first thing to suspect:
-# check with `manage.py probe-endpoint`, and try clearing them (vLLM then
-# emits raw text and the proxy's json_protocol fallback takes over).
+# All three deepseek_v4 values are real and verified against vLLM's source
+# (an earlier comment here claimed no deepseek_v4 parser existed - that was
+# read off documentation that lagged the code):
+#   reasoning-parser deepseek_v4 -> DeepSeekV4ParserReasoningAdapter,
+#     registered in vllm/reasoning/__init__.py
+#   tokenizer-mode   deepseek_v4 -> listed in TokenizerMode alongside auto,
+#     hf, slow, mistral, deepseek_v32
+#
+# What the reasoning parser does: it splits the model's thinking out of
+# `content` into a separate `reasoning_content` field on the response. It
+# cannot be done downstream - this proxy forwards upstream bytes verbatim
+# and only reads a copy for metrics, so if vLLM leaves the thinking inline,
+# it stays inline all the way to the client.
+#
+# Two distinct failure modes if thinking still shows up in the message:
+#   - the flag never reached the server -> check "non-default args" in the
+#     startup log, which echoes what vLLM actually parsed;
+#   - vLLM did split it out, but the client ignores `reasoning_content`
+#     (it is a vLLM/DeepSeek extension, not part of the OpenAI schema, and
+#     opencode's openai-compatible provider need not render it). Tell the
+#     two apart with a raw curl: if the JSON has a populated
+#     reasoning_content, the server side is doing its job.
 TOOL_CALL_PARSER="deepseek_v4"
 REASONING_PARSER="deepseek_v4"
 TOKENIZER_MODE="deepseek_v4"  # vLLM's tokenizer-mode is required for DeepSeek's rope scaling to work correctly
@@ -183,29 +214,36 @@ ENFORCE_EAGER=""
 # confirmed a cold start actually completes. This is separate from (and on
 # top of) the vLLM build time in setup.sh.
 HEALTH_TIMEOUT_SECONDS=2700
+# How long the log may go completely unchanged before wait_for_health warns
+# that this looks like a hang rather than slow progress. Must stay well
+# under HEALTH_TIMEOUT_SECONDS to be worth anything.
+STALL_WARN_SECONDS=240
 
 # Escape hatch: if the server's log shows FlashInfer/PTX/JIT compile
 # errors, set this to "FLASH_ATTN" (or "XFORMERS") and rerun - vLLM reads
 # this as an env var, not a CLI flag.
 VLLM_ATTENTION_BACKEND_OVERRIDE=""
 
-# Now OFF (empty) - this was costing throughput, not buying safety.
+# Back ON after testing both ways - this is NOT dead weight, it is load-
+# bearing on this hardware.
 #
-# Non-empty sets NCCL_P2P_DISABLE=1 / NCCL_IB_DISABLE=1, which forces every
-# inter-GPU transfer through host memory (GPU -> PCIe -> CPU RAM -> PCIe ->
-# GPU) instead of direct peer-to-peer. At TP=8 every decoder layer does an
-# all-reduce across all eight GPUs, so that detour is applied thousands of
-# times per generated token - it is the most expensive setting in this file
-# by a wide margin.
+# Non-empty sets NCCL_P2P_DISABLE=1, which forces inter-GPU transfers
+# through host memory (GPU -> PCIe -> CPU RAM -> PCIe -> GPU) instead of
+# direct peer-to-peer. That is genuinely expensive: every decoder layer
+# all-reduces across the whole TP group, thousands of times per generated
+# token, so it was worth trying to remove for throughput.
 #
-# It was added for a startup hang on an EARLIER, differently-shaped pod
-# (log frozen at "vLLM is using nccl==X.Y.Z" with no further output) and
-# then carried forward unexamined. If that hang comes back, set these to
-# "1" again - it is a restart-only change, no rebuild - but check
-# `nvidia-smi topo -m` first: if the GPUs report NV#/PIX/PXB links, P2P is
-# real and worth keeping, and only SYS everywhere would mean disabling it
-# costs nothing.
-NCCL_P2P_DISABLE_WORKAROUND=""
+# It was removed, and startup hung immediately: the log froze at
+#   (Worker pid=...) INFO [pynccl.py:111] vLLM is using nccl==2.28.9
+# with no further output for minutes - the exact symptom this workaround
+# was originally added for. RunPod's inter-GPU interconnect is virtualized,
+# and NCCL's P2P negotiation does not fail cleanly here, it stalls forever.
+#
+# So: leave this at "1" unless `nvidia-smi topo -m` on the pod shows real
+# NV#/PIX/PXB links between the GPUs. If it shows SYS everywhere, P2P was
+# never available and disabling it costs nothing anyway - the throughput
+# ceiling is elsewhere.
+NCCL_P2P_DISABLE_WORKAROUND="1"
 # Kept ON: InfiniBand is for MULTI-NODE traffic, and everything here runs on
 # a single pod, so disabling it costs nothing on this topology while still
 # skipping an IB probe that has no hardware to find. Unlike P2P above, this
@@ -251,316 +289,7 @@ LOG_DIR="/var/log/vllm"
 SERVER_NAME="deepseek"   # basename for $LOG_DIR/<name>.log and .pid
 
 # ---------------------------------------------------------------------------
-# Shared functions
+# Shared functions (runpod_kill_gpu_holders, start_vllm, wait_for_health, ...)
 # ---------------------------------------------------------------------------
-
-runpod_kill_gpu_holders() {
-    echo "==> Killing any process currently holding GPU memory"
-    # Authoritative source, not a command-line guess: ask nvidia-smi
-    # directly for every PID with an active GPU context and kill all of
-    # them. This is what actually matters - killing a previous run's
-    # `vllm serve` (the API server) does NOT kill its spawned
-    # EngineCore/Worker subprocesses, since vLLM renames those via
-    # setproctitle to "VLLM::EngineCore" / "VLLM::Worker" rather than
-    # inheriting the "vllm serve ..." command line, so a pattern-matching
-    # `pkill -f "vllm serve"` alone leaves them orphaned, silently holding
-    # the GPU's memory across every rerun.
-    local gpu_pids
-    gpu_pids="$(nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | tr -d ' ' | grep -v '^$' || true)"
-    if [ -n "$gpu_pids" ]; then
-        echo "$gpu_pids" | while read -r pid; do
-            echo "   killing pid $pid (holding GPU memory)"
-            kill -9 "$pid" 2>/dev/null || true
-        done
-    fi
-    # Belt-and-suspenders for anything nvidia-smi didn't catch (e.g. a
-    # process mid-startup, not yet holding a CUDA context).
-    pkill -9 -f "vllm serve" 2>/dev/null || true
-    pkill -9 -f "VLLM::" 2>/dev/null || true
-    if [ -f "$LOG_DIR/$SERVER_NAME.pid" ]; then
-        kill -9 "$(cat "$LOG_DIR/$SERVER_NAME.pid")" 2>/dev/null || true
-        rm -f "$LOG_DIR/$SERVER_NAME.pid"
-    fi
-    sleep 5
-
-    echo "==> GPUs visible on this pod:"
-    nvidia-smi -L || { echo "!! nvidia-smi not found - is this actually a GPU pod?" >&2; exit 1; }
-
-    echo "==> GPU memory after cleanup (should be ~0 used on every line):"
-    nvidia-smi --query-gpu=index,memory.used,memory.total --format=csv
-    local still_held
-    still_held="$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader 2>/dev/null || true)"
-    if [ -n "$still_held" ]; then
-        echo "!! GPU memory is still held after the kill step:" >&2
-        echo "$still_held" >&2
-        echo "!! Starting the server now would likely OOM - investigate before continuing." >&2
-        exit 1
-    fi
-}
-
-runpod_clean_corrupt_dist_info() {
-    # A *.dist-info directory missing METADATA reports its version as None.
-    # `python -m build` walks installed distributions while checking build
-    # dependencies and feeds that None straight into packaging's Version(),
-    # which dies with:
-    #   TypeError: 'NoneType' object is not iterable
-    # - a failure that names neither the package nor the file responsible,
-    # and looks like it's about the package being built rather than an
-    # unrelated leftover. uv's recurring "Failed to uninstall package at
-    # ... due to missing `RECORD` file" warnings are the same corruption
-    # showing up earlier and being tolerated.
-    #
-    # These are remnants of interrupted installs. Deleting them is safe:
-    # a dist-info carries only metadata, and one this damaged already fails
-    # to describe whatever it once owned.
-    echo "==> Checking for corrupt dist-info directories"
-    local site_dir di found=0
-    for site_dir in /usr/local/lib/python3.12/dist-packages /usr/lib/python3/dist-packages; do
-        [ -d "$site_dir" ] || continue
-        for di in "$site_dir"/*.dist-info; do
-            [ -d "$di" ] || continue
-            if [ ! -f "$di/METADATA" ]; then
-                echo "   removing (no METADATA): $di"
-                rm -rf "$di"
-                found=$((found + 1))
-            fi
-        done
-    done
-    [ "$found" -eq 0 ] && echo "   none found"
-    return 0
-}
-
-runpod_check_gpu_topology() {
-    # tensor-parallel-size x pipeline-parallel-size must equal the number of
-    # GPUs handed to the server, or vLLM either errors immediately (TP too
-    # high for CUDA_VISIBLE_DEVICES) or silently leaves GPUs idle (TP*PP too
-    # low) - catch a mismatch here, in seconds, rather than after a long
-    # wait for the wrong outcome.
-    echo "==> Checking GPU topology (TP x PP vs GPU count)"
-    local gpu_count
-    gpu_count="$(echo "$GPUS" | tr ',' '\n' | grep -c .)"
-    if [ "$((TP_SIZE * PP_SIZE))" -ne "$gpu_count" ]; then
-        echo "!! TP=$TP_SIZE x PP=$PP_SIZE = $((TP_SIZE * PP_SIZE)), but GPUS (\"$GPUS\") lists $gpu_count GPU(s)." >&2
-        echo "!! Fix the CONFIG block above - tensor-parallel-size x pipeline-parallel-size must equal the GPU count." >&2
-        exit 1
-    fi
-}
-
-start_vllm() {
-    echo "==> Starting $SERVER_NAME ($MODEL_REPO) on GPUs [$GPUS], port $PORT, max-model-len $MAX_MODEL_LEN"
-    
-    # Exported in an if-block rather than as `VAR="${WORKAROUND:+0}"` prefix
-    # assignments like the NCCL ones below: vLLM reads these two through
-    # int(os.getenv(...)), so handing it an empty string (what :+ expands to
-    # when the workaround is off) raises ValueError instead of meaning
-    # "unset". They must be either "0" or genuinely absent.
-    if [ -n "$DISABLE_DEEP_GEMM_WORKAROUND" ]; then
-        echo "    (DeepGEMM disabled - SM120 workaround, see vllm#47436)"
-        export VLLM_USE_DEEP_GEMM=0
-        export VLLM_MOE_USE_DEEP_GEMM=0
-    fi
-
-    # Same export-in-an-if reasoning as above: these are parsed as int/bool
-    # from the environment, so an empty string is not a safe "unset".
-    [ -n "$TRITON_MLA_SPARSE" ] && export VLLM_TRITON_MLA_SPARSE="$TRITON_MLA_SPARSE"
-    [ -n "$TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE" ] && export VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE="$TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE"
-    [ -n "$TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE" ] && export VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE="$TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE"
-    [ -n "$TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH" ] && export VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH="$TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH"
-    if [ -n "$TRITON_MLA_SPARSE" ]; then
-        echo "    (Triton sparse-MLA enabled - requires the SM120 fork, no-op on upstream vLLM)"
-    fi
-
-    # A prefix env-assignment like `NAME=value cmd` is only recognized by
-    # bash when "NAME=" is literal text in the source - substituting the
-    # whole "NAME=value" via `${VAR:+NAME=value}` does NOT work (bash parses
-    # assignment-word shape before expansion, not after), and produces a
-    # bare word bash then tries to run as a command, e.g.
-    # "line N: NCCL_P2P_DISABLE=1: command not found". Keeping "NAME="
-    # literal and only substituting the value (empty string when the
-    # workaround var is unset, which NCCL/vLLM both treat the same as "not
-    # set") sidesteps that entirely.
-    # shellcheck disable=SC2086
-    CUDA_VISIBLE_DEVICES="$GPUS" \
-    VLLM_ATTENTION_BACKEND="$VLLM_ATTENTION_BACKEND_OVERRIDE" \
-    NCCL_P2P_DISABLE="${NCCL_P2P_DISABLE_WORKAROUND:+1}" \
-    NCCL_IB_DISABLE="${NCCL_IB_DISABLE_WORKAROUND:+1}" \
-    nohup vllm serve "$MODEL_REPO" \
-        --served-model-name "$SERVED_NAME" \
-        --tensor-parallel-size "$TP_SIZE" \
-        --pipeline-parallel-size "$PP_SIZE" \
-        ${QUANTIZATION:+--quantization "$QUANTIZATION"} \
-        --kv-cache-dtype "$KV_CACHE_DTYPE" \
-        --block-size "$BLOCK_SIZE" \
-        ${SPECULATIVE_CONFIG:+--speculative-config "$SPECULATIVE_CONFIG"} \
-        ${TOOL_CALL_PARSER:+--tool-call-parser "$TOOL_CALL_PARSER"} \
-        ${REASONING_PARSER:+--reasoning-parser "$REASONING_PARSER"} \
-        ${TOOL_CALL_PARSER:+--enable-auto-tool-choice} \
-        --tokenizer-mode "$TOKENIZER_MODE" \
-        --trust-remote-code \
-        --max-model-len "$MAX_MODEL_LEN" \
-        --enable-prefix-caching \
-        --enable-chunked-prefill \
-        --gpu-memory-utilization "$GPU_MEM_UTILIZATION" \
-        ${ENFORCE_EAGER:+--enforce-eager} \
-        --host 0.0.0.0 \
-        --port "$PORT" \
-        > "$LOG_DIR/$SERVER_NAME.log" 2>&1 &
-
-    echo $! > "$LOG_DIR/$SERVER_NAME.pid"
-}
-
-# vLLM's own final traceback is nearly useless on startup failures: the
-# API server process just reports "Engine core initialization failed. See
-# root cause above.", wrapped in ~40 lines of asyncio/contextlib frames.
-# The error that actually matters is raised in the separate EngineCore
-# process and printed well ABOVE that, so a plain `tail` of the log shows
-# only the wrapper and hides the cause. Pull the real lines out explicitly.
-_print_root_cause() {
-    local logfile="$1"
-    local hits
-    # Match any "SomethingError:" / "SomethingException:" rather than an
-    # enumerated list - the list previously missed ImportError outright and
-    # reported "no obvious error line found" on a log whose failure was a
-    # plain ImportError. Also catches bare "ERROR" log lines.
-    hits="$(grep -nE "^(ERROR|.*[A-Za-z_]+(Error|Exception):)" "$logfile" \
-            | grep -viE "Engine core initialization failed|Worker failed with error" | tail -n 15 || true)"
-    if [ -n "$hits" ]; then
-        echo "" >&2
-        echo "!! Root cause candidates (first real errors in the log, above the asyncio wrapper):" >&2
-        echo "$hits" | sed 's/^/     /' >&2
-        echo "" >&2
-        echo "   Full log: $logfile" >&2
-    else
-        echo "" >&2
-        echo "!! No obvious error line found - read the whole log: $logfile" >&2
-    fi
-}
-
-_diagnose_known_failures() {
-    local logfile="$1"
-    # Patterns are deliberately specific (not bare words like "error" or
-    # "not supported") - those match unrelated log noise.
-     if grep -qiE "cannot import name .* from 'vllm|ImportError: cannot import name" "$logfile"; then
-        echo "   -> the installed vllm tree is mixing files from two different builds (typically the" >&2
-        echo "      SM120 fork installed over a previous upstream install - the fork is based on an" >&2
-        echo "      older vLLM, so symbols moved). Reinstalling alone doesn't fix it: files the new" >&2
-        echo "      wheel doesn't overwrite survive. Remove the package directory outright, then" >&2
-        echo "      rerun ds_setup.sh (which now does this automatically):" >&2
-        echo "        uv pip uninstall --system vllm; rm -rf /usr/local/lib/python3.12/dist-packages/vllm" >&2
-    fi
-    if grep -qiE "'NoneType' object is not iterable|missing \`RECORD\` file" "$logfile"; then
-        echo "   -> some installed *.dist-info is corrupt (no METADATA), so its version reads as None" >&2
-        echo "      and packaging's Version() raises TypeError while build checks dependencies. The" >&2
-        echo "      uv warnings about \"Failed to uninstall ... missing RECORD file\" name the culprit." >&2
-        echo "      ds_setup.sh clears these automatically now; to do it by hand, delete the offending" >&2
-        echo "      *.dist-info under /usr/local/lib/python3.12/dist-packages and rerun." >&2
-    fi
-    if grep -qiE "version of None already set|is shallow and may cause errors" "$logfile"; then
-        echo "   -> setuptools-scm couldn't derive a version from this shallow, tagless checkout." >&2
-        echo "      ds_setup.sh pins SETUPTOOLS_SCM_PRETEND_VERSION for that; if it persists, delete" >&2
-        echo "      $VLLM_SRC_DIR/vllm.egg-info and rerun with FORCE_REBUILD_VLLM=\"true\"." >&2
-    fi
-    if grep -qiE "Unknown SF transformation|Unsupported architecture|deepgemm-src" "$logfile"; then
-        echo "   -> DeepGEMM was built without SM120 (RTX PRO 6000) support. The revision matters:" >&2
-        echo "      the vLLM fork's default pin only handles arch_major 9 and 10, and aborts in" >&2
-        echo "      layout.hpp (weight load) or hyperconnection.hpp (memory profiling)." >&2
-        echo "      Check DEEPGEMM_GIT_REF is \"nv_dev\" (currently \"$DEEPGEMM_GIT_REF\") and that" >&2
-        echo "      $DEEPGEMM_SRC_DIR was actually used, then rebuild with FORCE_REBUILD_VLLM=\"true\"." >&2
-        echo "      Note DISABLE_DEEP_GEMM_WORKAROUND does NOT avoid this - parts of the DeepSeek V4" >&2
-        echo "      path call DeepGEMM regardless of that env var." >&2
-    fi
-    if grep -qiE "larger than the maximum number of tokens|can be stored in KV cache|decrease max_model_len|To serve at least one request" "$logfile"; then
-
-        echo "   -> the KV cache can't hold even ONE request at MAX_MODEL_LEN=$MAX_MODEL_LEN." >&2
-        echo "      This is the model's 1M-token ceiling, which needs far more cache than these GPUs" >&2
-        echo "      have left after ~167GB of weights. vLLM prints the exact GB it needs vs. has in the" >&2
-        echo "      line above - halve MAX_MODEL_LEN until it fits (262144 and 131072 are sane steps)." >&2
-        echo "      Raising GPU_MEM_UTILIZATION barely helps; the gap here is usually large." >&2
-    fi
-    if grep -qiE "libnvptxcompiler|ptxas fatal|PTX JIT (failed|error)" "$logfile"; then
-        echo "   -> looks like a FlashInfer/PTX-JIT compile failure." >&2
-        echo "      Try setting VLLM_ATTENTION_BACKEND_OVERRIDE=\"FLASH_ATTN\" at the top of common.sh and rerun." >&2
-    fi
-    if grep -qiE "unrecognized model type|Model architectures .* are not supported" "$logfile"; then
-        echo "   -> this vLLM build may not know DeepseekV4ForCausalLM." >&2
-        echo "      It is supported on main - check VLLM_GIT_REF and the build log at $LOG_DIR/vllm-build.log," >&2
-        echo "      then set FORCE_REBUILD_VLLM=true to rebuild against a newer commit." >&2
-    fi
-    if grep -qiE "invalid choice|unrecognized arguments" "$logfile"; then
-        echo "   -> vLLM rejected a CLI flag. Most likely TOOL_CALL_PARSER/REASONING_PARSER:" >&2
-        echo "      there is no deepseek_v4 parser, and the v3-era names in common.sh are the" >&2
-        echo "      closest available. Clear both to fall back to plain text output." >&2
-    fi
-    if grep -qiE "is not divisible by" "$logfile"; then
-        echo "   -> TP_SIZE doesn't divide the model's vocab size (129280 = 2^8 * 5 * 101)." >&2
-        echo "      Valid values are 1/2/4/5/8/10/16...; 3, 6 and 7 are not." >&2
-    fi
-    if grep -qiE "CUDA out of memory|OutOfMemoryError" "$logfile"; then
-        echo "   -> GPU ran out of memory (weights + CUDA-graph buffers left no room for KV cache)." >&2
-        echo "      Lower MAX_MODEL_LEN (currently $MAX_MODEL_LEN - it's the model's 1M ceiling), or set" >&2
-        echo "      ENFORCE_EAGER=\"true\" to skip CUDA graph capture. Raising GPU_MEM_UTILIZATION won't" >&2
-        echo "      help - the crash is real physical VRAM pressure, not a too-conservative soft limit." >&2
-    fi
-    if grep -qiE "no kernel image is available|CUDA error: no kernel image" "$logfile"; then
-        echo "   -> the build didn't produce a kernel for this GPU's architecture." >&2
-        echo "      Check TORCH_CUDA_ARCH_LIST=\"$TORCH_CUDA_ARCH_LIST\" matches this GPU, then set" >&2
-        echo "      FORCE_REBUILD_VLLM=true and rerun (in setup.sh - start.sh doesn't rebuild)." >&2
-    fi
-    if grep -qiE "Address already in use" "$logfile"; then
-        echo "   -> something else on the pod already owns port $PORT (RunPod's own nginx commonly" >&2
-        echo "      reserves 8001/3001/7861/8081/9091/7270 for its web terminal/template services)." >&2
-        echo "      Check with \`ss -ltnp\` on the pod and pick a free PORT." >&2
-    fi
-    if grep -qiE "Not enough free disk space|Disk quota exceeded" "$logfile"; then
-        echo "   -> ran out of disk space downloading/loading the model (it needs ~167GB)." >&2
-        echo "      Check HF_HOME points at /workspace and that the volume's quota actually allows it:" >&2
-        echo "      \`df -h /workspace\` and \`du -sh /workspace/*\`." >&2
-    fi
-}
-
-wait_for_health() {
-    local waited=0
-
-    echo "==> Waiting for $SERVER_NAME to become healthy (timeout ${HEALTH_TIMEOUT_SECONDS}s)"
-    until curl -sf "http://localhost:$PORT/health" >/dev/null 2>&1; do
-        if ! kill -0 "$(cat "$LOG_DIR/$SERVER_NAME.pid")" 2>/dev/null; then
-            echo "!! $SERVER_NAME process died during startup - last 50 log lines:" >&2
-            tail -n 30 "$LOG_DIR/$SERVER_NAME.log" >&2
-            _print_root_cause "$LOG_DIR/$SERVER_NAME.log"
-            _diagnose_known_failures "$LOG_DIR/$SERVER_NAME.log"
-            exit 1
-        fi
-        if [ "$waited" -ge "$HEALTH_TIMEOUT_SECONDS" ]; then
-            echo "!! $SERVER_NAME did not become healthy within ${HEALTH_TIMEOUT_SECONDS}s - last 50 log lines:" >&2
-            tail -n 30 "$LOG_DIR/$SERVER_NAME.log" >&2
-            _print_root_cause "$LOG_DIR/$SERVER_NAME.log"
-            _diagnose_known_failures "$LOG_DIR/$SERVER_NAME.log"
-            exit 1
-        fi
-        if [ $((waited % 60)) -eq 0 ] && [ "$waited" -gt 0 ]; then
-            echo "   ... still waiting on $SERVER_NAME (${waited}s elapsed) - last log line:"
-            tail -n 1 "$LOG_DIR/$SERVER_NAME.log"
-        fi
-        sleep 5
-        waited=$((waited + 5))
-    done
-    echo "==> $SERVER_NAME is healthy"
-}
-
-runpod_print_summary() {
-    cat <<EOF
-
-==> Endpoint is up and reporting /metrics:
-    url   : http://0.0.0.0:${PORT}/v1  (served-model-name: ${SERVED_NAME})
-    model : ${MODEL_REPO}  (native FP8, KV cache: ${KV_CACHE_DTYPE}, ctx: ${MAX_MODEL_LEN})
-    logs  : ${LOG_DIR}/${SERVER_NAME}.log
-    pid   : ${LOG_DIR}/${SERVER_NAME}.pid
-
-Register it with LLM-Hell via 'manage.py add-endpoint' using the tunnel
-address this pod is reachable on, and add it as a Prometheus scrape target
-in prometheus/prometheus.yml (metrics_path: /metrics).
-
-The model card recommends temperature 1.0 / top_p 0.95 for agentic use -
-those are client-side sampling params, so set them in opencode, not here.
-EOF
-}
+# shellcheck source=./lib_vllm.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/lib_vllm.sh"
