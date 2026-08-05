@@ -73,7 +73,7 @@ NVCC_THREADS=4                         # threads per individual nvcc invocation
 # Explicitly NOT the "-GGUF" repo: that one carries only llama.cpp GGUF
 # quants (IQ1..Q8, BF16 - no FP8 at all, 1.28TB for the full set), and
 # vLLM's GGUF path does not meaningfully support MoE models like this one.
-MODEL_REPO="unsloth/DeepSeek-V4-Flash-0731"
+MODEL_REPO="deepseek-ai/DeepSeek-V4-Flash-0731"
 SERVED_NAME="deepseek-v4-flash"
 # NOT 8001/3001/7861/8081/9091/7270: RunPod's own nginx (part of the pod's
 # base image, serving its web terminal and template services) already owns
