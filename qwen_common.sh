@@ -1,4 +1,4 @@
-# CONFIG for Qwen3.5-397B-A17B (AWQ INT4) on 4x RTX PRO 6000 Blackwell.
+# CONFIG for Qwen3.5-397B-A17B (AWQ INT4) on 8x RTX PRO 6000 Blackwell.
 # Sourced, not executed. Shares every function with the DeepSeek config via
 # lib_vllm.sh - only the values below differ.
 #
@@ -84,9 +84,16 @@ WEIGHTS_DESC="AWQ INT4"
 # vocab_size is 248320 = 2^9 * 5 * 97, so 1/2/4/5/8/... divide it and
 # 3/6/7 do not - vLLM shards the vocab embedding across the TP group and
 # asserts on a remainder at model-load time, long after startup.
-# TP=4 across all four GPUs: 248320/4 = 62080.
-GPUS="0,1,2,3"
-TP_SIZE=4
+# TP=8 across all eight GPUs: 248320/8 = 31040.
+#
+# Was TP=4 on GPUS="0,1,2,3" - that hung forever at startup with EngineCore
+# repeating "No available shared memory broadcast block found in 60
+# seconds", never reaching /health. A manually run `vllm serve` with the
+# identical flags EXCEPT --tensor-parallel-size 8 (all 8 GPUs) started
+# cleanly, so the TP=4 shape itself - not memory, not any flag above - is
+# what triggers the shm rendezvous hang on this pod.
+GPUS="0,1,2,3,4,5,6,7"
+TP_SIZE=8
 PP_SIZE=1
 # Left empty on purpose. The guide is explicit that the quant method is
 # auto-detected from the checkpoint ("do NOT add --quantization"), and
@@ -134,7 +141,11 @@ TOKENIZER_MODE="auto"
 # requirement.
 SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":2}'
 
-GPU_MEM_UTILIZATION=0.9
+# 0.93, not the guide's 0.9: matches the manual `vllm serve` invocation
+# that's confirmed working on this pod (all 8 GPUs, no extra NCCL env - see
+# below), and there's no reason to run a lower ceiling than what's already
+# proven to fit.
+GPU_MEM_UTILIZATION=0.93
 ENFORCE_EAGER=""
 
 # No 45-minute first-run JIT here (that was FlashInfer warming up for
@@ -145,28 +156,27 @@ STALL_WARN_SECONDS=240
 
 VLLM_ATTENTION_BACKEND_OVERRIDE=""
 
-# NOT NCCL_P2P_DISABLE=1. These GPUs talk over PCIe Gen5 with no NVLink,
-# and the guide's standard setting for that topology is
-# NCCL_P2P_LEVEL=SYS (see NCCL_EXTRA_ENV below) - it keeps P2P working at
-# system level instead of switching it off wholesale. Its Known Issues
-# section reaches for the same lever on deadlock: "Change NCCL_P2P_LEVEL=2
-# or disable P2P negotiation entirely", with full disabling as the last
-# resort rather than the default.
-#
-# That matters because disabling P2P outright routes every all-reduce
-# through host memory, and at TP=4 that happens on every layer of every
-# token. If startup hangs at "vLLM is using nccl==..." (wait_for_health
-# warns after STALL_WARN_SECONDS), fall back in this order:
+# Neither workaround is set. The guide (written for a 4-GPU, PCIe-Gen5,
+# no-NVLink shape) recommends NCCL_P2P_LEVEL=SYS as a matching default, but
+# on THIS pod (8 GPUs) that setting itself reproduced the TP=8 hang below -
+# a manual `vllm serve` with identical flags MINUS NCCL_P2P_LEVEL=SYS (and
+# minus the rest of NCCL_EXTRA_ENV) started and served cleanly. So: leave
+# NCCL on its defaults here. If a future pod's topology needs P2P tuning
+# again, fall back in this order rather than reaching for full disable
+# first (which routes every all-reduce through host memory - real cost at
+# every layer of every token, at any TP size):
 #   1. NCCL_EXTRA_ENV="NCCL_P2P_LEVEL=2"
 #   2. NCCL_P2P_DISABLE_WORKAROUND="1"   (the DeepSeek config's setting)
 NCCL_P2P_DISABLE_WORKAROUND=""
-NCCL_IB_DISABLE_WORKAROUND="1"
+NCCL_IB_DISABLE_WORKAROUND=""
 
 # Extra environment for the server process, applied verbatim as NAME=VALUE
-# pairs. NCCL_P2P_LEVEL=SYS is the guide's headline setting for this
-# hardware; SAFETENSORS_FAST_GPU speeds up loading ~228 GiB of weights;
-# OMP_NUM_THREADS caps a thread pool that otherwise oversubscribes the CPU.
-NCCL_EXTRA_ENV="NCCL_P2P_LEVEL=SYS SAFETENSORS_FAST_GPU=1 OMP_NUM_THREADS=8"
+# pairs. NCCL_P2P_LEVEL=SYS deliberately dropped - see the NCCL comment
+# above, it's what caused the TP=8 hang. SAFETENSORS_FAST_GPU speeds up
+# loading ~228 GiB of weights; OMP_NUM_THREADS caps a thread pool that
+# otherwise oversubscribes the CPU - neither touches NCCL/P2P negotiation,
+# so neither was implicated by the hang.
+NCCL_EXTRA_ENV="SAFETENSORS_FAST_GPU=1 OMP_NUM_THREADS=8"
 
 # Batching limits from the guide's vLLM command. They shape concurrency
 # rather than single-stream latency, which is where its 1,551 tok/s at 64
