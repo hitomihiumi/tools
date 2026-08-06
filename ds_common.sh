@@ -45,6 +45,7 @@ VLLM_GIT_REF="ds4-sm120-preview"       # branch/tag/commit to build
 # between the branches - the failing line numbers match the pinned version
 # exactly. Cloned --recursive on purpose: the cmake above compiles against
 # third-party/cutlass and third-party/fmt, which are submodules.
+USE_DEEPGEMM="true"                    # this model's MoE path calls into DeepGEMM; qwen_common.sh sets "false"
 DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
 DEEPGEMM_GIT_REF="nv_dev"
 DEEPGEMM_SRC_DIR="/workspace/deepgemm-src"
@@ -57,6 +58,14 @@ VLLM_WHEEL_DIR="/workspace/vllm-wheels" # built .whl is cached here across pod r
 # VLLM_WHEEL_DIR above), or they silently eat the root disk until something
 # fails with "Not enough free disk space" mid-load.
 HF_HOME="/workspace/hf-cache"
+MODEL_DISK_GIB=156                     # 166,886,535,336 bytes; setup.sh refuses to start the download without this much free
+# "false" UNINSTALLS hf_xet (HF_HUB_DISABLE_XET=1 alone was not reliable -
+# https://github.com/huggingface/huggingface_hub/issues/3266), forcing plain
+# HTTP. Kept off here because hf-xet failed reconstructing this checkpoint's
+# >15 GB shards: https://github.com/huggingface/xet-core/issues/763. Note
+# that on huggingface_hub 1.x this really does mean single-connection HTTP -
+# hf_transfer is gone, so the fallback is slow rather than merely different.
+HF_USE_XET="false"
 FORCE_REBUILD_VLLM="false"             # set true to rebuild even if a cached wheel exists
 TORCH_CUDA_ARCH_LIST="12.0"            # Blackwell (RTX PRO 6000) - add more (e.g. "8.9;9.0;12.0") if targeting other GPUs too
 MAX_JOBS="$(nproc)"                    # parallel compile jobs - lower this if the build OOMs on system RAM (not GPU memory)
@@ -75,6 +84,11 @@ NVCC_THREADS=4                         # threads per individual nvcc invocation
 # vLLM's GGUF path does not meaningfully support MoE models like this one.
 MODEL_REPO="deepseek-ai/DeepSeek-V4-Flash-0731"
 SERVED_NAME="deepseek-v4-flash"
+# Read only by the shared failure diagnostics in lib_vllm.sh.
+MODEL_ARCH="DeepseekV4ForCausalLM"
+MODEL_VOCAB_SIZE="129280 = 2^8 * 5 * 101"
+WEIGHTS_DESC="native FP8"
+SAMPLING_HINT="The model card recommends temperature 1.0 / top_p 0.95 for agentic use."
 # NOT 8001/3001/7861/8081/9091/7270: RunPod's own nginx (part of the pod's
 # base image, serving its web terminal and template services) already owns
 # all of those, and vLLM binding to one fails instantly with

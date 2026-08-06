@@ -209,6 +209,11 @@ _print_root_cause() {
 
 _diagnose_known_failures() {
     local logfile="$1"
+    # Every "edit the config" hint below has to name the config actually in
+    # use, not a hardcoded ds_common.sh - these messages are read by someone
+    # already confused about why their server died, and pointing them at the
+    # wrong model's file is worse than saying nothing.
+    local cfg="${CONFIG_FILE:-the model config}"
     # Patterns are deliberately specific (not bare words like "error" or
     # "not supported") - those match unrelated log noise.
      if grep -qiE "cannot import name .* from 'vllm|ImportError: cannot import name" "$logfile"; then
@@ -216,28 +221,28 @@ _diagnose_known_failures() {
         echo "      SM120 fork installed over a previous upstream install - the fork is based on an" >&2
         echo "      older vLLM, so symbols moved). Reinstalling alone doesn't fix it: files the new" >&2
         echo "      wheel doesn't overwrite survive. Remove the package directory outright, then" >&2
-        echo "      rerun ds_setup.sh (which now does this automatically):" >&2
+        echo "      rerun setup.sh (which now does this automatically):" >&2
         echo "        uv pip uninstall --system vllm; rm -rf /usr/local/lib/python3.12/dist-packages/vllm" >&2
     fi
     if grep -qiE "'NoneType' object is not iterable|missing \`RECORD\` file" "$logfile"; then
         echo "   -> some installed *.dist-info is corrupt (no METADATA), so its version reads as None" >&2
         echo "      and packaging's Version() raises TypeError while build checks dependencies. The" >&2
         echo "      uv warnings about \"Failed to uninstall ... missing RECORD file\" name the culprit." >&2
-        echo "      ds_setup.sh clears these automatically now; to do it by hand, delete the offending" >&2
+        echo "      setup.sh clears these automatically now; to do it by hand, delete the offending" >&2
         echo "      *.dist-info under /usr/local/lib/python3.12/dist-packages and rerun." >&2
     fi
     if grep -qiE "version of None already set|is shallow and may cause errors" "$logfile"; then
         echo "   -> setuptools-scm couldn't derive a version from this shallow, tagless checkout." >&2
-        echo "      ds_setup.sh pins SETUPTOOLS_SCM_PRETEND_VERSION for that; if it persists, delete" >&2
+        echo "      setup.sh pins SETUPTOOLS_SCM_PRETEND_VERSION for that; if it persists, delete" >&2
         echo "      $VLLM_SRC_DIR/vllm.egg-info and rerun with FORCE_REBUILD_VLLM=\"true\"." >&2
     fi
     if grep -qiE "KeyError: 'model\.layers\.[0-9]+\.mtp_block|mtp_block\." "$logfile"; then
         echo "   -> speculative MTP is on, but this vLLM build's MTP loader expects tensor names" >&2
-        echo "      (model.layers.N.mtp_block.*) that the released checkpoint doesn't use (mtp.0.hc_*)." >&2
-        echo "      Not fixable by config, and not specific to the unsloth copy - the deepseek-ai" >&2
-        echo "      checkpoint names them identically. Set SPECULATIVE_CONFIG=\"\" in ds_common.sh." >&2
+        echo "      (model.layers.N.mtp_block.*) that the checkpoint doesn't use. This bit DeepSeek V4" >&2
+        echo "      (whose shards name them mtp.0.hc_*) and is not fixable by config - speculative" >&2
+        echo "      decoding is an optimisation, so set SPECULATIVE_CONFIG=\"\" in $cfg and rerun." >&2
     fi
-    if grep -qiE "Unknown SF transformation|Unsupported architecture|deepgemm-src" "$logfile"; then
+    if [ "${USE_DEEPGEMM:-true}" = "true" ] && grep -qiE "Unknown SF transformation|Unsupported architecture|deepgemm-src" "$logfile"; then
         echo "   -> DeepGEMM was built without SM120 (RTX PRO 6000) support. The revision matters:" >&2
         echo "      the vLLM fork's default pin only handles arch_major 9 and 10, and aborts in" >&2
         echo "      layout.hpp (weight load) or hyperconnection.hpp (memory profiling)." >&2
@@ -249,34 +254,46 @@ _diagnose_known_failures() {
     if grep -qiE "larger than the maximum number of tokens|can be stored in KV cache|decrease max_model_len|To serve at least one request" "$logfile"; then
 
         echo "   -> the KV cache can't hold even ONE request at MAX_MODEL_LEN=$MAX_MODEL_LEN." >&2
-        echo "      This is the model's 1M-token ceiling, which needs far more cache than these GPUs" >&2
-        echo "      have left after ~167GB of weights. vLLM prints the exact GB it needs vs. has in the" >&2
-        echo "      line above - halve MAX_MODEL_LEN until it fits (262144 and 131072 are sane steps)." >&2
+        echo "      There is no room left for cache after ~${MODEL_DISK_GIB:-?} GiB of weights across these GPUs." >&2
+        echo "      vLLM prints the exact GB it needs vs. has in the line above - halve MAX_MODEL_LEN" >&2
+        echo "      in $cfg until it fits (262144, then 131072, are sane steps)." >&2
         echo "      Raising GPU_MEM_UTILIZATION barely helps; the gap here is usually large." >&2
+        if [ "${KV_CACHE_DTYPE:-auto}" = "auto" ]; then
+            echo "      KV_CACHE_DTYPE is \"auto\" (unquantized) - setting \"fp8_e4m3\" roughly halves the" >&2
+            echo "      cache and may be the cheaper fix than cutting context, if the model allows it." >&2
+        fi
     fi
     if grep -qiE "libnvptxcompiler|ptxas fatal|PTX JIT (failed|error)" "$logfile"; then
         echo "   -> looks like a FlashInfer/PTX-JIT compile failure." >&2
-        echo "      Try setting VLLM_ATTENTION_BACKEND_OVERRIDE=\"FLASH_ATTN\" at the top of common.sh and rerun." >&2
+        echo "      Try setting VLLM_ATTENTION_BACKEND_OVERRIDE=\"FLASH_ATTN\" in $cfg and rerun." >&2
     fi
     if grep -qiE "unrecognized model type|Model architectures .* are not supported" "$logfile"; then
-        echo "   -> this vLLM build may not know DeepseekV4ForCausalLM." >&2
-        echo "      It is supported on main - check VLLM_GIT_REF and the build log at $LOG_DIR/vllm-build.log," >&2
-        echo "      then set FORCE_REBUILD_VLLM=true to rebuild against a newer commit." >&2
+        echo "   -> this vLLM build may not know the architecture ${MODEL_ARCH:-this checkpoint declares}." >&2
+        echo "      Check VLLM_GIT_REPO/VLLM_GIT_REF in $cfg (currently $VLLM_GIT_REF) and the build" >&2
+        echo "      log at $LOG_DIR/vllm-build.log, then set FORCE_REBUILD_VLLM=true to rebuild" >&2
+        echo "      against a newer commit. Support for recent architectures usually lands on" >&2
+        echo "      upstream main first, so a fork pinned for another model can simply be too old." >&2
     fi
     if grep -qiE "invalid choice|unrecognized arguments" "$logfile"; then
-        echo "   -> vLLM rejected a CLI flag. Most likely TOOL_CALL_PARSER/REASONING_PARSER:" >&2
-        echo "      there is no deepseek_v4 parser, and the v3-era names in common.sh are the" >&2
-        echo "      closest available. Clear both to fall back to plain text output." >&2
+        echo "   -> vLLM rejected a CLI flag. Most likely TOOL_CALL_PARSER (\"${TOOL_CALL_PARSER:-}\") or" >&2
+        echo "      REASONING_PARSER (\"${REASONING_PARSER:-}\") naming a parser this build doesn't" >&2
+        echo "      register. Clear both in $cfg to fall back to plain text output; the error line" >&2
+        echo "      above lists the choices this build actually accepts." >&2
     fi
     if grep -qiE "is not divisible by" "$logfile"; then
-        echo "   -> TP_SIZE doesn't divide the model's vocab size (129280 = 2^8 * 5 * 101)." >&2
-        echo "      Valid values are 1/2/4/5/8/10/16...; 3, 6 and 7 are not." >&2
+        echo "   -> TP_SIZE=$TP_SIZE doesn't divide the model's vocab size (${MODEL_VOCAB_SIZE:-see the error above})." >&2
+        echo "      vLLM shards the vocab embedding evenly across the TP group, so only divisors work." >&2
+        echo "      Change TP_SIZE (and GPUS/PP_SIZE to match) in $cfg." >&2
     fi
     if grep -qiE "CUDA out of memory|OutOfMemoryError" "$logfile"; then
         echo "   -> GPU ran out of memory (weights + CUDA-graph buffers left no room for KV cache)." >&2
-        echo "      Lower MAX_MODEL_LEN (currently $MAX_MODEL_LEN - it's the model's 1M ceiling), or set" >&2
-        echo "      ENFORCE_EAGER=\"true\" to skip CUDA graph capture. Raising GPU_MEM_UTILIZATION won't" >&2
-        echo "      help - the crash is real physical VRAM pressure, not a too-conservative soft limit." >&2
+        echo "      Lower MAX_MODEL_LEN (currently $MAX_MODEL_LEN) in $cfg, or set ENFORCE_EAGER=\"true\"" >&2
+        echo "      to skip CUDA graph capture. Raising GPU_MEM_UTILIZATION won't help - the crash is" >&2
+        echo "      real physical VRAM pressure, not a too-conservative soft limit." >&2
+        if [ -n "${SPECULATIVE_CONFIG:-}" ]; then
+            echo "      SPECULATIVE_CONFIG is set - MTP keeps its own draft-model weights and KV cache" >&2
+            echo "      resident, so clearing it is another way to buy back memory." >&2
+        fi
     fi
     if grep -qiE "no kernel image is available|CUDA error: no kernel image" "$logfile"; then
         echo "   -> the build didn't produce a kernel for this GPU's architecture." >&2
@@ -289,9 +306,9 @@ _diagnose_known_failures() {
         echo "      Check with \`ss -ltnp\` on the pod and pick a free PORT." >&2
     fi
     if grep -qiE "Not enough free disk space|Disk quota exceeded" "$logfile"; then
-        echo "   -> ran out of disk space downloading/loading the model (it needs ~167GB)." >&2
+        echo "   -> ran out of disk space downloading/loading the model (it needs ~${MODEL_DISK_GIB:-?} GiB)." >&2
         echo "      Check HF_HOME points at /workspace and that the volume's quota actually allows it:" >&2
-        echo "      \`df -h /workspace\` and \`du -sh /workspace/*\`." >&2
+        echo "      \`df -h $HF_HOME\` and \`du -sh $HF_HOME/hub/*\`." >&2
     fi
 }
 
@@ -337,9 +354,12 @@ wait_for_health() {
                 echo "!! $SERVER_NAME has produced no new log output for ${stalled}s while still running." >&2
                 if printf '%s' "$current_line" | grep -qiE "using nccl==|pynccl"; then
                     echo "!! Stuck on NCCL init. On this pod's virtualized interconnect, P2P negotiation" >&2
-                    echo "!! stalls instead of failing over. Set NCCL_P2P_DISABLE_WORKAROUND=\"1\" in" >&2
-                    echo "!! ds_common.sh (currently \"$NCCL_P2P_DISABLE_WORKAROUND\") and restart -" >&2
-                    echo "!! no rebuild needed. Ctrl-C now rather than waiting out the timeout." >&2
+                    echo "!! stalls instead of failing over. Ctrl-C now rather than waiting out the" >&2
+                    echo "!! timeout, then in ${CONFIG_FILE:-the model config} try, in order (no rebuild needed):" >&2
+                    echo "!!   1. NCCL_EXTRA_ENV=\"NCCL_P2P_LEVEL=2\"      (currently \"${NCCL_EXTRA_ENV:-}\")" >&2
+                    echo "!!   2. NCCL_P2P_DISABLE_WORKAROUND=\"1\"        (currently \"${NCCL_P2P_DISABLE_WORKAROUND:-}\")" >&2
+                    echo "!! Step 2 routes every all-reduce through host memory, which at TP=$TP_SIZE costs" >&2
+                    echo "!! real throughput on every layer of every token - hence the ordering." >&2
                 else
                     echo "!! Not a known signature - inspect $LOG_DIR/$SERVER_NAME.log directly." >&2
                 fi
@@ -357,7 +377,7 @@ runpod_print_summary() {
 
 ==> Endpoint is up and reporting /metrics:
     url   : http://0.0.0.0:${PORT}/v1  (served-model-name: ${SERVED_NAME})
-    model : ${MODEL_REPO}  (native FP8, KV cache: ${KV_CACHE_DTYPE}, ctx: ${MAX_MODEL_LEN})
+    model : ${MODEL_REPO}  (${WEIGHTS_DESC:-weights}, KV cache: ${KV_CACHE_DTYPE}, ctx: ${MAX_MODEL_LEN})
     logs  : ${LOG_DIR}/${SERVER_NAME}.log
     pid   : ${LOG_DIR}/${SERVER_NAME}.pid
 
@@ -365,7 +385,7 @@ Register it with LLM-Hell via 'manage.py add-endpoint' using the tunnel
 address this pod is reachable on, and add it as a Prometheus scrape target
 in prometheus/prometheus.yml (metrics_path: /metrics).
 
-The model card recommends temperature 1.0 / top_p 0.95 for agentic use -
-those are client-side sampling params, so set them in opencode, not here.
+${SAMPLING_HINT:-Check the model card for its recommended sampling params.} These are
+client-side settings, so apply them in opencode, not here.
 EOF
 }

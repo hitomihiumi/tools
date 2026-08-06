@@ -58,8 +58,18 @@ runpod_kill_gpu_holders
 runpod_check_gpu_topology
 
 export HF_HOME
-export HF_HUB_ENABLE_HF_TRANSFER=1
-export HF_HUB_DISABLE_XET=1
+# The checkpoint is already on disk by the time we get here (checked above),
+# so this only governs whatever incidental hub fetch vLLM makes while
+# loading - but keep it in step with setup.sh's HF_USE_XET so the two
+# scripts can't disagree about which backend is even installed in the image.
+# HF_HUB_ENABLE_HF_TRANSFER is deliberately absent: huggingface_hub 1.x
+# ignores it and only prints a deprecation warning.
+if [ "${HF_USE_XET:-false}" = "true" ]; then
+    export HF_HUB_DISABLE_XET=0
+    export HF_XET_HIGH_PERFORMANCE=1
+else
+    export HF_HUB_DISABLE_XET=1
+fi
 
 start_vllm
 wait_for_health

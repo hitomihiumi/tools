@@ -20,21 +20,44 @@
 # exists for DeepSeek V4's sparse-MLA attention, which this model doesn't
 # use, and it trails upstream by enough that Qwen3.5 support is a gamble.
 # If the pod image already ships a vLLM that knows `qwen3_5_moe`, don't
-# build at all - use ds_start.sh, which never touches the build path.
+# build at all - use start.sh, which never touches the build path.
 VLLM_GIT_REPO="https://github.com/vllm-project/vllm.git"
 VLLM_GIT_REF="main"
-# Unused here (no DeepGEMM dependency for this model) but still referenced
-# by the shared build step, so keep them pointing somewhere harmless.
+# This model has no DeepGEMM dependency, so the shared build step skips the
+# clone/submodule/SM120-assert work entirely. That assert is a hard `exit 1`
+# on a DeepGEMM revision without an arch_major == 12 branch - failing the
+# Qwen build on a check for a library it never calls is pure downside, and
+# the clone alone (recursive, with cutlass) is minutes of nothing.
+USE_DEEPGEMM="false"
+# Still read by the shared build/diagnostic code even when the above is
+# "false", so keep them pointing somewhere harmless rather than unset.
 DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
 DEEPGEMM_GIT_REF="nv_dev"
 DEEPGEMM_SRC_DIR="/workspace/deepgemm-src"
 VLLM_SRC_DIR="/workspace/vllm-src"
 VLLM_WHEEL_DIR="/workspace/vllm-wheels"
-# ~228 GiB of weights (244,394,630,034 bytes) - noticeably more than the
-# guide's "~200GB" estimate, and more than DeepSeek V4's 167 GB. Check
-# `df -h /workspace` before starting: RunPod network volumes have a quota
-# well below the size shown in the dashboard.
 HF_HOME="/workspace/hf-cache"
+# ~228 GiB of weights (244,394,630,034 bytes) - noticeably more than the
+# guide's "~200GB" estimate, and more than DeepSeek V4's 167 GB. setup.sh
+# asserts this much is actually free on $HF_HOME's volume before starting
+# the download: RunPod network volumes have a usable quota well below the
+# size shown in the dashboard, and finding that out 200 GiB in costs hours.
+MODEL_DISK_GIB=228
+# Which backend `hf download` uses. huggingface_hub 1.x (what this pod's
+# image ships) dropped hf_transfer outright - HF_HUB_ENABLE_HF_TRANSFER now
+# only prints a deprecation warning and is ignored - so the real choice is
+# xet or a single-connection plain HTTP stream. 228 GiB over plain HTTP is
+# most of a day, so: xet.
+#
+# The DeepSeek config sets this to "false" because hf-xet used to fail
+# reconstructing >15 GB files ("File reconstruction error: ... receiver
+# dropped", "Background writer channel closed" -
+# https://github.com/huggingface/xet-core/issues/763). If that resurfaces
+# here, flip this to "false" and rerun - `hf download` resumes, it does not
+# restart. Note the two states are not symmetric: "true" INSTALLS hf_xet,
+# "false" UNINSTALLS it, because HF_HUB_DISABLE_XET=1 alone was not
+# reliable (https://github.com/huggingface/huggingface_hub/issues/3266).
+HF_USE_XET="true"
 FORCE_REBUILD_VLLM="false"
 TORCH_CUDA_ARCH_LIST="12.0"
 MAX_JOBS="$(nproc)"
@@ -50,6 +73,13 @@ NVCC_THREADS=4
 MODEL_REPO="QuantTrio/Qwen3.5-397B-A17B-AWQ"
 SERVED_NAME="qwen3.5"
 PORT=8000
+# Used only by the shared failure diagnostics in lib_vllm.sh, so that a
+# startup crash names THIS model's numbers instead of DeepSeek's. Getting
+# these wrong costs nothing at runtime but sends you down the wrong path
+# when something does break.
+MODEL_ARCH="qwen3_5_moe"
+MODEL_VOCAB_SIZE="248320 = 2^9 * 5 * 97"
+WEIGHTS_DESC="AWQ INT4"
 
 # vocab_size is 248320 = 2^9 * 5 * 97, so 1/2/4/5/8/... divide it and
 # 3/6/7 do not - vLLM shards the vocab embedding across the TP group and

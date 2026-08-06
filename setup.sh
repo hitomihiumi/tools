@@ -141,7 +141,14 @@ else
     # the build compiles against its cutlass/fmt submodules, and a
     # non-recursive clone fails later with missing headers rather than
     # anything that names the real problem.
-    if [ -d "$DEEPGEMM_SRC_DIR/.git" ]; then
+    #
+    # Skipped entirely for models that don't call into DeepGEMM (see
+    # USE_DEEPGEMM in the model config). It isn't just wasted clone time:
+    # the SM120 assert below is a hard exit, so leaving this on would let a
+    # DeepGEMM problem fail a build for a model that never touches it.
+    if [ "${USE_DEEPGEMM:-true}" != "true" ]; then
+        echo "==> Skipping DeepGEMM (USE_DEEPGEMM=\"${USE_DEEPGEMM:-}\" - this model doesn't use it)"
+    elif [ -d "$DEEPGEMM_SRC_DIR/.git" ]; then
         echo "==> Updating existing DeepGEMM checkout ($DEEPGEMM_GIT_REF)"
         git -C "$DEEPGEMM_SRC_DIR" remote set-url origin "$DEEPGEMM_GIT_REPO"
         git -C "$DEEPGEMM_SRC_DIR" fetch --depth 1 origin "$DEEPGEMM_GIT_REF"
@@ -152,16 +159,19 @@ else
         git clone --recursive --branch "$DEEPGEMM_GIT_REF" --depth 1 \
             "$DEEPGEMM_GIT_REPO" "$DEEPGEMM_SRC_DIR"
     fi
-    export DEEPGEMM_SRC_DIR
-    echo "==> DeepGEMM: $(git -C "$DEEPGEMM_SRC_DIR" rev-parse --short HEAD) from $DEEPGEMM_SRC_DIR"
+    if [ "${USE_DEEPGEMM:-true}" = "true" ]; then
+        export DEEPGEMM_SRC_DIR
+        echo "==> DeepGEMM: $(git -C "$DEEPGEMM_SRC_DIR" rev-parse --short HEAD) from $DEEPGEMM_SRC_DIR"
 
-    # Fail loudly here rather than 40 minutes into a compile: if these two
-    # architecture branches are missing, this is the wrong DeepGEMM revision
-    # and the build would reproduce the exact asserts we're fixing.
-    if ! grep -q "arch_major == 12" "$DEEPGEMM_SRC_DIR/csrc/apis/hyperconnection.hpp"; then
-        echo "!! $DEEPGEMM_SRC_DIR/csrc/apis/hyperconnection.hpp has no arch_major == 12 branch." >&2
-        echo "!! This DeepGEMM revision lacks SM120 support - check DEEPGEMM_GIT_REF (want: nv_dev)." >&2
-        exit 1
+        # Fail loudly here rather than 40 minutes into a compile: if these
+        # two architecture branches are missing, this is the wrong DeepGEMM
+        # revision and the build would reproduce the exact asserts we're
+        # fixing.
+        if ! grep -q "arch_major == 12" "$DEEPGEMM_SRC_DIR/csrc/apis/hyperconnection.hpp"; then
+            echo "!! $DEEPGEMM_SRC_DIR/csrc/apis/hyperconnection.hpp has no arch_major == 12 branch." >&2
+            echo "!! This DeepGEMM revision lacks SM120 support - check DEEPGEMM_GIT_REF (want: nv_dev)." >&2
+            exit 1
+        fi
     fi
 
     # --break-system-packages: fine on a throwaway pod rebuilt from the
@@ -298,25 +308,51 @@ if command -v hf >/dev/null 2>&1; then
 else
     uv pip install --system --break-system-packages huggingface_hub
 fi
-uv pip install --system --break-system-packages hf_transfer 2>/dev/null \
-    || echo "==> hf_transfer unavailable, continuing without it (downloads just run slower)"
 
 mkdir -p "$HF_HOME"
 export HF_HOME
-export HF_HUB_ENABLE_HF_TRANSFER=1
 
-# huggingface_hub now downloads through hf-xet (its new storage backend) by
-# default whenever it's installed, in preference to hf_transfer/plain HTTP -
-# and hf-xet is known to fail reconstructing large files (>15GB, which
-# every shard of these checkpoints exceeds) with errors like "File
-# reconstruction error: ... receiver dropped" or "Background writer channel
-# closed" (https://github.com/huggingface/xet-core/issues/763). Setting
-# HF_HUB_DISABLE_XET=1 is not reliable by itself (a huggingface_hub bug
-# still routes through xet regardless: https://github.com/huggingface/
-# huggingface_hub/issues/3266) - actually uninstalling the package is the
-# only fix confirmed to work, forcing a fall back to plain HTTP/hf_transfer.
-uv pip uninstall --system hf_xet 2>/dev/null || true
-export HF_HUB_DISABLE_XET=0
+# hf_transfer is deliberately neither installed nor enabled. huggingface_hub
+# 1.x removed it: HF_HUB_ENABLE_HF_TRANSFER now does nothing except print a
+# FutureWarning in front of every hub call, and this pod's image ships 1.x
+# (that warning is all over the download log). Unset it here too, since it
+# usually arrives inherited from the image or a previous shell and its only
+# remaining effect is burying the output that matters.
+unset HF_HUB_ENABLE_HF_TRANSFER
+
+# So with hf_transfer gone the download backend is xet or plain
+# single-connection HTTP - see HF_USE_XET in the model config for which one
+# this model wants and why. The two branches are NOT symmetric: enabling
+# means installing the package, disabling means uninstalling it, because
+# HF_HUB_DISABLE_XET=1 on its own was not reliable
+# (https://github.com/huggingface/huggingface_hub/issues/3266).
+#
+# This asymmetry is the whole reason for the branch. The previous version of
+# this block uninstalled hf_xet unconditionally while setting
+# HF_HUB_DISABLE_XET=0, so every run silently reinstated plain HTTP and
+# printed "Xet Storage is enabled for this repo, but the 'hf_xet' package is
+# not installed" - which reads like a broken install no amount of
+# `pip install hf_xet` could fix, since the next run removed it again.
+if [ "${HF_USE_XET:-false}" = "true" ]; then
+    echo "==> Download backend: hf-xet"
+    uv pip install --system --break-system-packages hf_xet
+    export HF_HUB_DISABLE_XET=0
+    export HF_XET_HIGH_PERFORMANCE=1
+else
+    echo "==> Download backend: plain HTTP (HF_USE_XET is not \"true\") - expect this to be slow"
+    uv pip uninstall --system --break-system-packages hf_xet 2>/dev/null || true
+    export HF_HUB_DISABLE_XET=1
+fi
+
+# Unauthenticated downloads get the Hub's lowest rate limits, and being
+# throttled partway through a ~100-file fetch looks like a random stall
+# rather than an error - so say which mode this run is in, up front.
+if [ -n "${HF_TOKEN:-}" ]; then
+    echo "==> HF_TOKEN is set - authenticated download"
+else
+    echo "==> HF_TOKEN not set - downloading unauthenticated (lowest rate limits)."
+    echo "    Export HF_TOKEN=... before running this script to avoid throttling."
+fi
 
 # One-time migration: earlier runs before HF_HOME pointed at /workspace may
 # have left partial/complete downloads under the default root-disk cache -
@@ -329,13 +365,31 @@ if [ -d "$stale_dir" ]; then
     rm -rf "$stale_dir"
 fi
 
-# ~167GB, and /workspace on RunPod is a network volume whose usable quota
-# can be well below the size shown in the dashboard - check before spending
-# an hour downloading into a wall.
+# /workspace on RunPod is a network volume whose usable quota can be well
+# below the size shown in the dashboard, and these checkpoints are large
+# enough (156 GiB for DeepSeek V4, 228 GiB for Qwen3.5) that running out
+# happens hours in, after the download has already been mostly paid for.
+# Assert rather than print: the old version only echoed `df` output, which
+# nobody reads while a script is scrolling past.
 echo "==> Free space on \$HF_HOME's volume before download:"
 df -h "$HF_HOME"
+# --output=avail -BG reports whole GiB for the filesystem holding a path,
+# without the guesswork of parsing `df -h`'s human-readable suffixes.
+avail_gib="$(df --output=avail -BG "$HF_HOME" | tail -n 1 | tr -dc '0-9')"
+# +10 GiB of headroom: `hf download` writes each shard to blobs/ and then
+# links it into snapshots/, and incomplete transfers land as .incomplete
+# files alongside, so peak usage runs above the final on-disk size.
+needed_gib=$((MODEL_DISK_GIB + 10))
+if [ -n "$avail_gib" ] && [ "$avail_gib" -lt "$needed_gib" ]; then
+    echo "!! Only ${avail_gib} GiB free on $HF_HOME, but $MODEL_REPO needs ~${MODEL_DISK_GIB} GiB (${needed_gib} GiB with headroom)." >&2
+    echo "!! Free space or attach a bigger volume before starting - running out mid-download wastes the whole transfer." >&2
+    echo "!!   du -sh $HF_HOME/hub/*        # what the cache is already holding" >&2
+    echo "!!   hf cache delete              # drop checkpoints you no longer serve" >&2
+    exit 1
+fi
+echo "==> ${avail_gib} GiB free, need ~${needed_gib} GiB - proceeding"
 
-echo "==> Downloading $MODEL_REPO (~167GB)"
+echo "==> Downloading $MODEL_REPO (~${MODEL_DISK_GIB} GiB)"
 hf download "$MODEL_REPO" 2>&1 | tee "$LOG_DIR/download.log"
 
 start_vllm
