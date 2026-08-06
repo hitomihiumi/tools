@@ -106,7 +106,25 @@ runpod_check_gpu_topology() {
 
 start_vllm() {
     echo "==> Starting $SERVER_NAME ($MODEL_REPO) on GPUs [$GPUS], port $PORT, max-model-len $MAX_MODEL_LEN"
-    
+
+    # vLLM's torch.compile cache (VLLM_CACHE_ROOT, default ~/.cache/vllm)
+    # and Triton's temp-file directory (TMPDIR, default /tmp) both land on
+    # the small root-disk overlay unless redirected - the exact same trap
+    # HF_HOME exists to avoid for model weights, just for a different set
+    # of libraries that don't share that env var. A compile at this
+    # max-model-len (hundreds of CUDA graph capture sizes) genuinely needs
+    # several GB of scratch space, which the ~30GB root disk does not
+    # reliably have once the OS image and installed packages are
+    # accounted for - confirmed by "OSError: No space left on device"
+    # under /root/.cache/vllm/torch_compile_cache and /tmp/*.ptx on a run
+    # that had HF_HOME set correctly and still failed here. Both are
+    # placed next to HF_HOME so they land on the same large volume.
+    local cache_root
+    cache_root="$(dirname "$HF_HOME")/vllm-cache"
+    mkdir -p "$cache_root/tmp"
+    export VLLM_CACHE_ROOT="$cache_root"
+    export TMPDIR="$cache_root/tmp"
+
     # Exported in an if-block rather than as `VAR="${WORKAROUND:+0}"` prefix
     # assignments like the NCCL ones below: vLLM reads these two through
     # int(os.getenv(...)), so handing it an empty string (what :+ expands to
@@ -309,6 +327,14 @@ _diagnose_known_failures() {
         echo "   -> ran out of disk space downloading/loading the model (it needs ~${MODEL_DISK_GIB:-?} GiB)." >&2
         echo "      Check HF_HOME points at /workspace and that the volume's quota actually allows it:" >&2
         echo "      \`df -h $HF_HOME\` and \`du -sh $HF_HOME/hub/*\`." >&2
+    fi
+    if grep -qiE "No space left on device.*(torch_compile_cache|\.cache/vllm|\.cache/triton|/tmp/tmp)" "$logfile"; then
+        echo "   -> the small root-disk overlay filled up, NOT \$HF_HOME's volume - this is vLLM's" >&2
+        echo "      torch.compile cache or Triton's temp files, which default to \$HOME/.cache and" >&2
+        echo "      /tmp respectively and don't follow HF_HOME. start_vllm() in lib_vllm.sh already" >&2
+        echo "      redirects both (VLLM_CACHE_ROOT, TMPDIR) to a vllm-cache/ dir next to HF_HOME -" >&2
+        echo "      if this still fires, check nothing upstream of start_vllm() unset those, and" >&2
+        echo "      \`df -h /\` to confirm the root disk (not /workspace) is what's actually full." >&2
     fi
 }
 
