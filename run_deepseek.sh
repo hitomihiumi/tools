@@ -14,7 +14,7 @@ MODEL="deepseek-ai/DeepSeek-V4-Flash-0731"
 SERVED_NAME="deepseek-v4-flash"
 PORT=8000
 GPUS="0,1,2,3"
-MAX_MODEL_LEN=343296
+MAX_MODEL_LEN=524288
 
 # On /workspace, not $HOME: a pod's home directory is on the ephemeral root
 # overlay and is wiped on restart. The venv is several GB and the checkpoint
