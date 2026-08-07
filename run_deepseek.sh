@@ -63,20 +63,14 @@ echo " 3/6  CUDA toolkit"
 echo "=============================================================="
 # Needed at RUNTIME, not to build anything: vLLM JIT-compiles FlashInfer,
 # DeepGEMM and Triton kernels on first use and calls nvcc to do it.
-if command -v nvcc >/dev/null 2>&1 || [ -x /usr/local/cuda/bin/nvcc ]; then
-    "$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)" --version | tail -1
-else
-    # Repo path comes from this image's own Ubuntu release; the guide's URL
-    # names its release, and using it elsewhere pulls packages built against
-    # the wrong glibc.
-    distro="$(. /etc/os-release && echo "${ID}${VERSION_ID}" | tr -d '.')"
-    echo "installing cuda-toolkit-13-3 for $distro"
-    curl -fsSL -o /tmp/cuda-keyring.deb \
-        "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
-    dpkg -i /tmp/cuda-keyring.deb
-    apt-get update -qq
-    apt-get install -y -qq cuda-toolkit-13-3
-fi
+distro="$(. /etc/os-release && echo "${ID}${VERSION_ID}" | tr -d '.')"
+echo "installing cuda-toolkit-13-3 for $distro"
+curl -fsSL -o /tmp/cuda-keyring.deb \
+    "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
+dpkg -i /tmp/cuda-keyring.deb
+apt-get update -qq
+apt-get install -y -qq cuda-toolkit-13-3
+
 export CUDA_HOME=/usr/local/cuda
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
