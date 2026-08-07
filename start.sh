@@ -33,8 +33,17 @@ if ! command -v vllm >/dev/null 2>&1; then
     echo "!! 'vllm' not found in $VENV_DIR - run setup.sh first." >&2
     exit 1
 fi
+
+# Clear the GPUs BEFORE printing the version: `vllm --version` imports the
+# whole package, and vLLM's platform detection queries CUDA during import.
+# With a previous run's workers still holding the devices that query can
+# block indefinitely, which reads as the script hanging on the version line.
+runpod_kill_gpu_holders
+
 echo "==> vLLM version:"
-vllm --version
+if ! timeout 300 vllm --version; then
+    echo "!! 'vllm --version' did not finish in 300s - continuing anyway." >&2
+fi
 
 # nvcc is a runtime dependency here, not a build one: vLLM JIT-compiles
 # FlashInfer/DeepGEMM/Triton kernels on first use. Warn rather than fail -
@@ -61,7 +70,7 @@ if [ ! -d "$model_dir/snapshots" ] || [ -z "$(find "$model_dir/snapshots" -minde
 fi
 echo "==> Checkpoint present"
 
-runpod_kill_gpu_holders
+# GPUs were already cleared above, before the vllm import.
 runpod_check_gpu_topology
 
 start_vllm

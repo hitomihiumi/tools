@@ -46,6 +46,12 @@ if [ "$(uname -m)" != "x86_64" ]; then
     exit 1
 fi
 
+# Before anything imports vllm, not just before the server starts: importing
+# the package runs platform detection that queries CUDA, and a previous
+# run's workers still holding the GPUs can make that block indefinitely -
+# which looks exactly like the script hanging on `vllm --version`.
+runpod_kill_gpu_holders
+
 # ---------------------------------------------------------------------------
 # CUDA toolkit
 # ---------------------------------------------------------------------------
@@ -108,8 +114,11 @@ fi
 # shellcheck disable=SC1091
 source "$VENV_DIR/bin/activate"
 
-if python -c "import vllm" 2>/dev/null && [ "$FORCE_REINSTALL_VLLM" != "true" ]; then
-    echo "==> vLLM already installed: $(python -c 'import vllm; print(vllm.__version__)')"
+# Bounded for the same reason as the version check below: this import is
+# not cheap and can block on a busy GPU. A timeout is treated as "not
+# installed", which at worst reinstalls something already present.
+if timeout 300 python -c "import vllm" 2>/dev/null && [ "$FORCE_REINSTALL_VLLM" != "true" ]; then
+    echo "==> vLLM already installed: $(timeout 300 python -c 'import vllm; print(vllm.__version__)' || echo unknown)"
 else
     echo "==> Installing vLLM${VLLM_VERSION:+==$VLLM_VERSION}"
     # --torch-backend=auto lets uv pick the torch build matching the driver
@@ -120,7 +129,14 @@ else
 fi
 
 echo "==> vLLM version:"
-vllm --version
+# Bounded: this imports the entire package (torch included) and probes the
+# GPU, which is slow on a cold cache and has hung outright when the devices
+# were still busy. A timeout here is informative, not fatal - the server
+# launch below is the real test.
+if ! timeout 300 vllm --version; then
+    echo "!! 'vllm --version' did not finish in 300s." >&2
+    echo "!! Usually means the GPUs are still busy - check \`nvidia-smi\`. Continuing anyway." >&2
+fi
 
 # ---------------------------------------------------------------------------
 # Model
@@ -145,7 +161,7 @@ hf download "$MODEL_REPO" 2>&1 | tee "$LOG_DIR/download.log"
 # ---------------------------------------------------------------------------
 # Launch
 # ---------------------------------------------------------------------------
-runpod_kill_gpu_holders
+# GPUs were already cleared at the top of this script.
 runpod_check_gpu_topology
 
 start_vllm
