@@ -1,29 +1,20 @@
 #!/usr/bin/env bash
-# Launches the vLLM server WITHOUT touching the build or download steps -
-# use this instead of setup.sh once vLLM is already installed and the
-# checkpoint is already fully downloaded (e.g. restarting after a pod
-# reboot, or after killing the server to free GPU memory for something
-# else). Re-running the full setup script every time re-verifies/re-fetches
-# things that are already sitting on disk for no benefit, and on a slow
-# connection or a flaky HF backend that's wasted time at best.
+# Launches the server WITHOUT installing or downloading anything - use this
+# once setup.sh has run on a pod. It is what you want after a pod restart:
+# the server runs as a plain nohup'd background process, so restarting the
+# pod kills it while leaving the venv and the checkpoint on /workspace
+# intact.
 #
-# This is the script to reach for after a RunPod restart: the servers run as
-# plain nohup'd background processes, not a service, so a pod restart kills
-# them while leaving /workspace (and therefore the checkpoint) intact.
+# Fails fast with a clear message rather than trying to fix anything itself
+# if the venv, vLLM or the checkpoint is missing - run setup.sh in that case.
 #
-# Fails fast with a clear message (rather than trying to download anything
-# itself) if vLLM isn't installed or the checkpoint isn't present - run
-# setup.sh first in that case.
-#
-# Usage: bash start.sh
+# Usage:
+#   bash start.sh                              # DeepSeek V4 Flash (default)
+#   CONFIG_FILE=qwen_common.sh bash start.sh   # a different model
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-# shellcheck source=./common.sh
-# Which model to serve. Defaults to the DeepSeek config so existing
-# invocations keep working; override to run a different model, e.g.
-#   CONFIG_FILE=qwen_common.sh bash ds_setup.sh
 CONFIG_FILE="${CONFIG_FILE:-ds_common.sh}"
 echo "==> Using config: $CONFIG_FILE"
 # shellcheck source=./ds_common.sh
@@ -31,35 +22,47 @@ source "$SCRIPT_DIR/$CONFIG_FILE"
 
 mkdir -p "$LOG_DIR"
 
-echo "==> Checking vLLM is installed"
-if ! command -v vllm >/dev/null 2>&1; then
-    echo "!! 'vllm' command not found - run setup.sh first to build/install it." >&2
+if [ ! -f "$VENV_DIR/bin/activate" ]; then
+    echo "!! No venv at $VENV_DIR - run setup.sh first." >&2
     exit 1
 fi
+# shellcheck disable=SC1091
+source "$VENV_DIR/bin/activate"
+
+if ! command -v vllm >/dev/null 2>&1; then
+    echo "!! 'vllm' not found in $VENV_DIR - run setup.sh first." >&2
+    exit 1
+fi
+echo "==> vLLM version:"
 vllm --version
 
-# The repo counts as "present" if it has at least one non-empty snapshot
-# directory under $HF_HOME - not a byte-for-byte completeness check (that's
-# what `hf download`'s own resume logic is for), just a fast, good-enough
-# signal that a full `hf download` already ran here before. Missing means it
-# definitely hasn't; present-but-partial (interrupted mid-download) is rare
-# enough, and cheap enough to catch via the health check failing below, that
-# it isn't worth re-implementing hf_hub's own manifest verification here.
-echo "==> Checking the checkpoint is already downloaded to \$HF_HOME ($HF_HOME)"
+# nvcc is a runtime dependency here, not a build one: vLLM JIT-compiles
+# FlashInfer/DeepGEMM/Triton kernels on first use. Warn rather than fail -
+# a pod that has already served this model once has its JIT cache warm and
+# may not touch nvcc again.
+export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+export PATH="$CUDA_HOME/bin:$PATH"
+export LD_LIBRARY_PATH="$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+if ! command -v nvcc >/dev/null 2>&1; then
+    echo "!! nvcc not on PATH - JIT kernel compilation will fail on a cold cache." >&2
+    echo "!! Run setup.sh to install the CUDA toolkit if startup errors out." >&2
+fi
+
+# The repo counts as present if it has a non-empty snapshot directory under
+# $HF_HOME. Not a byte-for-byte check - that is what `hf download`'s own
+# resume logic is for - just enough to tell "never downloaded" from "ready".
+echo "==> Checking the checkpoint is present in \$HF_HOME ($HF_HOME)"
+export HF_HOME
 model_dir="$HF_HOME/hub/models--${MODEL_REPO/\//--}"
 if [ ! -d "$model_dir/snapshots" ] || [ -z "$(find "$model_dir/snapshots" -mindepth 2 -type f -print -quit 2>/dev/null)" ]; then
-    echo "!! Not downloaded yet: $MODEL_REPO (looked in $model_dir)" >&2
-    echo "!! Run setup.sh first - it builds vLLM (if needed) and downloads the checkpoint." >&2
+    echo "!! Not downloaded: $MODEL_REPO (looked in $model_dir)" >&2
+    echo "!! Run setup.sh first." >&2
     exit 1
 fi
 echo "==> Checkpoint present"
 
 runpod_kill_gpu_holders
 runpod_check_gpu_topology
-
-export HF_HOME
-export HF_HUB_ENABLE_HF_TRANSFER=1
-export HF_HUB_DISABLE_XET=1
 
 start_vllm
 wait_for_health

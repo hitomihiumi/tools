@@ -56,50 +56,23 @@ runpod_kill_gpu_holders() {
     fi
 }
 
-runpod_clean_corrupt_dist_info() {
-    # A *.dist-info directory missing METADATA reports its version as None.
-    # `python -m build` walks installed distributions while checking build
-    # dependencies and feeds that None straight into packaging's Version(),
-    # which dies with:
-    #   TypeError: 'NoneType' object is not iterable
-    # - a failure that names neither the package nor the file responsible,
-    # and looks like it's about the package being built rather than an
-    # unrelated leftover. uv's recurring "Failed to uninstall package at
-    # ... due to missing `RECORD` file" warnings are the same corruption
-    # showing up earlier and being tolerated.
-    #
-    # These are remnants of interrupted installs. Deleting them is safe:
-    # a dist-info carries only metadata, and one this damaged already fails
-    # to describe whatever it once owned.
-    echo "==> Checking for corrupt dist-info directories"
-    local site_dir di found=0
-    for site_dir in /usr/local/lib/python3.12/dist-packages /usr/lib/python3/dist-packages; do
-        [ -d "$site_dir" ] || continue
-        for di in "$site_dir"/*.dist-info; do
-            [ -d "$di" ] || continue
-            if [ ! -f "$di/METADATA" ]; then
-                echo "   removing (no METADATA): $di"
-                rm -rf "$di"
-                found=$((found + 1))
-            fi
-        done
-    done
-    [ "$found" -eq 0 ] && echo "   none found"
-    return 0
-}
-
 runpod_check_gpu_topology() {
-    # tensor-parallel-size x pipeline-parallel-size must equal the number of
-    # GPUs handed to the server, or vLLM either errors immediately (TP too
-    # high for CUDA_VISIBLE_DEVICES) or silently leaves GPUs idle (TP*PP too
-    # low) - catch a mismatch here, in seconds, rather than after a long
-    # wait for the wrong outcome.
-    echo "==> Checking GPU topology (TP x PP vs GPU count)"
+    # tensor x pipeline x data parallel must equal the number of GPUs handed
+    # to the server, or vLLM either errors immediately (the product exceeds
+    # CUDA_VISIBLE_DEVICES) or silently leaves GPUs idle (product too low) -
+    # catch a mismatch here, in seconds, rather than after a long wait for
+    # the wrong outcome.
+    #
+    # DP is in the product because a data-parallel replica occupies its own
+    # GPU(s): DP=4 with TP=1 fills four GPUs just as TP=4 with DP=1 does.
+    # Defaulting DP to 1 keeps configs that never mention it working.
+    local dp="${DP_SIZE:-1}"
+    echo "==> Checking GPU topology (TP x PP x DP vs GPU count)"
     local gpu_count
     gpu_count="$(echo "$GPUS" | tr ',' '\n' | grep -c .)"
-    if [ "$((TP_SIZE * PP_SIZE))" -ne "$gpu_count" ]; then
-        echo "!! TP=$TP_SIZE x PP=$PP_SIZE = $((TP_SIZE * PP_SIZE)), but GPUS (\"$GPUS\") lists $gpu_count GPU(s)." >&2
-        echo "!! Fix the CONFIG block above - tensor-parallel-size x pipeline-parallel-size must equal the GPU count." >&2
+    if [ "$((TP_SIZE * PP_SIZE * dp))" -ne "$gpu_count" ]; then
+        echo "!! TP=$TP_SIZE x PP=$PP_SIZE x DP=$dp = $((TP_SIZE * PP_SIZE * dp)), but GPUS (\"$GPUS\") lists $gpu_count GPU(s)." >&2
+        echo "!! Fix the CONFIG block above - the product must equal the GPU count." >&2
         exit 1
     fi
 }
@@ -107,33 +80,12 @@ runpod_check_gpu_topology() {
 start_vllm() {
     echo "==> Starting $SERVER_NAME ($MODEL_REPO) on GPUs [$GPUS], port $PORT, max-model-len $MAX_MODEL_LEN"
     
-    # Exported in an if-block rather than as `VAR="${WORKAROUND:+0}"` prefix
-    # assignments like the NCCL ones below: vLLM reads these two through
-    # int(os.getenv(...)), so handing it an empty string (what :+ expands to
-    # when the workaround is off) raises ValueError instead of meaning
-    # "unset". They must be either "0" or genuinely absent.
-    if [ -n "${DISABLE_DEEP_GEMM_WORKAROUND:-}" ]; then
-        echo "    (DeepGEMM disabled - SM120 workaround, see vllm#47436)"
-        export VLLM_USE_DEEP_GEMM=0
-        export VLLM_MOE_USE_DEEP_GEMM=0
-    fi
-
-    # Same export-in-an-if reasoning as above: these are parsed as int/bool
-    # from the environment, so an empty string is not a safe "unset".
-    [ -n "${TRITON_MLA_SPARSE:-}" ] && export VLLM_TRITON_MLA_SPARSE="${TRITON_MLA_SPARSE:-}"
-    [ -n "${TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE:-}" ] && export VLLM_TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE="${TRITON_MLA_SPARSE_TOPK_CHUNK_SIZE:-}"
-    [ -n "${TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE:-}" ] && export VLLM_TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE="${TRITON_MLA_SPARSE_QUERY_CHUNK_SIZE:-}"
-    [ -n "${TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH:-}" ] && export VLLM_TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH="${TRITON_MLA_SPARSE_ALLOW_CUDAGRAPH:-}"
-    if [ -n "${TRITON_MLA_SPARSE:-}" ]; then
-        echo "    (Triton sparse-MLA enabled - requires the SM120 fork, no-op on upstream vLLM)"
-    fi
-
     # Free-form "NAME=VALUE NAME=VALUE" from the config, exported one at a
     # time. Deliberately not passed as a prefix assignment: those must be
     # literal text in the source to be recognised as assignments at all,
     # which is the same trap the NCCL_* lines below document.
-    if [ -n "${NCCL_EXTRA_ENV:-}" ]; then
-        for _kv in $NCCL_EXTRA_ENV; do
+    if [ -n "${EXTRA_ENV:-}" ]; then
+        for _kv in $EXTRA_ENV; do
             export "${_kv?}"
             echo "    (env: $_kv)"
         done
@@ -157,6 +109,9 @@ start_vllm() {
         --served-model-name "$SERVED_NAME" \
         --tensor-parallel-size "$TP_SIZE" \
         --pipeline-parallel-size "$PP_SIZE" \
+        ${DP_SIZE:+--data-parallel-size "${DP_SIZE:-}"} \
+        ${EXPERT_PARALLEL:+--enable-expert-parallel} \
+        ${DISABLE_CUSTOM_ALL_REDUCE:+--disable-custom-all-reduce} \
         ${QUANTIZATION:+--quantization "${QUANTIZATION:-}"} \
         --kv-cache-dtype "$KV_CACHE_DTYPE" \
         --block-size "$BLOCK_SIZE" \
@@ -229,7 +184,8 @@ _diagnose_known_failures() {
     if grep -qiE "version of None already set|is shallow and may cause errors" "$logfile"; then
         echo "   -> setuptools-scm couldn't derive a version from this shallow, tagless checkout." >&2
         echo "      ds_setup.sh pins SETUPTOOLS_SCM_PRETEND_VERSION for that; if it persists, delete" >&2
-        echo "      $VLLM_SRC_DIR/vllm.egg-info and rerun with FORCE_REBUILD_VLLM=\"true\"." >&2
+        echo "      Nothing is built from source any more, so this should not occur - if it does," >&2
+        echo "      the venv is likely half-installed: delete \$VENV_DIR and rerun setup.sh." >&2
     fi
     if grep -qiE "KeyError: 'model\.layers\.[0-9]+\.mtp_block|mtp_block\." "$logfile"; then
         echo "   -> speculative MTP is on, but this vLLM build's MTP loader expects tensor names" >&2
@@ -241,10 +197,9 @@ _diagnose_known_failures() {
         echo "   -> DeepGEMM was built without SM120 (RTX PRO 6000) support. The revision matters:" >&2
         echo "      the vLLM fork's default pin only handles arch_major 9 and 10, and aborts in" >&2
         echo "      layout.hpp (weight load) or hyperconnection.hpp (memory profiling)." >&2
-        echo "      Check DEEPGEMM_GIT_REF is \"nv_dev\" (currently \"$DEEPGEMM_GIT_REF\") and that" >&2
-        echo "      $DEEPGEMM_SRC_DIR was actually used, then rebuild with FORCE_REBUILD_VLLM=\"true\"." >&2
-        echo "      Note DISABLE_DEEP_GEMM_WORKAROUND does NOT avoid this - parts of the DeepSeek V4" >&2
-        echo "      path call DeepGEMM regardless of that env var." >&2
+        echo "      vLLM 0.26.0+ vendors DeepGEMM kernels that handle SM120, so an up-to-date" >&2
+        echo "      install should not hit this. Check the version (vllm --version) and try" >&2
+        echo "      FORCE_REINSTALL_VLLM=\"true\" to pull a newer one." >&2
     fi
     if grep -qiE "larger than the maximum number of tokens|can be stored in KV cache|decrease max_model_len|To serve at least one request" "$logfile"; then
 
@@ -260,8 +215,8 @@ _diagnose_known_failures() {
     fi
     if grep -qiE "unrecognized model type|Model architectures .* are not supported" "$logfile"; then
         echo "   -> this vLLM build may not know DeepseekV4ForCausalLM." >&2
-        echo "      It is supported on main - check VLLM_GIT_REF and the build log at $LOG_DIR/vllm-build.log," >&2
-        echo "      then set FORCE_REBUILD_VLLM=true to rebuild against a newer commit." >&2
+        echo "      Upgrade vLLM: set FORCE_REINSTALL_VLLM=\"true\" (optionally pin a newer" >&2
+        echo "      VLLM_VERSION) and rerun setup.sh." >&2
     fi
     if grep -qiE "invalid choice|unrecognized arguments" "$logfile"; then
         echo "   -> vLLM rejected a CLI flag. Most likely TOOL_CALL_PARSER/REASONING_PARSER:" >&2
@@ -280,8 +235,9 @@ _diagnose_known_failures() {
     fi
     if grep -qiE "no kernel image is available|CUDA error: no kernel image" "$logfile"; then
         echo "   -> the build didn't produce a kernel for this GPU's architecture." >&2
-        echo "      Check TORCH_CUDA_ARCH_LIST=\"$TORCH_CUDA_ARCH_LIST\" matches this GPU, then set" >&2
-        echo "      FORCE_REBUILD_VLLM=true and rerun (in setup.sh - start.sh doesn't rebuild)." >&2
+        echo "      The PyPI wheel should cover this GPU. Most likely torch does not match the" >&2
+        echo "      driver - reinstall with FORCE_REINSTALL_VLLM=\"true\" so uv re-resolves" >&2
+        echo "      --torch-backend=auto against it." >&2
     fi
     if grep -qiE "Address already in use" "$logfile"; then
         echo "   -> something else on the pod already owns port $PORT (RunPod's own nginx commonly" >&2

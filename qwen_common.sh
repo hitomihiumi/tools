@@ -3,8 +3,8 @@
 # lib_vllm.sh - only the values below differ.
 #
 # Use it in place of ds_common.sh:
-#   CONFIG_FILE=qwen_common.sh bash ds_setup.sh    # download + launch
-#   CONFIG_FILE=qwen_common.sh bash ds_start.sh    # launch only
+#   CONFIG_FILE=qwen_common.sh bash setup.sh    # download + launch
+#   CONFIG_FILE=qwen_common.sh bash start.sh    # launch only
 #
 # Values follow https://github.com/local-inference-lab/rtx6kpro
 # (models/qwen35-397b.md), a guide written against this exact GPU. Where a
@@ -15,30 +15,26 @@
 # CONFIG
 # ---------------------------------------------------------------------------
 
-# --- vLLM build ---
-# Upstream, NOT the jasl SM120 fork the DeepSeek config pins: that fork
-# exists for DeepSeek V4's sparse-MLA attention, which this model doesn't
-# use, and it trails upstream by enough that Qwen3.5 support is a gamble.
-# If the pod image already ships a vLLM that knows `qwen3_5_moe`, don't
-# build at all - use ds_start.sh, which never touches the build path.
-VLLM_GIT_REPO="https://github.com/vllm-project/vllm.git"
-VLLM_GIT_REF="main"
-# Unused here (no DeepGEMM dependency for this model) but still referenced
-# by the shared build step, so keep them pointing somewhere harmless.
-DEEPGEMM_GIT_REPO="https://github.com/deepseek-ai/DeepGEMM.git"
-DEEPGEMM_GIT_REF="nv_dev"
-DEEPGEMM_SRC_DIR="/workspace/deepgemm-src"
-VLLM_SRC_DIR="/workspace/vllm-src"
-VLLM_WHEEL_DIR="/workspace/vllm-wheels"
-# ~228 GiB of weights (244,394,630,034 bytes) - noticeably more than the
-# guide's "~200GB" estimate, and more than DeepSeek V4's 167 GB. Check
-# `df -h /workspace` before starting: RunPod network volumes have a quota
-# well below the size shown in the dashboard.
+# --- Install ---
+# Nothing is built from source: vLLM comes from PyPI into a venv. The whole
+# source-build apparatus that used to sit here (fork checkout, DeepGEMM,
+# wheel cache, TORCH_CUDA_ARCH_LIST/MAX_JOBS) existed to work around SM120
+# aborts that current vLLM handles on its own.
+VLLM_VERSION=""
+FORCE_REINSTALL_VLLM="false"
+# On /workspace, not ~: a RunPod pod's home is on the ephemeral root overlay
+# and is wiped on restart, which would mean reinstalling vLLM and torch
+# every time.
+VENV_DIR="/workspace/serving/.venv"
+VENV_PYTHON="3.12"
+# Runtime dependency, not a build one - vLLM JIT-compiles kernels on first
+# use and needs nvcc for it.
+CUDA_TOOLKIT_VERSION="13.3"
+# ~228 GiB of weights (244,394,630,034 bytes) - more than the guide's
+# "~200GB" estimate and more than DeepSeek V4's 167 GiB. Must live on
+# /workspace; check `df -h /workspace` first, since RunPod network volumes
+# have a quota well below the size shown in the dashboard.
 HF_HOME="/workspace/hf-cache"
-FORCE_REBUILD_VLLM="false"
-TORCH_CUDA_ARCH_LIST="12.0"
-MAX_JOBS="$(nproc)"
-NVCC_THREADS=4
 
 # --- Model ---
 # AWQ INT4, deliberately not the NVFP4 build the guide's own launch
@@ -76,7 +72,7 @@ KV_CACHE_DTYPE="auto"
 # YaRN rope_parameters block (factor 2.0 over the 262144 base) in a
 # separate directory - that is a checkpoint edit, not a flag, so it is out
 # of scope here. Raising this number alone would not work.
-MAX_MODEL_LEN=262144
+MAX_MODEL_LEN=100000
 # vLLM's default (16). The 256 in the DeepSeek config came from that
 # model's card specifically; nothing in this guide asks for it, and a large
 # block size mainly pays off at million-token contexts.
@@ -117,7 +113,7 @@ VLLM_ATTENTION_BACKEND_OVERRIDE=""
 
 # NOT NCCL_P2P_DISABLE=1. These GPUs talk over PCIe Gen5 with no NVLink,
 # and the guide's standard setting for that topology is
-# NCCL_P2P_LEVEL=SYS (see NCCL_EXTRA_ENV below) - it keeps P2P working at
+# NCCL_P2P_LEVEL=SYS (see EXTRA_ENV below) - it keeps P2P working at
 # system level instead of switching it off wholesale. Its Known Issues
 # section reaches for the same lever on deadlock: "Change NCCL_P2P_LEVEL=2
 # or disable P2P negotiation entirely", with full disabling as the last
@@ -127,16 +123,28 @@ VLLM_ATTENTION_BACKEND_OVERRIDE=""
 # through host memory, and at TP=4 that happens on every layer of every
 # token. If startup hangs at "vLLM is using nccl==..." (wait_for_health
 # warns after STALL_WARN_SECONDS), fall back in this order:
-#   1. NCCL_EXTRA_ENV="NCCL_P2P_LEVEL=2"
+#   1. EXTRA_ENV="NCCL_P2P_LEVEL=2"
 #   2. NCCL_P2P_DISABLE_WORKAROUND="1"   (the DeepSeek config's setting)
 NCCL_P2P_DISABLE_WORKAROUND=""
 NCCL_IB_DISABLE_WORKAROUND="1"
 
 # Extra environment for the server process, applied verbatim as NAME=VALUE
-# pairs. NCCL_P2P_LEVEL=SYS is the guide's headline setting for this
-# hardware; SAFETENSORS_FAST_GPU speeds up loading ~228 GiB of weights;
-# OMP_NUM_THREADS caps a thread pool that otherwise oversubscribes the CPU.
-NCCL_EXTRA_ENV="NCCL_P2P_LEVEL=SYS SAFETENSORS_FAST_GPU=1 OMP_NUM_THREADS=8"
+# pairs.
+#   NCCL_P2P_LEVEL=SYS   the guide's headline setting for this PCIe topology
+#   SAFETENSORS_FAST_GPU speeds up loading ~228 GiB of weights
+#   OMP_NUM_THREADS      caps a pool that otherwise oversubscribes the CPU
+#   VLLM_CACHE_ROOT      see below
+#
+# VLLM_CACHE_ROOT defaults to ~/.cache/vllm, which on a RunPod pod lives on
+# the ephemeral root overlay - so torch.compile's output is thrown away on
+# every pod restart and the multi-minute compile runs again from scratch.
+# Startup logs it as repeated "No available shared memory broadcast block
+# found in 60 seconds ... doing some time-consuming work (e.g. compilation)"
+# right after a "Dynamo bytecode transform time" line. Pointing it at
+# /workspace makes that cost one-time, exactly like HF_HOME above. (The
+# guide gets the same effect by mounting a `jit-cache` docker volume.)
+EXTRA_ENV="NCCL_P2P_LEVEL=SYS OMP_NUM_THREADS=8 VLLM_CACHE_ROOT=/workspace/vllm-cache"
+
 
 # Batching limits from the guide's vLLM command. They shape concurrency
 # rather than single-stream latency, which is where its 1,551 tok/s at 64
