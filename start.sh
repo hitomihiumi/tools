@@ -63,7 +63,12 @@ fi
 echo "==> Checking the checkpoint is present in \$HF_HOME ($HF_HOME)"
 export HF_HOME
 model_dir="$HF_HOME/hub/models--${MODEL_REPO/\//--}"
-if [ ! -d "$model_dir/snapshots" ] || [ -z "$(find "$model_dir/snapshots" -mindepth 2 -type f -print -quit 2>/dev/null)" ]; then
+# -type f alone is wrong here: the HF cache stores snapshot entries as
+# SYMLINKS into ../../blobs/, and -type f does not match symlinks - so a
+# fully downloaded model was reported as missing. Accept either, since all
+# we need to know is whether anything was ever fetched.
+if [ ! -d "$model_dir/snapshots" ] ||
+   [ -z "$(find "$model_dir/snapshots" -mindepth 2 \( -type f -o -type l \) -print -quit 2>/dev/null)" ]; then
     echo "!! Not downloaded: $MODEL_REPO (looked in $model_dir)" >&2
     echo "!! Run setup.sh first." >&2
     exit 1
