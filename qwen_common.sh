@@ -1,4 +1,4 @@
-# CONFIG for Qwen3.5-397B-A17B (AWQ INT4) on 4x RTX PRO 6000 Blackwell.
+# CONFIG for Qwen3.5-397B-A17B (AWQ INT4) on 8x RTX PRO 6000 Blackwell.
 # Sourced, not executed. Shares every function with the DeepSeek config via
 # lib_vllm.sh - only the values below differ.
 #
@@ -46,13 +46,27 @@ HF_HOME="/workspace/hf-cache"
 MODEL_REPO="QuantTrio/Qwen3.5-397B-A17B-AWQ"
 SERVED_NAME="qwen3.5"
 PORT=8000
+# Used only by the shared failure diagnostics in lib_vllm.sh, so that a
+# startup crash names THIS model's numbers instead of DeepSeek's. Getting
+# these wrong costs nothing at runtime but sends you down the wrong path
+# when something does break.
+MODEL_ARCH="qwen3_5_moe"
+MODEL_VOCAB_SIZE="248320 = 2^9 * 5 * 97"
+WEIGHTS_DESC="AWQ INT4"
 
 # vocab_size is 248320 = 2^9 * 5 * 97, so 1/2/4/5/8/... divide it and
 # 3/6/7 do not - vLLM shards the vocab embedding across the TP group and
 # asserts on a remainder at model-load time, long after startup.
-# TP=4 across all four GPUs: 248320/4 = 62080.
-GPUS="0,1,2,3"
-TP_SIZE=4
+# TP=8 across all eight GPUs: 248320/8 = 31040.
+#
+# Was TP=4 on GPUS="0,1,2,3" - that hung forever at startup with EngineCore
+# repeating "No available shared memory broadcast block found in 60
+# seconds", never reaching /health. A manually run `vllm serve` with the
+# identical flags EXCEPT --tensor-parallel-size 8 (all 8 GPUs) started
+# cleanly, so the TP=4 shape itself - not memory, not any flag above - is
+# what triggers the shm rendezvous hang on this pod.
+GPUS="0,1,2,3,4,5,6,7"
+TP_SIZE=8
 PP_SIZE=1
 # Left empty on purpose. The guide is explicit that the quant method is
 # auto-detected from the checkpoint ("do NOT add --quantization"), and
@@ -100,7 +114,11 @@ TOKENIZER_MODE="auto"
 # requirement.
 SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":2}'
 
-GPU_MEM_UTILIZATION=0.9
+# 0.93, not the guide's 0.9: matches the manual `vllm serve` invocation
+# that's confirmed working on this pod (all 8 GPUs, no extra NCCL env - see
+# below), and there's no reason to run a lower ceiling than what's already
+# proven to fit.
+GPU_MEM_UTILIZATION=0.93
 ENFORCE_EAGER=""
 
 # No 45-minute first-run JIT here (that was FlashInfer warming up for
@@ -126,7 +144,7 @@ VLLM_ATTENTION_BACKEND_OVERRIDE=""
 #   1. EXTRA_ENV="NCCL_P2P_LEVEL=2"
 #   2. NCCL_P2P_DISABLE_WORKAROUND="1"   (the DeepSeek config's setting)
 NCCL_P2P_DISABLE_WORKAROUND=""
-NCCL_IB_DISABLE_WORKAROUND="1"
+NCCL_IB_DISABLE_WORKAROUND=""
 
 # Extra environment for the server process, applied verbatim as NAME=VALUE
 # pairs.
