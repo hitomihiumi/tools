@@ -139,10 +139,11 @@ export CUDA_VISIBLE_DEVICES="$GPUS"
 # drop - they are the only flags here the linked report does not use.
 exec vllm serve "$MODEL" \
     --served-model-name "$SERVED_NAME" \
-    --tool-call-parser deepseek_v4 --reasoning-parser deepseek_v4 --enable-auto-tool-choice \
+    ---tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 --reasoning-parser deepseek_v4 --enable-auto-tool-choice \
     --data-parallel-size 4 \
     --enable-expert-parallel \
     --disable-custom-all-reduce \
+    --default-chat-template-kwargs '{"enable_thinking": true}' \
     --kv-cache-dtype fp8 \
     --block-size 256 \
     --trust-remote-code \
