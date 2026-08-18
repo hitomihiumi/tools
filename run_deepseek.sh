@@ -14,6 +14,7 @@ MODEL="deepseek-ai/DeepSeek-V4-Flash-0731"
 SERVED_NAME="deepseek-v4-flash"
 PORT=8000
 GPUS="0,1,2,3"
+GPU_COUNT=4
 MAX_MODEL_LEN=524288
 
 # On /workspace, not $HOME: a pod's home directory is on the ephemeral root
@@ -63,6 +64,7 @@ echo " 3/6  CUDA toolkit"
 echo "=============================================================="
 # Needed at RUNTIME, not to build anything: vLLM JIT-compiles FlashInfer,
 # DeepGEMM and Triton kernels on first use and calls nvcc to do it.
+for f in /etc/apt/sources.list.d/*; do case "$f" in *cuda-ubuntu2404-x86_64.list) continue;; esac; grep -ql "nvidia.com/compute/cuda" "$f" 2>/dev/null && mv "$f" "$f.disabled" && echo "disabled $f"; done; sed -i '\|nvidia\.com/compute/cuda|s|^|#|' /etc/apt/sources.list; apt-get update -qq && echo "apt OK"
 distro="$(. /etc/os-release && echo "${ID}${VERSION_ID}" | tr -d '.')"
 echo "installing cuda-toolkit-13-3 for $distro"
 curl -fsSL -o /tmp/cuda-keyring.deb \
@@ -105,6 +107,7 @@ python -c "import vllm; print('vllm', vllm.__version__)"
 echo "=============================================================="
 echo " 5/6  Model"
 echo "=============================================================="
+mkdir -p "$HF_HOME"
 command -v hf >/dev/null 2>&1 || uv pip install huggingface_hub
 df -h "$HF_HOME" | tail -1
 # Resumes and no-ops if already complete.
@@ -140,7 +143,7 @@ export CUDA_VISIBLE_DEVICES="$GPUS"
 exec vllm serve "$MODEL" \
     --served-model-name "$SERVED_NAME" \
     --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 --reasoning-parser deepseek_v4 --enable-auto-tool-choice \
-    --data-parallel-size 4 \
+    --data-parallel-size "$GPU_COUNT" \
     --enable-expert-parallel \
     --disable-custom-all-reduce \
     --default-chat-template-kwargs '{"enable_thinking": true}' \
