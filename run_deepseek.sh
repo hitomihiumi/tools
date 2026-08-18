@@ -17,6 +17,12 @@ GPUS="0,1,2,3"
 GPU_COUNT=4
 MAX_MODEL_LEN=524288
 
+# Which torch build to install. "auto" resolves it from the driver, which is
+# right when it works; override when it does not - the step below says so
+# explicitly rather than leaving you to guess.
+#   TORCH_BACKEND=cu129 bash run_deepseek.sh
+TORCH_BACKEND="${TORCH_BACKEND:-auto}"
+
 # On /workspace, not $HOME: a pod's home directory is on the ephemeral root
 # overlay and is wiped on restart. The venv is several GB and the checkpoint
 # is ~167 GiB - neither is worth re-fetching every time.
@@ -96,14 +102,60 @@ fi
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 
-python -c "import torch,sys; c=torch.cuda.get_device_capability(); sys.exit(0 if f'sm_{c[0]}{c[1]}' in torch.cuda.get_arch_list() else 1)"
-if ! python -c "import vllm" 2>/dev/null; then
+# Whether this venv can actually run on THIS GPU - not merely whether vLLM
+# is importable.
+#
+# `import vllm` alone was the old condition, and it is not evidence. The venv
+# lives on /workspace so it survives pod restarts and pod moves, and a torch
+# built without kernels for the current card persists happily inside it. The
+# import succeeds, the install is skipped, and the failure surfaces much
+# later as the first kernel launch on the device:
+#
+#   torch.AcceleratorError: CUDA error: no kernel image is available
+#
+# which arrives at `torch.zeros(1, device=...)` inside nccl setup and reads
+# like a distributed-comms problem rather than a packaging one.
+#
+# The architecture is read off the device rather than hardcoded, so this
+# stays correct on whatever card the pod happens to have. Any failure -
+# torch absent, vllm absent, CUDA unavailable - means "not ready", so the
+# same condition covers the empty-venv case without erroring under `set -e`.
+gpu_ready() {
+    python - <<'PY' 2>/dev/null
+import sys
+try:
+    import torch
+    import vllm  # noqa: F401
+except Exception:
+    sys.exit(1)
+try:
+    major, minor = torch.cuda.get_device_capability()
+except Exception:
+    sys.exit(1)
+sys.exit(0 if f"sm_{major}{minor}" in torch.cuda.get_arch_list() else 1)
+PY
+}
+
+if ! gpu_ready; then
     # --torch-backend=auto picks the torch build matching this driver.
     # Hand-picking a CUDA-suffixed wheel is what previously left the wrong
     # torch installed and produced "SM 12.x requires CUDA >= 12.9".
-    uv pip install vllm --torch-backend=auto
+    uv pip install --reinstall vllm --torch-backend="$TORCH_BACKEND"
+
+    # Verify rather than assume. Without this the script proceeds to spend
+    # twenty minutes loading a 167 GiB checkpoint before discovering that
+    # the very first kernel launch cannot run.
+    if ! gpu_ready; then
+        echo ""
+        echo "!! torch still has no kernels for this GPU after installing with"
+        echo "!!   --torch-backend=$TORCH_BACKEND"
+        python -c "import torch; print('   installed:', torch.__version__, 'cuda', torch.version.cuda); print('   arch list:', torch.cuda.get_arch_list()); print('   this GPU :', 'sm_%d%d' % torch.cuda.get_device_capability())" || true
+        echo "!! Re-run with an explicit backend, e.g.  TORCH_BACKEND=cu129 bash $0"
+        echo "!! (sm_120 / Blackwell needs a CUDA >= 12.9 build.)"
+        exit 1
+    fi
 fi
-python -c "import vllm; print('vllm', vllm.__version__)"
+python -c "import vllm, torch; print('vllm', vllm.__version__, '| torch', torch.__version__, '| arch', torch.cuda.get_arch_list())"
 
 echo "=============================================================="
 echo " 5/6  Model"
