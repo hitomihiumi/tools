@@ -96,6 +96,7 @@ fi
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 
+python -c "import torch,sys; c=torch.cuda.get_device_capability(); sys.exit(0 if f'sm_{c[0]}{c[1]}' in torch.cuda.get_arch_list() else 1)"
 if ! python -c "import vllm" 2>/dev/null; then
     # --torch-backend=auto picks the torch build matching this driver.
     # Hand-picking a CUDA-suffixed wheel is what previously left the wrong
