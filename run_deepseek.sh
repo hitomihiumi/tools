@@ -20,7 +20,7 @@ MAX_MODEL_LEN=524288
 # Which torch build to install. "auto" resolves it from the driver, which is
 # right when it works; override when it does not - the step below says so
 # explicitly rather than leaving you to guess.
-#   TORCH_BACKEND=cu129 bash run_deepseek.sh
+#   TORCH_BACKEND=cu130 bash run_deepseek.sh
 TORCH_BACKEND="${TORCH_BACKEND:-auto}"
 
 # On /workspace, not $HOME: a pod's home directory is on the ephemeral root
@@ -150,8 +150,8 @@ if ! gpu_ready; then
         echo "!! torch still has no kernels for this GPU after installing with"
         echo "!!   --torch-backend=$TORCH_BACKEND"
         python -c "import torch; print('   installed:', torch.__version__, 'cuda', torch.version.cuda); print('   arch list:', torch.cuda.get_arch_list()); print('   this GPU :', 'sm_%d%d' % torch.cuda.get_device_capability())" || true
-        echo "!! Re-run with an explicit backend, e.g.  TORCH_BACKEND=cu129 bash $0"
-        echo "!! (sm_120 / Blackwell needs a CUDA >= 12.9 build.)"
+        echo "!! Re-run with an explicit backend, e.g.  TORCH_BACKEND=cu130 bash $0"
+        echo "!! (sm_120 / Blackwell needs a CUDA 13.x build - cu130 matches this driver.)"
         exit 1
     fi
 fi
