@@ -10,18 +10,11 @@
 
 set -euo pipefail
 
-MODEL="deepseek-ai/DeepSeek-V4-Flash-0731"
+MODEL="lovesenko/DeepSeek-V4-Flash-0731-Abliterated"
 SERVED_NAME="deepseek-v4-flash"
 PORT=8000
 GPUS="0,1,2,3"
-GPU_COUNT=4
 MAX_MODEL_LEN=524288
-
-# Which torch build to install. "auto" resolves it from the driver, which is
-# right when it works; override when it does not - the step below says so
-# explicitly rather than leaving you to guess.
-#   TORCH_BACKEND=cu130 bash run_deepseek.sh
-TORCH_BACKEND="${TORCH_BACKEND:-auto}"
 
 # On /workspace, not $HOME: a pod's home directory is on the ephemeral root
 # overlay and is wiped on restart. The venv is several GB and the checkpoint
@@ -70,14 +63,93 @@ echo " 3/6  CUDA toolkit"
 echo "=============================================================="
 # Needed at RUNTIME, not to build anything: vLLM JIT-compiles FlashInfer,
 # DeepGEMM and Triton kernels on first use and calls nvcc to do it.
-for f in /etc/apt/sources.list.d/*; do case "$f" in *cuda-ubuntu2404-x86_64.list) continue;; esac; grep -ql "nvidia.com/compute/cuda" "$f" 2>/dev/null && mv "$f" "$f.disabled" && echo "disabled $f"; done; sed -i '\|nvidia\.com/compute/cuda|s|^|#|' /etc/apt/sources.list; apt-get update -qq && echo "apt OK"
+CUDA_WANT="13.3"
+
+# Duplicate NVIDIA apt sources make EVERY apt command fail, purge included:
+#   E: Conflicting values set for option Signed-By regarding source
+#      .../cuda/repos/ubuntu2404/x86_64/ : /usr/share/keyrings/cuda-archive-keyring.gpg !=
+#   E: The list of sources could not be read.
+# These images often ship the CUDA repo added the old apt-key way (no
+# Signed-By), and installing cuda-keyring adds a second entry for the same
+# repo WITH Signed-By. apt refuses to pick between them. Keep the keyring
+# package's own file and disable any other entry for that repo.
+cuda_fix_apt_sources() {
+    local distro="$1" canonical="/etc/apt/sources.list.d/cuda-${distro}-x86_64.list"
+    local f changed=0
+    while IFS= read -r f; do
+        [ "$f" = "$canonical" ] && continue
+        if [ "$f" = "/etc/apt/sources.list" ]; then
+            # Never disable the whole file - comment out just the cuda lines.
+            sed -i '\|developer\.download\.nvidia\.com/compute/cuda|s|^|#|' "$f"
+            echo "  commented out CUDA lines in $f"
+        else
+            mv "$f" "$f.disabled"
+            echo "  disabled duplicate source: $f -> $f.disabled"
+        fi
+        changed=1
+    done < <(grep -rl "developer\.download\.nvidia\.com/compute/cuda" \
+                 /etc/apt/sources.list /etc/apt/sources.list.d/ 2>/dev/null \
+             | grep -v '\.disabled$' || true)
+    [ "$changed" -eq 0 ] && echo "  no duplicate NVIDIA apt sources"
+    return 0
+}
+
 distro="$(. /etc/os-release && echo "${ID}${VERSION_ID}" | tr -d '.')"
-echo "installing cuda-toolkit-13-3 for $distro"
-curl -fsSL -o /tmp/cuda-keyring.deb \
-    "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
-dpkg -i /tmp/cuda-keyring.deb
-apt-get update -qq
-apt-get install -y -qq cuda-toolkit-13-3
+echo "checking apt sources for duplicate NVIDIA repos"
+cuda_fix_apt_sources "$distro"
+
+
+cuda_installed_version() {
+    local nvcc
+    nvcc="$(command -v nvcc || echo /usr/local/cuda/bin/nvcc)"
+    [ -x "$nvcc" ] || return 1
+    # "Cuda compilation tools, release 13.0, V13.0.88" -> 13.0
+    "$nvcc" --version 2>/dev/null | sed -n 's/.*release \([0-9][0-9]*\.[0-9][0-9]*\).*/\1/p' | head -1
+}
+
+current="$(cuda_installed_version || true)"
+
+# sort -V puts the lower version first; if that is the wanted one, the
+# installed toolkit is at least as new and there is nothing to do.
+if [ -n "$current" ] && [ "$(printf '%s\n%s\n' "$CUDA_WANT" "$current" | sort -V | head -1)" = "$CUDA_WANT" ]; then
+    echo "CUDA toolkit $current already installed (>= $CUDA_WANT), keeping it"
+else
+    if [ -n "$current" ]; then
+        echo "CUDA toolkit $current is older than $CUDA_WANT - removing it first"
+        # Toolkit packages ONLY. Driver packages are excluded deliberately:
+        # on these pods the driver comes from the host, and removing it would
+        # take the GPUs away entirely - something no reinstall here could undo.
+        mapfile -t to_purge < <(
+            dpkg-query -W -f='${Package}\n' 2>/dev/null \
+            | grep -E '^(cuda-toolkit|cuda-compiler|cuda-command-line-tools|cuda-nvcc|cuda-cudart|cuda-libraries|cuda-nvtx|cuda-nvml-dev|cuda-nvprof|cuda-cccl|cuda-crt|cuda-nvdisasm|cuda-nvvm|cuda-profiler|cuda-sanitizer|cuda-documentation|cuda-nsight|cuda-gdb|libcublas|libcufft|libcurand|libcusolver|libcusparse|libnpp|libnvjitlink|libnvjpeg|libcufile)' \
+            | grep -vE 'nvidia-driver|libnvidia-(compute|gl|decode|encode|extra|cfg|common)|cuda-drivers' || true
+        )
+        if [ "${#to_purge[@]}" -gt 0 ]; then
+            printf '  purging: %s\n' "${to_purge[@]}"
+            apt-get purge -y -qq "${to_purge[@]}" || true
+            apt-get autoremove -y -qq || true
+        else
+            echo "  no CUDA toolkit apt packages found - it was probably installed"
+            echo "  from a runfile, so /usr/local/cuda-$current is left in place"
+        fi
+        # The /usr/local/cuda symlink survives a purge and would keep pointing
+        # at the version just removed, so nvcc lookups resolve to nothing.
+        [ -L /usr/local/cuda ] && rm -f /usr/local/cuda
+    fi
+
+    echo "installing cuda-toolkit-${CUDA_WANT//./-} for $distro"
+    curl -fsSL -o /tmp/cuda-keyring.deb \
+        "https://developer.download.nvidia.com/compute/cuda/repos/${distro}/x86_64/cuda-keyring_1.1-1_all.deb"
+    dpkg -i /tmp/cuda-keyring.deb
+    apt-get update -qq
+    apt-get install -y -qq "cuda-toolkit-${CUDA_WANT//./-}"
+
+    # A fresh install can leave the generic symlink missing (we may have just
+    # deleted it above), which breaks CUDA_HOME below.
+    if [ ! -e /usr/local/cuda ] && [ -d "/usr/local/cuda-${CUDA_WANT}" ]; then
+        ln -sfn "/usr/local/cuda-${CUDA_WANT}" /usr/local/cuda
+    fi
+fi
 
 export CUDA_HOME=/usr/local/cuda
 export PATH="$CUDA_HOME/bin:$PATH"
@@ -102,65 +174,17 @@ fi
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 
-# Whether this venv can actually run on THIS GPU - not merely whether vLLM
-# is importable.
-#
-# `import vllm` alone was the old condition, and it is not evidence. The venv
-# lives on /workspace so it survives pod restarts and pod moves, and a torch
-# built without kernels for the current card persists happily inside it. The
-# import succeeds, the install is skipped, and the failure surfaces much
-# later as the first kernel launch on the device:
-#
-#   torch.AcceleratorError: CUDA error: no kernel image is available
-#
-# which arrives at `torch.zeros(1, device=...)` inside nccl setup and reads
-# like a distributed-comms problem rather than a packaging one.
-#
-# The architecture is read off the device rather than hardcoded, so this
-# stays correct on whatever card the pod happens to have. Any failure -
-# torch absent, vllm absent, CUDA unavailable - means "not ready", so the
-# same condition covers the empty-venv case without erroring under `set -e`.
-gpu_ready() {
-    python - <<'PY' 2>/dev/null
-import sys
-try:
-    import torch
-    import vllm  # noqa: F401
-except Exception:
-    sys.exit(1)
-try:
-    major, minor = torch.cuda.get_device_capability()
-except Exception:
-    sys.exit(1)
-sys.exit(0 if f"sm_{major}{minor}" in torch.cuda.get_arch_list() else 1)
-PY
-}
-
-if ! gpu_ready; then
+if ! python -c "import vllm" 2>/dev/null; then
     # --torch-backend=auto picks the torch build matching this driver.
     # Hand-picking a CUDA-suffixed wheel is what previously left the wrong
     # torch installed and produced "SM 12.x requires CUDA >= 12.9".
-    uv pip install --reinstall vllm --torch-backend="$TORCH_BACKEND"
-
-    # Verify rather than assume. Without this the script proceeds to spend
-    # twenty minutes loading a 167 GiB checkpoint before discovering that
-    # the very first kernel launch cannot run.
-    if ! gpu_ready; then
-        echo ""
-        echo "!! torch still has no kernels for this GPU after installing with"
-        echo "!!   --torch-backend=$TORCH_BACKEND"
-        python -c "import torch; print('   installed:', torch.__version__, 'cuda', torch.version.cuda); print('   arch list:', torch.cuda.get_arch_list()); print('   this GPU :', 'sm_%d%d' % torch.cuda.get_device_capability())" || true
-        echo "!! Re-run with an explicit backend, e.g.  TORCH_BACKEND=cu130 bash $0"
-        echo "!! (sm_120 / Blackwell needs a CUDA 13.x build - cu130 matches this driver.)"
-        exit 1
-    fi
+    uv pip install vllm --torch-backend=auto
 fi
-python -c "import vllm, torch; print('vllm', vllm.__version__, '| torch', torch.__version__, '| arch', torch.cuda.get_arch_list())"
+python -c "import vllm; print('vllm', vllm.__version__)"
 
 echo "=============================================================="
 echo " 5/6  Model"
 echo "=============================================================="
-mkdir -p "$HF_HOME"
 command -v hf >/dev/null 2>&1 || uv pip install huggingface_hub
 df -h "$HF_HOME" | tail -1
 # Resumes and no-ops if already complete.
@@ -195,11 +219,10 @@ export CUDA_VISIBLE_DEVICES="$GPUS"
 # drop - they are the only flags here the linked report does not use.
 exec vllm serve "$MODEL" \
     --served-model-name "$SERVED_NAME" \
-    --tokenizer-mode deepseek_v4 --tool-call-parser deepseek_v4 --reasoning-parser deepseek_v4 --enable-auto-tool-choice \
-    --data-parallel-size "$GPU_COUNT" \
+    --tool-call-parser deepseek_v4 --reasoning-parser deepseek_v4 --enable-auto-tool-choice \
+    --data-parallel-size 4 \
     --enable-expert-parallel \
     --disable-custom-all-reduce \
-    --default-chat-template-kwargs '{"enable_thinking": true}' \
     --kv-cache-dtype fp8 \
     --block-size 256 \
     --trust-remote-code \
