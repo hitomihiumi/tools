@@ -409,6 +409,14 @@ uv --version
 if [ ! -d "$VENV" ]; then
     uv venv --python 3.12 --seed --managed-python "$VENV"
 fi
+# The venv is on $WORK and survives a pod restart; the Python it links to is
+# under ~/.local/share/uv on the container disk and does not. Put the same
+# version back rather than rebuild 8 GB of packages.
+if [ ! -x "$VENV/bin/python" ]; then
+    py_ver="$(sed -n 's/^version_info *= *//p' "$VENV/pyvenv.cfg")"
+    echo "the venv's Python ${py_ver:-?} is gone (pod restart?) - reinstalling it"
+    uv python install "${py_ver:-3.12}"
+fi
 # shellcheck disable=SC1091
 source "$VENV/bin/activate"
 
@@ -416,23 +424,54 @@ source "$VENV/bin/activate"
 # Glimmer": the architecture is new (its config was written by
 # transformers 5.15.0.dev0), and an older transformers imports fine and only
 # fails at from_pretrained with "model type muse_glimmer not recognized".
-env_ready() {
-    python - <<'PY' 2>/dev/null
+#
+# The exit code says what is wrong, because the fixes differ:
+#   2  something does not import         -> (re)install the packages
+#   3  transformers lacks muse_glimmer   -> transformers from main
+#   4  torch has no kernels for this GPU -> another torch build
+#   5  a read from the volume failed     -> nothing to install: $WORK is a
+#      network volume and it hiccuped; end this attempt and let the
+#      supervisor rerun it. Reinstalling here once swapped a working
+#      transformers 5.17 for a dev build from main.
+env_state() {
+    python - <<'PY'
 import sys
+IO = ("No such device or address", "Input/output error", "Stale file handle",
+      "Transport endpoint is not connected", "Connection timed out")
 try:
     import torch, peft, accelerate, safetensors, PIL, requests, jinja2  # noqa: F401
-    from transformers import AutoConfig
+    from transformers import AutoConfig  # noqa: F401
     from transformers.models.auto.modeling_auto import MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES
-except Exception:
-    sys.exit(1)
+except Exception as e:
+    msg = f"{type(e).__name__}: {e}"
+    print("  env:", msg)
+    sys.exit(5 if any(s in msg for s in IO) else 2)
 if "muse_glimmer" not in MODEL_FOR_IMAGE_TEXT_TO_TEXT_MAPPING_NAMES:
-    sys.exit(1)
-major, minor = torch.cuda.get_device_capability()
-sys.exit(0 if f"sm_{major}{minor}" in torch.cuda.get_arch_list() else 1)
+    import transformers
+    print("  env: transformers", transformers.__version__, "does not know muse_glimmer")
+    sys.exit(3)
+try:
+    major, minor = torch.cuda.get_device_capability()
+except Exception as e:
+    print(f"  env: torch {torch.__version__} cannot use the GPU: {type(e).__name__}: {e}")
+    sys.exit(4)
+if f"sm_{major}{minor}" not in torch.cuda.get_arch_list():
+    print(f"  env: torch {torch.__version__} has no sm_{major}{minor} kernels")
+    sys.exit(4)
 PY
 }
+env_rc() {
+    local rc=0
+    env_state || rc=$?
+    if [ "$rc" -eq 5 ]; then
+        echo "!! reading the venv on $WORK failed (network volume) - not reinstalling; this attempt ends here"
+        exit 1
+    fi
+    return "$rc"
+}
 
-if ! env_ready; then
+rc=0; env_rc || rc=$?
+if [ "$rc" -ne 0 ]; then
     # torch from the CUDA line picked in step 2; the PyTorch index directly if
     # this uv does not know that backend name.
     uv pip install torch torchvision --torch-backend="$TORCH_BACKEND" \
@@ -442,11 +481,13 @@ if ! env_ready; then
     # take transformers from main just below.
     uv pip install -r "$HERE/requirements.txt" \
         || uv pip install -r <(grep -v '^transformers' "$HERE/requirements.txt")
-    if ! env_ready; then
+    rc=0; env_rc || rc=$?
+    if [ "$rc" -eq 3 ]; then
         echo "  no released transformers knows muse_glimmer - installing from main"
         uv pip install "git+https://github.com/huggingface/transformers.git"
+        rc=0; env_rc || rc=$?
     fi
-    if ! env_ready; then
+    if [ "$rc" -ne 0 ]; then
         echo "!! The environment is still not usable:"
         python - <<'PY' || true
 import torch, transformers
@@ -500,6 +541,62 @@ echo "keyframes: $n_frames"
 # A copy on the container's own disk takes a few minutes and ~3 GB and
 # takes the network out of the loop. The container disk is wiped with the
 # pod, so the copy is redone after a restart; the original stays on $WORK.
+# Copy SRC_ROOT/SUBDIR... to DST_ROOT. Not cp: one failed read there fails
+# the whole copy. Each file is retried, lands under a temporary name and is
+# renamed only once its size matches, and files copied by an earlier attempt
+# are skipped - so a later attempt finishes what this one could not.
+copy_retried() {
+    python - "$@" <<'PY'
+import os, shutil, sys, time
+src_root, dst_root, *subdirs = sys.argv[1:]
+
+def retried(what, fn, tries=8):
+    delay = 2
+    for attempt in range(1, tries + 1):
+        try:
+            return fn()
+        except OSError as e:
+            if attempt == tries:
+                print(f"  giving up on {what}: {e}", flush=True)
+                raise
+            print(f"  {what}: {e} - retry {attempt}/{tries - 1} in {delay}s", flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+
+def copy_file(src, dst):
+    size = os.stat(src).st_size
+    if os.path.exists(dst) and os.path.getsize(dst) == size:
+        return 0
+    part = dst + ".part"
+    with open(src, "rb") as fi, open(part, "wb") as fo:
+        shutil.copyfileobj(fi, fo, 1 << 20)
+    if os.path.getsize(part) != size:
+        raise OSError(f"copied {os.path.getsize(part)} of {size} bytes")
+    os.replace(part, dst)
+    return 1
+
+copied = 0
+try:
+    for sub in subdirs:
+        stack = [sub]
+        while stack:
+            rel = stack.pop()
+            src = os.path.join(src_root, rel)
+            os.makedirs(os.path.join(dst_root, rel), exist_ok=True)
+            for entry in retried(src, lambda: list(os.scandir(src))):
+                r = os.path.join(rel, entry.name)
+                if entry.is_dir():
+                    stack.append(r)
+                else:
+                    copied += retried(entry.path,
+                                      lambda: copy_file(entry.path, os.path.join(dst_root, r)))
+except OSError:
+    print(f"  copied {copied} files this time, stopped on a read that kept failing", flush=True)
+    sys.exit(1)
+print(f"  copied {copied} files", flush=True)
+PY
+}
+
 RUN_DATA="$DATA"
 fs_of() { df --output=target "$1" 2>/dev/null | tail -1; }
 if [ "$LOCAL_DATA" = "off" ]; then
@@ -513,25 +610,26 @@ else
     if [ "$(fs_of "$parent")" = "$(fs_of "$DATA")" ]; then
         echo "keyframes are already on the disk $LOCAL_DATA would be on - no copy"
     else
+        # What is already in a partial copy from an earlier attempt is kept.
         need_mb="$( { du -sm "$DATA/labelframes" "$DATA/annotations" 2>/dev/null || true; } \
                     | awk '{s += $1} END {print s + 2048}')"
+        have_mb="$( { du -sm "$LOCAL_DATA.tmp" 2>/dev/null || true; } | awk '{s += $1} END {print s + 0}')"
         free_mb="$(df -BM --output=avail "$parent" | tail -1 | tr -dc '0-9')"
-        if [ "$free_mb" -lt "$need_mb" ]; then
+        if [ "$((free_mb + have_mb))" -lt "$need_mb" ]; then
             echo "!! ${free_mb} MB free under $parent, ${need_mb} MB needed for a local copy -"
             echo "!! reading keyframes from $DATA (reads there are retried)"
         else
             echo "copying keyframes to the local disk: $LOCAL_DATA"
-            rm -rf "$LOCAL_DATA" "$LOCAL_DATA.tmp"
-            mkdir -p "$LOCAL_DATA.tmp"
-            if cp -r "$DATA/annotations" "$DATA/labelframes" "$LOCAL_DATA.tmp/" \
+            rm -rf "$LOCAL_DATA"
+            if copy_retried "$DATA" "$LOCAL_DATA.tmp" annotations labelframes \
                && [ "$(find "$LOCAL_DATA.tmp/labelframes" -name '*.jpg' | wc -l)" = "$n_frames" ]; then
                 echo "$n_frames" > "$LOCAL_DATA.tmp/.complete"
                 mv "$LOCAL_DATA.tmp" "$LOCAL_DATA"
                 RUN_DATA="$LOCAL_DATA"
                 echo "  done: $(du -sh "$LOCAL_DATA" | cut -f1)"
             else
-                echo "!! copy failed - reading keyframes from $DATA (reads there are retried)"
-                rm -rf "$LOCAL_DATA.tmp"
+                echo "!! copy not finished - reading keyframes from $DATA for now (reads there"
+                echo "!! are retried); the next attempt continues the copy"
             fi
         fi
     fi
