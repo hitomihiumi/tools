@@ -1,0 +1,32 @@
+{
+  "run_date": "2026-09-25T14:49:43+03:00",
+  "model": "muse-glimmer",
+  "model_repo": "RedHatAI/Muse-Glimmer-30B-FP8-block",
+  "quantization": null,
+  "vllm_version": "0.30.0",
+  "server": {
+    "base_url": "http://127.0.0.1:8000",
+    "served_model_id": "muse-glimmer",
+    "model_root": "RedHatAI/Muse-Glimmer-30B-FP8-block",
+    "max_model_len": 131072,
+    "vllm_version": "0.30.0"
+  },
+  "temperature": 0.0,
+  "seed": 0,
+  "max_tokens": 4096,
+  "render_mode": "marked",
+  "min_width": 0,
+  "frames": 1,
+  "span": 0.0,
+  "max_width": 1920,
+  "prompt_sha": "187aec380cb8",
+  "prompt": "You are looking at a single still frame from a fixed surveillance camera in a dairy barn.\n\nExactly one cow is outlined with a bright green rectangle. Judge only that cow. Ignore every other animal in the frame.\n\nReport two things about the outlined cow.\n\nposture - exactly one of:\n  standing  the cow carries its weight on its legs, body upright\n  lying     the cow's body rests on the stall bed or the floor\n\nactivity - exactly one of:\n  feeding     the head is down at the feed barrier or in the feed alley, eating or reaching for feed\n  drinking    the head is over or inside a water trough\n  ruminating  chewing cud while not at feed and not at water; the jaw works sideways, head up or resting\n  none        none of the three above can be seen\n\nBoth fields are independent: a lying cow can be ruminating, a standing cow can be feeding.\n\nAnswer with JSON only.",
+  "annotations": "annotations\\ava_val_v2.1.csv",
+  "videos": "341, 344, 345, 346, 347, 348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367, 370, 371, 372, 373, 374, 375, 376, 377, 378, 379, 380, 381, 382, 383, 384, 385, 386, 387, 388, 389, 390, 391, 392, 393, 394",
+  "excluded": [
+    {
+      "id": "382_00005_ece9b588",
+      "reason": "2 posture labels, 0 activity labels: stand, lying down"
+    }
+  ]
+}

@@ -68,11 +68,51 @@ to grade against, so it is dropped before the run and listed in the report.
 ```bash
 pip install -r requirements.txt
 
-python cowbench.py plan   --video 371        # -> out/manifest.jsonl
+python cowbench.py plan  --clips 10          # -> out/manifest.jsonl
 python cowbench.py run                       # -> out/results.jsonl
-python cowbench.py score                     # -> out/metrics.json
+python cowbench.py score --vote              # -> out/metrics-voted.json
 python cowbench.py report                    # -> out/report.md
 ```
+
+Sample **whole clips** (`--clips`), not individual boxes (`--limit`). Per-clip
+exact-match error runs from 0% to 100% across the 50 val clips, so the clip is
+the unit the variance lives in; and a random subset of boxes shreds the tracks
+`--vote` depends on — 4% coverage on a 300-box sample against 92% on a 10-clip
+one.
+
+## Free accuracy: voting over the track
+
+The same cow is boxed on up to six keyframes of a clip, one second apart. The
+annotation gives no animal identity, but the camera is fixed and overlap links
+the boxes — and the labels confirm the links, staying constant along 98% of the
+tracks for posture and 91% for activity.
+
+So the model answers the same question up to six times. At temperature 0 the
+disagreements are not sampling noise but per-frame difficulty: an animal walking
+through, an awkward moment. `score --vote` replaces each answer with the
+majority over its track and throws those away. On the full val split:
+
+```
+exact-match error   30.8%  ->  28.4%
+posture error        9.8%  ->   8.9%
+activity error      25.6%  ->  23.5%
+        412 tracks, 123 fixed / 52 broken, McNemar p = 8e-8
+```
+
+No extra model calls — it is post-processing over `results.jsonl`.
+
+## Comparing two runs
+
+```bash
+python cowbench.py compare --a runs/<baseline> --b runs/<variant>
+```
+
+Paired McNemar over the shared ids, not two error rates side by side. The runs
+answer the same cows, so only the examples that changed carry information about
+the difference, and a few hundred examples cannot resolve a few points any
+other way. It is what showed that five frames of video did not help: the
+apparent doubling of `lying` recall was the model shifting its threshold
+(7 -> 17 `lying` answers) while standing recall fell, net p = 1.000.
 
 Clip **371** is the default target: 120 boxes (over the 100 minimum) from a
 single clip, and the only val clip containing all five classes —
@@ -98,7 +138,8 @@ data URLs. Clip 371 needs six JPEGs, about 440 KiB each after the downscale.
 |---|---|---|
 | `--mode` | `marked` | `marked` keeps the scene; `crop` makes the cow bigger but hides the trough, and `drinking` vs `feeding` is decided by what the head is over. `both` sends two images and lets the report separate "cannot see the cow" from "cannot read the scene". |
 | `--frames` / `--span` | `1` / `2.0` | `>1` decodes from the mp4 instead of the keyframe; see above |
-| `--max-width` | `1280` | downscale before encoding; trades image tokens against small-cow visibility. Boxes in clip 371 are 0.8–5.8% of the frame, none under 40px on a side after the downscale |
+| `--max-width` | `1920` | the keyframes' native width, i.e. no downscale. Measured against 1280 on 300 paired examples: 21 fixed, 10 broken, and the gain falls off monotonically with box size — the model was short of pixels on distant cows |
+| `--min-width` | off | enlarge images narrower than this. A crop of a distant cow is ~113x130px, a few dozen patches for the vision encoder; upscaling adds no information but spends more patches on it, which is the only way to ask for a close look at something small |
 | `--temperature` | `0.0` | with `seed=0`, reruns are comparable |
 | `--max-tokens` | `4096` | Muse Glimmer reasons before answering and reasons longer with more images. At 2048 a five-frame request is truncated mid-thought and returns nothing; on `finish_reason: length` the client retries once at double the budget |
 | `--concurrency` | `4` | vLLM batches these; raise it if the GPU is idle |

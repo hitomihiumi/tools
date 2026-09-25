@@ -79,7 +79,7 @@ def load_frames(video_path: str, timestamp: int, count: int, span: float):
 
 
 def render(frame_path, box_xyxy, mode: str = "marked",
-           max_width: int = 1280, margin: float = 0.3):
+           max_width: int = 1280, margin: float = 0.3, min_width: int = 0):
     """Render one example.
 
     marked - the whole frame with the target cow outlined. Keeps the scene
@@ -113,6 +113,14 @@ def render(frame_path, box_xyxy, mode: str = "marked",
     if img.width > max_width:
         height = round(img.height * max_width / img.width)
         img = img.resize((max_width, height), Image.LANCZOS)
+    elif min_width and img.width < min_width:
+        # Upscaling adds no information, and that is not the point. A crop of a
+        # distant cow comes out ~190x110 px, which the vision encoder turns into
+        # a few dozen patches - too coarse to carry a jaw. Enlarging spends more
+        # patches on the same pixels, which is the only way to ask the model to
+        # look closely at something small.
+        height = round(img.height * min_width / img.width)
+        img = img.resize((min_width, height), Image.LANCZOS)
     return img
 
 

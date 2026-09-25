@@ -36,6 +36,7 @@ import compare as compare_mod
 import render as render_mod
 import report as report_mod
 import scoring
+import tracks as tracks_mod
 
 DEFAULT_ROOT = r"C:\Users\Work\Downloads\archive"
 DEFAULT_OUT = "out"
@@ -70,6 +71,15 @@ def cmd_plan(args):
     usable, rejected = cbvd.partition(boxes)
 
     wanted = set(args.video or [])
+    if args.clips:
+        # Sample whole clips, not boxes. Two reasons, both measured: per-clip
+        # exact-match error runs 0-100%, so the clip is the unit the variance
+        # lives in; and a random subset of boxes shreds the tracks that
+        # `score --vote` needs - 4% coverage on a 300-box sample against 93%
+        # on a full split.
+        pool = sorted({b.video_id for b in usable}, key=int)
+        random.Random(args.seed).shuffle(pool)
+        wanted = set(pool[:args.clips])
     selected = [b for b in usable if not wanted or b.video_id in wanted]
     excluded = [{"id": b.uid, "reason": why} for b, why in rejected
                 if not wanted or b.video_id in wanted]
@@ -117,6 +127,7 @@ def cmd_plan(args):
         "videos": sorted({r["video_id"] for r in rows}),
         "seed": args.seed,
         "limit": args.limit,
+        "clips": args.clips,
         "excluded": excluded,
     }
     with open(os.path.join(args.out, "plan_meta.json"), "w", encoding="utf-8") as fh:
@@ -176,6 +187,7 @@ def cmd_run(args):
         "seed": 0,
         "max_tokens": args.max_tokens,
         "render_mode": args.mode,
+        "min_width": args.min_width,
         "frames": args.frames,
         "span": args.span if args.frames > 1 else 0.0,
         "max_width": args.max_width,
@@ -214,7 +226,8 @@ def cmd_run(args):
             for frame in sources(item, box):
                 for mode in modes:
                     img = render_mod.render(frame, item["bbox"], mode=mode,
-                                            max_width=args.max_width)
+                                            max_width=args.max_width,
+                                            min_width=args.min_width)
                     urls.append(render_mod.to_data_url(img, quality=args.jpeg_quality))
             record.update(cli.classify(urls, n_frames=args.frames, span=args.span))
         except Exception as exc:
@@ -241,8 +254,13 @@ def cmd_score(args):
     results = _jsonl_read(os.path.join(args.out, "results.jsonl"))
     if not results:
         sys.exit("no results in {} - run `run` first".format(args.out))
+    if args.vote:
+        results, info = tracks_mod.vote(results)
+        print("track vote: {} tracks covering {} of {} boxes".format(
+            info["tracks"], info["covered"], info["total"]))
     metrics = scoring.score(results)
-    path = os.path.join(args.out, "metrics.json")
+    metrics["voted"] = bool(args.vote)
+    path = os.path.join(args.out, "metrics-voted.json" if args.vote else "metrics.json")
     with open(path, "w", encoding="utf-8") as fh:
         json.dump(metrics, fh, indent=2, ensure_ascii=False)
     print("examples          : {}".format(metrics["n_examples"]))
@@ -326,7 +344,11 @@ def main(argv=None):
     sp.add_argument("--annotations", default=DEFAULT_ANN)
     sp.add_argument("--video", action="append",
                     help="clip id, repeatable; omit for the whole split")
-    sp.add_argument("--limit", type=int, default=0)
+    sp.add_argument("--clips", type=int, default=0,
+                    help="sample this many whole clips (keeps tracks intact)")
+    sp.add_argument("--limit", type=int, default=0,
+                    help="cap on individual boxes; breaks tracks, use --clips "
+                         "unless the run is only comparing prompts")
     sp.add_argument("--seed", type=int, default=0)
     sp.set_defaults(func=cmd_plan)
 
@@ -344,7 +366,15 @@ def main(argv=None):
                          ">1 decodes that many from the clip (needs opencv)")
     sr.add_argument("--span", type=float, default=2.0,
                     help="seconds spanned by --frames, centred on the keyframe")
-    sr.add_argument("--max-width", type=int, default=1280)
+    # 1920 is the keyframes' native width, i.e. no downscale at all. Measured
+    # against 1280 on 300 paired examples: 21 fixed, 10 broken, and the gain
+    # falls off monotonically with box size (10 fixed in the smallest quartile,
+    # 2 in the largest) - the model was simply short of pixels on distant cows.
+    # Costs ~2x the image tokens (1448 -> 2943 per request).
+    sr.add_argument("--max-width", type=int, default=1920)
+    sr.add_argument("--min-width", type=int, default=0,
+                    help="enlarge images narrower than this; a crop of a distant "
+                         "cow is otherwise too few patches to read")
     sr.add_argument("--jpeg-quality", type=int, default=90)
     sr.add_argument("--temperature", type=float, default=0.0)
     # The model reasons before answering and the reasoning scales with the
@@ -357,6 +387,12 @@ def main(argv=None):
     sr.set_defaults(func=cmd_run)
 
     ss = sub.add_parser("score", help="compute metrics")
+    # Free accuracy: the same cow is answered on up to six keyframes, so the
+    # per-frame answers are repeated measurements and a majority over the track
+    # throws away the ones a passing animal or an awkward moment spoiled.
+    ss.add_argument("--vote", action="store_true",
+                    help="replace each answer with the majority over its track "
+                         "before scoring (writes metrics-voted.json)")
     ss.set_defaults(func=cmd_score)
 
     srp = sub.add_parser("report", help="render report.md")
