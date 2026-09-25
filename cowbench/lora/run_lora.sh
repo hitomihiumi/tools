@@ -41,6 +41,10 @@
 #   CUDA_WANT=12.8         newest CUDA toolkit to install, or "skip"
 #   TORCH_BACKEND=cu128    force a torch build instead of matching CUDA
 #   RUN_NAME=...           default: lora_w<WIDTH>[_n<TRAIN_LIMIT>] - stable, so a rerun resumes it
+#   LOCAL_DATA=~/cbvd5-local  local-disk copy of the keyframes read during training
+#                          and eval, when $WORK is on another (network) volume; "off" to skip
+#   TRIES=3                attempts at training and at each eval before giving up;
+#                          each one resumes where the last stopped
 
 set -euo pipefail
 
@@ -61,6 +65,8 @@ ACCUM="${ACCUM:-4}"
 LR="${LR:-1e-4}"
 RANK="${RANK:-16}"
 EVAL_BASE="${EVAL_BASE:-1}"
+LOCAL_DATA="${LOCAL_DATA:-$HOME/cbvd5-local}"
+TRIES="${TRIES:-3}"
 PRECISION="${PRECISION:-auto}"
 # No date in the default name: a run restarted after midnight must find its
 # own checkpoints, not start a fresh directory.
@@ -173,7 +179,7 @@ if [ -z "${LORA_IN_TMUX:-}" ]; then
         exit 1
     fi
     knobs=""
-    for v in WORK WIDTH EPOCHS TRAIN_LIMIT BATCH ACCUM LR RANK EVAL_BASE PRECISION RUN_NAME KEEP_ZIP HF_TOKEN CUDA_WANT TORCH_BACKEND; do
+    for v in WORK WIDTH EPOCHS TRAIN_LIMIT BATCH ACCUM LR RANK EVAL_BASE PRECISION RUN_NAME KEEP_ZIP HF_TOKEN CUDA_WANT TORCH_BACKEND LOCAL_DATA TRIES; do
         [ -n "${!v:-}" ] && knobs+="$v=$(printf '%q' "${!v}") "
     done
     self="$(printf '%q' "$HERE/$(basename "${BASH_SOURCE[0]}")")"
@@ -453,7 +459,50 @@ if [ ! -f "$DATA/annotations/ava_train_v2.1.csv" ] || [ ! -d "$DATA/labelframes"
     rm -rf "$DATA/_x"
     [ "${KEEP_ZIP:-0}" = "1" ] || rm -f "$ZIP"
 fi
-echo "keyframes: $(find "$DATA/labelframes" -name '*.jpg' | wc -l)"
+n_frames="$(find "$DATA/labelframes" -name '*.jpg' | wc -l)"
+echo "keyframes: $n_frames"
+
+# /workspace on RunPod is a network volume (MooseFS). A read there can fail
+# for a minute or two (ENXIO, EIO), and training reads ~90 000 keyframes.
+# A copy on the container's own disk takes a few minutes and ~3 GB and
+# takes the network out of the loop. The container disk is wiped with the
+# pod, so the copy is redone after a restart; the original stays on $WORK.
+RUN_DATA="$DATA"
+fs_of() { df --output=target "$1" 2>/dev/null | tail -1; }
+if [ "$LOCAL_DATA" = "off" ]; then
+    echo "LOCAL_DATA=off - reading keyframes from $DATA"
+elif [ -f "$LOCAL_DATA/.complete" ] && [ "$(cat "$LOCAL_DATA/.complete")" = "$n_frames" ]; then
+    echo "local copy of the keyframes: $LOCAL_DATA"
+    RUN_DATA="$LOCAL_DATA"
+else
+    parent="$(dirname "$LOCAL_DATA")"
+    mkdir -p "$parent"
+    if [ "$(fs_of "$parent")" = "$(fs_of "$DATA")" ]; then
+        echo "keyframes are already on the disk $LOCAL_DATA would be on - no copy"
+    else
+        need_mb="$( { du -sm "$DATA/labelframes" "$DATA/annotations" 2>/dev/null || true; } \
+                    | awk '{s += $1} END {print s + 2048}')"
+        free_mb="$(df -BM --output=avail "$parent" | tail -1 | tr -dc '0-9')"
+        if [ "$free_mb" -lt "$need_mb" ]; then
+            echo "!! ${free_mb} MB free under $parent, ${need_mb} MB needed for a local copy -"
+            echo "!! reading keyframes from $DATA (reads there are retried)"
+        else
+            echo "copying keyframes to the local disk: $LOCAL_DATA"
+            rm -rf "$LOCAL_DATA" "$LOCAL_DATA.tmp"
+            mkdir -p "$LOCAL_DATA.tmp"
+            if cp -r "$DATA/annotations" "$DATA/labelframes" "$LOCAL_DATA.tmp/" \
+               && [ "$(find "$LOCAL_DATA.tmp/labelframes" -name '*.jpg' | wc -l)" = "$n_frames" ]; then
+                echo "$n_frames" > "$LOCAL_DATA.tmp/.complete"
+                mv "$LOCAL_DATA.tmp" "$LOCAL_DATA"
+                RUN_DATA="$LOCAL_DATA"
+                echo "  done: $(du -sh "$LOCAL_DATA" | cut -f1)"
+            else
+                echo "!! copy failed - reading keyframes from $DATA (reads there are retried)"
+                rm -rf "$LOCAL_DATA.tmp"
+            fi
+        fi
+    fi
+fi
 
 step "5/9  Model"
 if [ "$PRECISION" = "qlora" ]; then
@@ -465,8 +514,21 @@ else
     BASE_ARG=()
 fi
 
-COMMON=(--root "$DATA" --out "$OUT" --width "$WIDTH" --precision "$PRECISION" "${BASE_ARG[@]}")
+COMMON=(--root "$RUN_DATA" --out "$OUT" --width "$WIDTH" --precision "$PRECISION" "${BASE_ARG[@]}")
 cd "$BENCH"
+
+# Training resumes from its last checkpoint and eval from its results.jsonl,
+# so after a crash - a network hiccup, a worker dying - running it again
+# loses only the steps since the last checkpoint.
+retry() {
+    local n=1
+    until "$@"; do
+        if [ "$n" -ge "$TRIES" ]; then echo "!! failed $n times: $*"; return 1; fi
+        echo "!! attempt $n of $TRIES failed - restarting in 60 s, it resumes where it stopped"
+        n=$((n + 1))
+        sleep 60
+    done
+}
 
 step "6/9  Training data check"
 python lora/train_lora.py data "${COMMON[@]}" --train-limit "$TRAIN_LIMIT"
@@ -477,7 +539,7 @@ step "7/9  Control: the untouched model, same width, no reasoning"
 # width and no reasoning - so base-vs-LoRA isolates what the training bought.
 # Not fatal: a failure here should not cost the night's training.
 if [ "$EVAL_BASE" = "1" ]; then
-    python lora/train_lora.py eval "${COMMON[@]}" --adapter none \
+    retry python lora/train_lora.py eval "${COMMON[@]}" --adapter none \
         || echo "!! base-model eval failed; continuing to training"
 fi
 
@@ -485,13 +547,13 @@ step "8/9  Training"
 if [ -f "$OUT/adapter/adapter_config.json" ] && [ -f "$OUT/train_meta.json" ]; then
     echo "adapter already trained: $OUT/adapter"
 else
-    python lora/train_lora.py train "${COMMON[@]}" --train-limit "$TRAIN_LIMIT" \
+    retry python lora/train_lora.py train "${COMMON[@]}" --train-limit "$TRAIN_LIMIT" \
         --epochs "$EPOCHS" --batch "$BATCH" --accum "$ACCUM" --lr "$LR" --rank "$RANK" \
         --alpha "$((RANK * 2))"
 fi
 
 step "9/9  Evaluation on all 2532 val cows"
-python lora/train_lora.py eval "${COMMON[@]}" --adapter "$OUT/adapter"
+retry python lora/train_lora.py eval "${COMMON[@]}" --adapter "$OUT/adapter"
 
 ZS="$BENCH/runs/2026-09-25_val-full_w1920_f1"
 for arm in eval-base eval-lora; do

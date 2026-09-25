@@ -115,13 +115,36 @@ def read_jsonl(path):
         return [json.loads(l) for l in fh if l.strip()]
 
 
+def read_frame(root, box, tries=10):
+    """The keyframe, decoded. Retried: on a network volume (RunPod's
+    /workspace is MooseFS) a read can fail for a minute or two - ENXIO,
+    EIO, or the file briefly "missing" - and one failed read in a DataLoader
+    worker would otherwise end hours of training."""
+    from PIL import Image
+    delay = 2.0
+    for attempt in range(1, tries + 1):
+        try:
+            with open(cbvd.frame_path(root, box), "rb") as fh:
+                data = fh.read()
+            img = Image.open(io.BytesIO(data))
+            img.load()
+            return img
+        except OSError as e:   # FileNotFoundError and PIL's truncated-file errors included
+            if attempt == tries:
+                raise
+            print(f"[io] {box.video_id} t={box.timestamp}: {e!r} - retry {attempt}/{tries - 1} "
+                  f"in {delay:.0f}s", file=sys.stderr, flush=True)
+            time.sleep(delay)
+            delay = min(delay * 2, 60.0)
+
+
 def make_image(root, row, width, quality):
     """What the bench sends: render, then a JPEG round trip at the bench's
     quality, because vLLM gets a JPEG data URL and the model should be trained
     on the same compression it is tested on."""
     from PIL import Image
     box = cbvd.Box(row["video_id"], row["timestamp"], *row["bbox"], "1", ())
-    img = render_mod.render(cbvd.frame_path(root, box), row["bbox"], mode="marked",
+    img = render_mod.render(read_frame(root, box), row["bbox"], mode="marked",
                             max_width=width)
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=quality)
@@ -643,7 +666,7 @@ def main(argv=None):
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--accum", type=int, default=4)
     p.add_argument("--workers", type=int, default=6)
-    p.add_argument("--save-steps", type=int, default=100)
+    p.add_argument("--save-steps", type=int, default=50)
     p.add_argument("--max-zero-shot-loss", type=float, default=4.0)
     p.add_argument("--adapter", default=None, help="eval: adapter dir, or 'none' for the base model")
     p.add_argument("--eval-out", default=None, help="eval: output dir (default <out>/eval-lora|eval-base)")
