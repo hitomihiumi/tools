@@ -1,0 +1,10 @@
+{
+  "root": "C:\\Users\\Work\\Downloads\\archive",
+  "annotations": "annotations\\ava_val_v2.1.csv",
+  "videos": [
+    "371"
+  ],
+  "seed": 0,
+  "limit": 0,
+  "excluded": []
+}

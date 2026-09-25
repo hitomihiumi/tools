@@ -1,0 +1,381 @@
+#!/usr/bin/env python3
+"""cowbench - measure how well a VLM reads cow behaviour on CBVD-5.
+
+Four steps, four files. The split exists because only `run` costs anything:
+the sample must be fixed before results are seen, and scoring must be
+repeatable without asking the model 120 more questions.
+
+    plan   -> manifest.jsonl   which boxes are being tested
+    run    -> results.jsonl    one raw model answer per box (resumable)
+    score  -> metrics.json     error rates, per-class, confusion
+    report -> report.md        the document to hand over
+
+Typical session, model served on a pod and reached through an SSH tunnel:
+
+    python cowbench.py plan   --video 371
+    python cowbench.py run
+    python cowbench.py score
+    python cowbench.py report
+"""
+
+from __future__ import annotations
+
+import argparse
+import collections
+import concurrent.futures
+import datetime
+import json
+import os
+import random
+import sys
+import threading
+
+import cbvd
+import client as client_mod
+import compare as compare_mod
+import render as render_mod
+import report as report_mod
+import scoring
+
+DEFAULT_ROOT = r"C:\Users\Work\Downloads\archive"
+DEFAULT_OUT = "out"
+# val, not test: ava_test_v2.1.csv is ava_val_v2.1.csv with every row duplicated,
+# same 2533 boxes. Using it would not add a single new example.
+DEFAULT_ANN = os.path.join("annotations", "ava_val_v2.1.csv")
+
+
+def _jsonl_write(path, rows):
+    with open(path, "w", encoding="utf-8") as fh:
+        for row in rows:
+            fh.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def _jsonl_read(path):
+    if not os.path.exists(path):
+        return []
+    out = []
+    with open(path, encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                out.append(json.loads(line))
+    return out
+
+
+# --------------------------------------------------------------------- plan
+
+def cmd_plan(args):
+    ann_path = os.path.join(args.root, args.annotations)
+    boxes = cbvd.load_boxes(ann_path)
+    usable, rejected = cbvd.partition(boxes)
+
+    wanted = set(args.video or [])
+    selected = [b for b in usable if not wanted or b.video_id in wanted]
+    excluded = [{"id": b.uid, "reason": why} for b, why in rejected
+                if not wanted or b.video_id in wanted]
+
+    if not selected:
+        sys.exit("no boxes for video(s) {} in {}".format(sorted(wanted), ann_path))
+
+    # Deterministic order, then an optional head. Sampling is seeded and the
+    # seed is written into the manifest so the same sample can be rebuilt.
+    selected.sort(key=lambda b: (b.video_id, b.timestamp, b.entity_id, b.xyxy))
+    if args.limit and len(selected) > args.limit:
+        random.Random(args.seed).shuffle(selected)
+        selected = selected[:args.limit]
+        selected.sort(key=lambda b: (b.video_id, b.timestamp, b.entity_id, b.xyxy))
+
+    # Fail now, not forty requests into the run.
+    missing = set()
+    for b in selected:
+        try:
+            cbvd.frame_path(args.root, b)
+        except FileNotFoundError as exc:
+            missing.add(str(exc))
+    if missing:
+        sys.exit("missing keyframes:\n  " + "\n  ".join(sorted(missing)[:10]))
+
+    os.makedirs(args.out, exist_ok=True)
+    rows = []
+    for i, b in enumerate(selected):
+        rows.append({
+            "id": "{}_{:04d}".format(b.uid, i),
+            "video_id": b.video_id,
+            "timestamp": b.timestamp,
+            "bbox": list(b.xyxy),
+            "entity_id": b.entity_id,
+            "labels": list(b.labels),
+            "gt_posture": b.posture,
+            "gt_activity": b.activity,
+        })
+    manifest = os.path.join(args.out, "manifest.jsonl")
+    _jsonl_write(manifest, rows)
+
+    meta = {
+        "root": args.root,
+        "annotations": args.annotations,
+        "videos": sorted({r["video_id"] for r in rows}),
+        "seed": args.seed,
+        "limit": args.limit,
+        "excluded": excluded,
+    }
+    with open(os.path.join(args.out, "plan_meta.json"), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2)
+
+    postures = collections.Counter(r["gt_posture"] for r in rows)
+    activities = collections.Counter(r["gt_activity"] for r in rows)
+    keyframes = len({(r["video_id"], r["timestamp"]) for r in rows})
+    print("{} examples from {} clip(s) -> {}".format(
+        len(rows), len(meta["videos"]), manifest))
+    print("  posture  : " + ", ".join(
+        "{}={}".format(k, v) for k, v in postures.most_common()))
+    print("  activity : " + ", ".join(
+        "{}={}".format(k, v) for k, v in activities.most_common()))
+    print("  keyframes: {}".format(keyframes))
+    if excluded:
+        print("  excluded {} box(es) with contradictory annotations".format(len(excluded)))
+
+
+# ---------------------------------------------------------------------- run
+
+def cmd_run(args):
+    manifest = _jsonl_read(os.path.join(args.out, "manifest.jsonl"))
+    if not manifest:
+        sys.exit("no manifest in {} - run `plan` first".format(args.out))
+    with open(os.path.join(args.out, "plan_meta.json"), encoding="utf-8") as fh:
+        plan_meta = json.load(fh)
+    root = args.root or plan_meta["root"]
+
+    results_path = os.path.join(args.out, "results.jsonl")
+    # Resume rather than restart: vLLM on this hardware is not guaranteed to
+    # survive a whole run, and re-asking questions already answered costs time
+    # for nothing.
+    if args.fresh and os.path.exists(results_path):
+        os.remove(results_path)
+    done = {r["id"] for r in _jsonl_read(results_path)}
+    todo = [r for r in manifest if r["id"] not in done]
+    print("{} examples, {} already done, {} to go".format(
+        len(manifest), len(done), len(todo)))
+    if not todo:
+        return
+
+    cli = client_mod.MuseClient(
+        base_url=args.base_url, model=args.model, api_key=args.api_key,
+        temperature=args.temperature, max_tokens=args.max_tokens,
+        timeout=args.timeout, retries=args.retries)
+
+    info = cli.server_info()
+    meta = {
+        "run_date": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "model": args.model,
+        "model_repo": info.get("model_root") or args.model_repo or args.model,
+        "quantization": args.quantization,
+        "vllm_version": info.get("vllm_version"),
+        "server": info,
+        "temperature": args.temperature,
+        "seed": 0,
+        "max_tokens": args.max_tokens,
+        "render_mode": args.mode,
+        "frames": args.frames,
+        "span": args.span if args.frames > 1 else 0.0,
+        "max_width": args.max_width,
+        "prompt_sha": client_mod.prompt_sha(args.frames, args.span),
+        "prompt": client_mod.build_prompt(args.frames, args.span),
+        "annotations": plan_meta["annotations"],
+        "videos": ", ".join(plan_meta["videos"]),
+        "excluded": plan_meta.get("excluded", []),
+    }
+    with open(os.path.join(args.out, "run_meta.json"), "w", encoding="utf-8") as fh:
+        json.dump(meta, fh, indent=2, ensure_ascii=False)
+
+    modes = ["marked", "crop"] if args.mode == "both" else [args.mode]
+    lock = threading.Lock()
+    counter = {"n": 0}
+    out_fh = open(results_path, "a", encoding="utf-8")
+
+    def sources(item, box):
+        """The frame(s) this example is built from.
+
+        One frame comes from labelframes/, which is what the annotation was
+        drawn on. Several come from the mp4 - verified to be the same pixels at
+        the keyframe, so the two paths are interchangeable at frames=1.
+        """
+        if args.frames <= 1:
+            return [cbvd.frame_path(root, box)]
+        return render_mod.load_frames(cbvd.video_path(root, box.video_id),
+                                      box.timestamp, args.frames, args.span)
+
+    def work(item):
+        record = dict(item)
+        try:
+            box = cbvd.Box(item["video_id"], item["timestamp"], *item["bbox"],
+                           item["entity_id"], tuple(item["labels"]))
+            urls = []
+            for frame in sources(item, box):
+                for mode in modes:
+                    img = render_mod.render(frame, item["bbox"], mode=mode,
+                                            max_width=args.max_width)
+                    urls.append(render_mod.to_data_url(img, quality=args.jpeg_quality))
+            record.update(cli.classify(urls, n_frames=args.frames, span=args.span))
+        except Exception as exc:
+            record["error"] = "{}: {}".format(type(exc).__name__, exc)
+        with lock:
+            out_fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+            out_fh.flush()
+            counter["n"] += 1
+            print("\r  {}/{}".format(counter["n"], len(todo)), end="", flush=True)
+        return record
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.concurrency) as pool:
+            list(pool.map(work, todo))
+    finally:
+        out_fh.close()
+        print()
+    print("-> {}".format(results_path))
+
+
+# -------------------------------------------------------------------- score
+
+def cmd_score(args):
+    results = _jsonl_read(os.path.join(args.out, "results.jsonl"))
+    if not results:
+        sys.exit("no results in {} - run `run` first".format(args.out))
+    metrics = scoring.score(results)
+    path = os.path.join(args.out, "metrics.json")
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(metrics, fh, indent=2, ensure_ascii=False)
+    print("examples          : {}".format(metrics["n_examples"]))
+    print("exact-match error : {:.1%}".format(metrics["exact_match"]["error_rate"]))
+    print("posture error     : {:.1%}   (baseline {:.1%})".format(
+        metrics["posture"]["error_rate"], metrics["baseline"]["posture"]["error_rate"]))
+    print("activity error    : {:.1%}   (baseline {:.1%})".format(
+        metrics["activity"]["error_rate"], metrics["baseline"]["activity"]["error_rate"]))
+    if metrics["n_failed"]:
+        print("failed requests   : {}".format(metrics["n_failed"]))
+    print("-> {}".format(path))
+
+
+# ------------------------------------------------------------------- report
+
+def cmd_report(args):
+    with open(os.path.join(args.out, "metrics.json"), encoding="utf-8") as fh:
+        metrics = json.load(fh)
+    meta_path = os.path.join(args.out, "run_meta.json")
+    meta = {}
+    if os.path.exists(meta_path):
+        with open(meta_path, encoding="utf-8") as fh:
+            meta = json.load(fh)
+    # The per-cow rows come from results.jsonl, not from metrics.json: the
+    # metrics are aggregates and cannot be un-summed back into examples.
+    results = _jsonl_read(os.path.join(args.out, "results.jsonl"))
+    text = report_mod.render(meta, metrics, results if not args.no_rows else None)
+    path = args.output or os.path.join(args.out, "report.md")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    print("-> {}".format(path))
+
+
+# ------------------------------------------------------------------ compare
+
+def _load_meta(run_dir):
+    path = os.path.join(run_dir, "run_meta.json")
+    if not os.path.exists(path):
+        return {}
+    with open(path, encoding="utf-8") as fh:
+        return json.load(fh)
+
+
+def cmd_compare(args):
+    a = _jsonl_read(os.path.join(args.a, "results.jsonl"))
+    b = _jsonl_read(os.path.join(args.b, "results.jsonl"))
+    for path, rows in ((args.a, a), (args.b, b)):
+        if not rows:
+            sys.exit("no results.jsonl in {}".format(path))
+    label_a = args.label_a or os.path.basename(os.path.normpath(args.a))
+    label_b = args.label_b or os.path.basename(os.path.normpath(args.b))
+    result = compare_mod.compare(a, b, label_a, label_b)
+    text = compare_mod.render(result, _load_meta(args.a), _load_meta(args.b))
+    path = args.output or os.path.join(args.b, "compare.md")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(text)
+    with open(os.path.splitext(path)[0] + ".json", "w", encoding="utf-8") as fh:
+        json.dump(result, fh, indent=2, ensure_ascii=False)
+
+    print("paired on {} examples".format(result["n_paired"]))
+    for axis in ("exact", "posture", "activity"):
+        m = result["axes"][axis]
+        print("  {:9s} {:>6.1%} -> {:>6.1%}   +{} fixed / -{} broken   p={:.3f}".format(
+            axis, m["error_a"], m["error_b"], m["fixed_by_b"], m["broken_by_b"],
+            m["p_value"]))
+    print("-> {}".format(path))
+
+
+# ---------------------------------------------------------------------- cli
+
+def main(argv=None):
+    p = argparse.ArgumentParser(
+        prog="cowbench", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("--out", default=DEFAULT_OUT,
+                   help="run directory (default: %(default)s)")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    sp = sub.add_parser("plan", help="choose the examples")
+    sp.add_argument("--root", default=DEFAULT_ROOT)
+    sp.add_argument("--annotations", default=DEFAULT_ANN)
+    sp.add_argument("--video", action="append",
+                    help="clip id, repeatable; omit for the whole split")
+    sp.add_argument("--limit", type=int, default=0)
+    sp.add_argument("--seed", type=int, default=0)
+    sp.set_defaults(func=cmd_plan)
+
+    sr = sub.add_parser("run", help="query the model")
+    sr.add_argument("--root", default=None, help="override the root recorded by plan")
+    sr.add_argument("--base-url", default="http://127.0.0.1:8000")
+    sr.add_argument("--model", default="muse-glimmer")
+    sr.add_argument("--model-repo", default="RedHatAI/Muse-Glimmer-30B-FP8-block")
+    sr.add_argument("--quantization", default=None,
+                    help="override the quantization string in the report")
+    sr.add_argument("--api-key", default="EMPTY")
+    sr.add_argument("--mode", choices=("marked", "crop", "both"), default="marked")
+    sr.add_argument("--frames", type=int, default=1,
+                    help="frames per example: 1 uses the annotated keyframe, "
+                         ">1 decodes that many from the clip (needs opencv)")
+    sr.add_argument("--span", type=float, default=2.0,
+                    help="seconds spanned by --frames, centred on the keyframe")
+    sr.add_argument("--max-width", type=int, default=1280)
+    sr.add_argument("--jpeg-quality", type=int, default=90)
+    sr.add_argument("--temperature", type=float, default=0.0)
+    # The model reasons before answering and the reasoning scales with the
+    # number of images; 2048 is enough for one frame and not for five.
+    sr.add_argument("--max-tokens", type=int, default=4096)
+    sr.add_argument("--concurrency", type=int, default=4)
+    sr.add_argument("--timeout", type=float, default=300.0)
+    sr.add_argument("--retries", type=int, default=3)
+    sr.add_argument("--fresh", action="store_true", help="discard previous results")
+    sr.set_defaults(func=cmd_run)
+
+    ss = sub.add_parser("score", help="compute metrics")
+    ss.set_defaults(func=cmd_score)
+
+    srp = sub.add_parser("report", help="render report.md")
+    srp.add_argument("--output", default=None)
+    srp.add_argument("--no-rows", action="store_true",
+                     help="omit the per-cow table (it is one line per example)")
+    srp.set_defaults(func=cmd_report)
+
+    sc = sub.add_parser("compare", help="paired comparison of two runs")
+    sc.add_argument("--a", required=True, help="baseline run directory")
+    sc.add_argument("--b", required=True, help="run directory to compare against it")
+    sc.add_argument("--label-a", default=None)
+    sc.add_argument("--label-b", default=None)
+    sc.add_argument("--output", default=None)
+    sc.set_defaults(func=cmd_compare)
+
+    args = p.parse_args(argv)
+    args.func(args)
+
+
+if __name__ == "__main__":
+    main()

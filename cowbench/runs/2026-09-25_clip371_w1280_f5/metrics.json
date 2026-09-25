@@ -1,0 +1,207 @@
+{
+  "n_examples": 120,
+  "n_keyframes": 6,
+  "n_clips": 1,
+  "by_size": [
+    {
+      "quartile": 1,
+      "n": 30,
+      "area_pct_min": 0.7986994328703706,
+      "area_pct_max": 1.3278140882523142,
+      "y_centre_median": 0.2780125,
+      "lying_share": 0.8,
+      "error_rate": 0.9
+    },
+    {
+      "quartile": 2,
+      "n": 30,
+      "area_pct_min": 1.695822744212963,
+      "area_pct_max": 3.0178513823784714,
+      "y_centre_median": 0.4804439814814815,
+      "lying_share": 0.0,
+      "error_rate": 0.16666666666666666
+    },
+    {
+      "quartile": 3,
+      "n": 30,
+      "area_pct_min": 3.310451457175926,
+      "area_pct_max": 4.550089156635803,
+      "y_centre_median": 0.47938703703703706,
+      "lying_share": 0.0,
+      "error_rate": 0.03333333333333333
+    },
+    {
+      "quartile": 4,
+      "n": 30,
+      "area_pct_min": 4.66982282484568,
+      "area_pct_max": 5.7559618003472215,
+      "y_centre_median": 0.4730444444444445,
+      "lying_share": 0.0,
+      "error_rate": 0.03333333333333333
+    }
+  ],
+  "by_clip": [],
+  "n_failed": 0,
+  "exact_match": {
+    "correct": 86,
+    "n": 120,
+    "error_rate": 0.2833333333333333,
+    "ci95": [
+      0.2104050919824472,
+      0.369703692141789
+    ]
+  },
+  "posture": {
+    "correct": 99,
+    "n": 120,
+    "error_rate": 0.175,
+    "ci95": [
+      0.11740448670592563,
+      0.25275868948042857
+    ]
+  },
+  "activity": {
+    "correct": 95,
+    "n": 120,
+    "error_rate": 0.20833333333333334,
+    "ci95": [
+      0.14528341433799086,
+      0.28947841044463474
+    ]
+  },
+  "baseline": {
+    "posture": {
+      "label": "standing",
+      "error_rate": 0.19999999999999996
+    },
+    "activity": {
+      "label": "feeding",
+      "error_rate": 0.35
+    }
+  },
+  "support": {
+    "posture": {
+      "standing": 96,
+      "lying": 24
+    },
+    "activity": {
+      "feeding": 78,
+      "none": 18,
+      "ruminating": 18,
+      "drinking": 6
+    }
+  },
+  "predicted": {
+    "posture": {
+      "standing": 103,
+      "lying": 17
+    },
+    "activity": {
+      "feeding": 79,
+      "none": 39,
+      "drinking": 1,
+      "ruminating": 1
+    }
+  },
+  "per_class": {
+    "posture:standing": {
+      "precision": 0.8640776699029126,
+      "recall": 0.9270833333333334,
+      "f1": 0.8944723618090452,
+      "tp": 89,
+      "fp": 14,
+      "fn": 7,
+      "support": 96
+    },
+    "posture:lying": {
+      "precision": 0.5882352941176471,
+      "recall": 0.4166666666666667,
+      "f1": 0.48780487804878053,
+      "tp": 10,
+      "fp": 7,
+      "fn": 14,
+      "support": 24
+    },
+    "activity:feeding": {
+      "precision": 0.9620253164556962,
+      "recall": 0.9743589743589743,
+      "f1": 0.9681528662420382,
+      "tp": 76,
+      "fp": 3,
+      "fn": 2,
+      "support": 78
+    },
+    "activity:drinking": {
+      "precision": 1.0,
+      "recall": 0.16666666666666666,
+      "f1": 0.2857142857142857,
+      "tp": 1,
+      "fp": 0,
+      "fn": 5,
+      "support": 6
+    },
+    "activity:ruminating": {
+      "precision": 1.0,
+      "recall": 0.05555555555555555,
+      "f1": 0.10526315789473684,
+      "tp": 1,
+      "fp": 0,
+      "fn": 17,
+      "support": 18
+    },
+    "activity:none": {
+      "precision": 0.4358974358974359,
+      "recall": 0.9444444444444444,
+      "f1": 0.5964912280701755,
+      "tp": 17,
+      "fp": 22,
+      "fn": 1,
+      "support": 18
+    }
+  },
+  "confusion": {
+    "posture": {
+      "standing": {
+        "standing": 89,
+        "lying": 7,
+        "<failed>": 0
+      },
+      "lying": {
+        "standing": 14,
+        "lying": 10,
+        "<failed>": 0
+      }
+    },
+    "activity": {
+      "feeding": {
+        "feeding": 76,
+        "drinking": 0,
+        "ruminating": 0,
+        "none": 2,
+        "<failed>": 0
+      },
+      "drinking": {
+        "feeding": 2,
+        "drinking": 1,
+        "ruminating": 0,
+        "none": 3,
+        "<failed>": 0
+      },
+      "ruminating": {
+        "feeding": 0,
+        "drinking": 0,
+        "ruminating": 1,
+        "none": 17,
+        "<failed>": 0
+      },
+      "none": {
+        "feeding": 1,
+        "drinking": 0,
+        "ruminating": 0,
+        "none": 17,
+        "<failed>": 0
+      }
+    }
+  },
+  "failures": []
+}

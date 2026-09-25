@@ -1,0 +1,4 @@
+pillow>=10.0
+requests>=2.31
+# only needed for --frames > 1 (decoding the mp4 clips)
+opencv-python-headless>=4.9

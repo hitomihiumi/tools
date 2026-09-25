@@ -1,0 +1,154 @@
+{
+  "n_examples": 120,
+  "n_failed": 0,
+  "exact_match": {
+    "correct": 87,
+    "n": 120,
+    "error_rate": 0.275,
+    "ci95": [
+      0.2030277984147616,
+      0.3609313235604068
+    ]
+  },
+  "posture": {
+    "correct": 99,
+    "n": 120,
+    "error_rate": 0.175,
+    "ci95": [
+      0.11740448670592563,
+      0.25275868948042857
+    ]
+  },
+  "activity": {
+    "correct": 92,
+    "n": 120,
+    "error_rate": 0.23333333333333334,
+    "ci95": [
+      0.16665469513089648,
+      0.31655611609893264
+    ]
+  },
+  "baseline": {
+    "posture": {
+      "label": "standing",
+      "error_rate": 0.19999999999999996
+    },
+    "activity": {
+      "label": "feeding",
+      "error_rate": 0.35
+    }
+  },
+  "support": {
+    "posture": {
+      "standing": 96,
+      "lying": 24
+    },
+    "activity": {
+      "feeding": 78,
+      "ruminating": 18,
+      "none": 18,
+      "drinking": 6
+    }
+  },
+  "per_class": {
+    "posture:standing": {
+      "precision": 0.831858407079646,
+      "recall": 0.9791666666666666,
+      "f1": 0.8995215311004785,
+      "tp": 94,
+      "fp": 19,
+      "fn": 2,
+      "support": 96
+    },
+    "posture:lying": {
+      "precision": 0.7142857142857143,
+      "recall": 0.20833333333333334,
+      "f1": 0.3225806451612903,
+      "tp": 5,
+      "fp": 2,
+      "fn": 19,
+      "support": 24
+    },
+    "activity:feeding": {
+      "precision": 0.9156626506024096,
+      "recall": 0.9743589743589743,
+      "f1": 0.9440993788819876,
+      "tp": 76,
+      "fp": 7,
+      "fn": 2,
+      "support": 78
+    },
+    "activity:drinking": {
+      "precision": 1.0,
+      "recall": 0.16666666666666666,
+      "f1": 0.2857142857142857,
+      "tp": 1,
+      "fp": 0,
+      "fn": 5,
+      "support": 6
+    },
+    "activity:ruminating": {
+      "precision": 0.0,
+      "recall": 0.0,
+      "f1": 0.0,
+      "tp": 0,
+      "fp": 0,
+      "fn": 18,
+      "support": 18
+    },
+    "activity:none": {
+      "precision": 0.4166666666666667,
+      "recall": 0.8333333333333334,
+      "f1": 0.5555555555555556,
+      "tp": 15,
+      "fp": 21,
+      "fn": 3,
+      "support": 18
+    }
+  },
+  "confusion": {
+    "posture": {
+      "standing": {
+        "standing": 94,
+        "lying": 2,
+        "<failed>": 0
+      },
+      "lying": {
+        "standing": 19,
+        "lying": 5,
+        "<failed>": 0
+      }
+    },
+    "activity": {
+      "feeding": {
+        "feeding": 76,
+        "drinking": 0,
+        "ruminating": 0,
+        "none": 2,
+        "<failed>": 0
+      },
+      "drinking": {
+        "feeding": 1,
+        "drinking": 1,
+        "ruminating": 0,
+        "none": 4,
+        "<failed>": 0
+      },
+      "ruminating": {
+        "feeding": 3,
+        "drinking": 0,
+        "ruminating": 0,
+        "none": 15,
+        "<failed>": 0
+      },
+      "none": {
+        "feeding": 3,
+        "drinking": 0,
+        "ruminating": 0,
+        "none": 15,
+        "<failed>": 0
+      }
+    }
+  },
+  "failures": []
+}

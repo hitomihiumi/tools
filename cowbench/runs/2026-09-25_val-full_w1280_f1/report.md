@@ -1,0 +1,2689 @@
+# Muse Glimmer on CBVD-5: cow behaviour recognition
+
+| | |
+|---|---|
+| Model | `RedHatAI/Muse-Glimmer-30B-FP8-block` |
+| Served as | `muse-glimmer` |
+| Quantization | FP8 block-wise (W8A8, compressed-tensors); KV cache: auto (bf16) |
+| Test date | 2026-09-25T13:11:28+03:00 |
+| Dataset | [CBVD-5 (Cow Behavior Video Dataset)](https://www.kaggle.com/datasets/fandaoerji/cbvd-5cow-behavior-video-dataset) — [paper](https://www.nature.com/articles/s41598-024-65953-x) |
+| Split / source | `annotations\ava_val_v2.1.csv` |
+| Clips | 50 clips |
+| Keyframes | 292 |
+| Examples (annotated boxes) | **2532** |
+| **Exact-match error rate** | **30.8%** |
+| Serving | vLLM 0.30.0 |
+| Sampling | temperature=0.0, seed=0, max_tokens=4096, structured output (json_schema) |
+| Image mode | marked, max width 1280px |
+| Temporal context | annotated keyframe only (single still) |
+| Prompt revision | `187aec380cb8` |
+
+## What is being measured
+
+One example = one annotated cow on one keyframe. The model sees the full keyframe with that cow outlined and answers two independent fields, matching how CBVD-5 annotates: a **posture** (standing / lying) and an **activity** (feeding / drinking / ruminating / none). Exact match means both are right.
+
+**Read `ruminating` with that in mind.** Rumination is chewing cud — a movement. On one still frame a ruminating cow and an idle one are the same picture, so errors on that class measure the frame, not the model. Re-run with `--frames 5` to give it the motion.
+
+## Headline numbers
+
+| Axis | Error rate | 95% CI | Majority baseline | Correct |
+|---|---|---|---|---|
+| Exact match (both fields) | **30.8%** | 29.0% – 32.6% | — | 1753/2532 |
+| Posture only | **9.8%** | 8.7% – 11.0% | 40.3% (always `standing`) | 2284/2532 |
+| Activity only | **25.6%** | 24.0% – 27.4% | 48.5% (always `none`) | 1883/2532 |
+
+## Reading the numbers
+
+- The model never answered `ruminating` once, on any of the 2532 examples — although 383 are annotated as such. Recall for it is 0 by construction.
+
+## Predictions given vs annotated
+
+| Axis | Class | Annotated | Predicted |
+|---|---|---|---|
+| posture | `standing` | 1512 | 1630 |
+| posture | `lying` | 1020 | 902 |
+| activity | `feeding` | 791 | 905 |
+| activity | `drinking` | 53 | 28 |
+| activity | `ruminating` | 383 | 0 |
+| activity | `none` | 1305 | 1599 |
+
+## Error rate by clip
+
+50 clips, worst first. Spread 0.0% – 100.0%. A single-clip number sits somewhere in this range and says as much about that camera angle as about the model.
+
+| Clip | Keyframes | Cows | Exact-match error |
+|---|---|---|---|
+| 354 | 6 | 18 | 100.0% |
+| 374 | 6 | 18 | 83.3% |
+| 353 | 6 | 12 | 75.0% |
+| 394 | 4 | 4 | 75.0% |
+| 381 | 6 | 53 | 64.2% |
+| 393 | 3 | 22 | 63.6% |
+| 358 | 6 | 48 | 60.4% |
+| 386 | 6 | 42 | 59.5% |
+| 380 | 6 | 36 | 58.3% |
+| 356 | 6 | 30 | 53.3% |
+| 385 | 6 | 48 | 52.1% |
+| 362 | 6 | 44 | 45.5% |
+| 376 | 6 | 36 | 44.4% |
+| 378 | 6 | 36 | 44.4% |
+| 370 | 6 | 122 | 38.5% |
+| 348 | 6 | 115 | 36.5% |
+| 373 | 6 | 104 | 35.6% |
+| 351 | 6 | 54 | 35.2% |
+| 392 | 6 | 63 | 34.9% |
+| 355 | 6 | 23 | 34.8% |
+| 352 | 6 | 24 | 33.3% |
+| 372 | 6 | 108 | 33.3% |
+| 388 | 6 | 36 | 33.3% |
+| 382 | 6 | 68 | 29.4% |
+| 387 | 6 | 42 | 28.6% |
+| 357 | 6 | 62 | 27.4% |
+| 344 | 6 | 11 | 27.3% |
+| 375 | 6 | 48 | 27.1% |
+| 360 | 6 | 41 | 26.8% |
+| 371 | 6 | 120 | 26.7% |
+| 389 | 6 | 30 | 26.7% |
+| 363 | 6 | 40 | 25.0% |
+| 349 | 6 | 67 | 22.4% |
+| 365 | 6 | 84 | 21.4% |
+| 379 | 6 | 42 | 21.4% |
+| 345 | 5 | 19 | 21.1% |
+| 391 | 6 | 54 | 20.4% |
+| 367 | 6 | 84 | 20.2% |
+| 350 | 6 | 54 | 18.5% |
+| 383 | 6 | 65 | 18.5% |
+| 377 | 6 | 44 | 18.2% |
+| 366 | 6 | 73 | 17.8% |
+| 347 | 6 | 132 | 17.4% |
+| 390 | 6 | 12 | 16.7% |
+| 359 | 6 | 36 | 11.1% |
+| 361 | 6 | 36 | 11.1% |
+| 341 | 4 | 21 | 9.5% |
+| 346 | 6 | 103 | 8.7% |
+| 364 | 6 | 6 | 0.0% |
+| 384 | 6 | 42 | 0.0% |
+
+## Error rate by how big the cow is in frame
+
+Quartiles of bounding-box area. `y centre` is where those boxes sit vertically, which in this barn is also how far away they are: the near feed barrier is the lower half of the frame, the far cubicle row the upper.
+
+| Quartile | Box area, % of frame | n | y centre | Annotated `lying` | Exact-match error |
+|---|---|---|---|---|---|
+| Q1 | 0.26 – 0.83 | 633 | 0.26 | 64.8% | **39.3%** |
+| Q2 | 0.84 – 1.36 | 633 | 0.30 | 69.7% | **37.9%** |
+| Q3 | 1.36 – 3.25 | 633 | 0.31 | 26.7% | **33.8%** |
+| Q4 | 3.25 – 10.87 | 633 | 0.47 | 0.0% | **12.0%** |
+
+## Per class
+
+| Class | Support | Precision | Recall | F1 |
+|---|---|---|---|---|
+| `posture:standing` | 1512 | 0.89 | 0.96 | 0.92 |
+| `posture:lying` | 1020 | 0.93 | 0.82 | 0.87 |
+| `activity:feeding` | 791 | 0.80 | 0.92 | 0.85 |
+| `activity:drinking` | 53 | 0.54 | 0.28 | 0.37 |
+| `activity:ruminating` | 383 | 0.00 | 0.00 | 0.00 |
+| `activity:none` | 1305 | 0.72 | 0.88 | 0.79 |
+
+## Confusion matrix — posture
+
+| ground truth / predicted | `standing` | `lying` | `<failed>` |
+|---|---|---|---|
+| `standing` | 1447 | 65 | 0 |
+| `lying` | 183 | 837 | 0 |
+
+## Confusion matrix — activity
+
+| ground truth / predicted | `feeding` | `drinking` | `ruminating` | `none` | `<failed>` |
+|---|---|---|---|---|---|
+| `feeding` | 724 | 0 | 0 | 67 | 0 |
+| `drinking` | 12 | 15 | 0 | 26 | 0 |
+| `ruminating` | 20 | 1 | 0 | 362 | 0 |
+| `none` | 149 | 12 | 0 | 1144 | 0 |
+
+## Every example
+
+All 2532 annotated cows, 292 keyframes. Ordered by keyframe, then left to right. `x` marks the horizontal centre of the box as a fraction of frame width, `y` the vertical centre.
+
+| # | clip | t, s | x | y | ground truth | prediction | |
+|---|---|---|---|---|---|---|---|
+| 1 | 341 | 4 | 0.07 | 0.34 | standing / feeding | standing / none | activity |
+| 2 | 341 | 4 | 0.08 | 0.51 | standing / feeding | standing / feeding | ok |
+| 3 | 341 | 4 | 0.87 | 0.46 | standing / feeding | standing / feeding | ok |
+| 4 | 341 | 4 | 0.92 | 0.47 | standing / feeding | standing / feeding | ok |
+| 5 | 341 | 4 | 0.95 | 0.45 | standing / feeding | standing / feeding | ok |
+| 6 | 341 | 5 | 0.06 | 0.32 | standing / none | standing / none | ok |
+| 7 | 341 | 5 | 0.08 | 0.51 | standing / feeding | standing / feeding | ok |
+| 8 | 341 | 6 | 0.06 | 0.32 | standing / none | standing / none | ok |
+| 9 | 341 | 6 | 0.08 | 0.49 | standing / feeding | standing / feeding | ok |
+| 10 | 341 | 6 | 0.26 | 0.49 | standing / feeding | standing / feeding | ok |
+| 11 | 341 | 6 | 0.48 | 0.48 | standing / feeding | standing / feeding | ok |
+| 12 | 341 | 6 | 0.63 | 0.48 | standing / feeding | standing / feeding | ok |
+| 13 | 341 | 6 | 0.67 | 0.47 | standing / feeding | standing / feeding | ok |
+| 14 | 341 | 6 | 0.88 | 0.30 | lying / none | standing / none | posture |
+| 15 | 341 | 6 | 0.94 | 0.46 | standing / feeding | standing / feeding | ok |
+| 16 | 341 | 7 | 0.06 | 0.32 | standing / none | standing / none | ok |
+| 17 | 341 | 7 | 0.09 | 0.51 | standing / feeding | standing / feeding | ok |
+| 18 | 341 | 7 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 19 | 341 | 7 | 0.62 | 0.49 | standing / feeding | standing / feeding | ok |
+| 20 | 341 | 7 | 0.80 | 0.46 | standing / feeding | standing / feeding | ok |
+| 21 | 341 | 7 | 0.91 | 0.50 | standing / feeding | standing / feeding | ok |
+| 22 | 344 | 2 | 0.25 | 0.29 | lying / ruminating | lying / none | activity |
+| 23 | 344 | 2 | 0.94 | 0.31 | lying / none | lying / none | ok |
+| 24 | 344 | 3 | 0.26 | 0.29 | lying / ruminating | standing / none | posture + activity |
+| 25 | 344 | 3 | 0.93 | 0.31 | lying / none | lying / none | ok |
+| 26 | 344 | 4 | 0.28 | 0.31 | lying / ruminating | lying / none | activity |
+| 27 | 344 | 4 | 0.94 | 0.32 | lying / none | lying / none | ok |
+| 28 | 344 | 5 | 0.25 | 0.28 | standing / none | standing / none | ok |
+| 29 | 344 | 5 | 0.94 | 0.31 | lying / none | lying / none | ok |
+| 30 | 344 | 6 | 0.24 | 0.29 | standing / none | standing / none | ok |
+| 31 | 344 | 6 | 0.93 | 0.31 | lying / none | lying / none | ok |
+| 32 | 344 | 7 | 0.24 | 0.29 | standing / none | standing / none | ok |
+| 33 | 345 | 3 | 0.10 | 0.26 | standing / none | lying / none | posture |
+| 34 | 345 | 3 | 0.15 | 0.22 | standing / none | lying / none | posture |
+| 35 | 345 | 3 | 0.23 | 0.21 | standing / none | standing / none | ok |
+| 36 | 345 | 3 | 0.27 | 0.16 | standing / none | standing / none | ok |
+| 37 | 345 | 4 | 0.10 | 0.25 | standing / none | standing / none | ok |
+| 38 | 345 | 4 | 0.16 | 0.23 | standing / none | lying / none | posture |
+| 39 | 345 | 4 | 0.24 | 0.20 | standing / none | standing / none | ok |
+| 40 | 345 | 4 | 0.31 | 0.20 | standing / none | standing / none | ok |
+| 41 | 345 | 5 | 0.10 | 0.26 | standing / none | standing / none | ok |
+| 42 | 345 | 5 | 0.15 | 0.22 | standing / none | standing / none | ok |
+| 43 | 345 | 5 | 0.25 | 0.20 | standing / none | standing / none | ok |
+| 44 | 345 | 6 | 0.09 | 0.28 | standing / none | standing / none | ok |
+| 45 | 345 | 6 | 0.15 | 0.24 | standing / none | standing / none | ok |
+| 46 | 345 | 6 | 0.24 | 0.20 | standing / none | standing / none | ok |
+| 47 | 345 | 6 | 0.31 | 0.19 | standing / none | standing / none | ok |
+| 48 | 345 | 7 | 0.15 | 0.22 | standing / none | lying / none | posture |
+| 49 | 345 | 7 | 0.23 | 0.20 | standing / none | standing / none | ok |
+| 50 | 345 | 7 | 0.28 | 0.19 | standing / none | standing / none | ok |
+| 51 | 345 | 7 | 0.31 | 0.19 | standing / none | standing / none | ok |
+| 52 | 346 | 2 | 0.03 | 0.51 | standing / feeding | standing / feeding | ok |
+| 53 | 346 | 2 | 0.11 | 0.26 | standing / none | standing / none | ok |
+| 54 | 346 | 2 | 0.13 | 0.50 | standing / feeding | standing / feeding | ok |
+| 55 | 346 | 2 | 0.19 | 0.26 | lying / none | standing / none | posture |
+| 56 | 346 | 2 | 0.27 | 0.47 | standing / feeding | standing / feeding | ok |
+| 57 | 346 | 2 | 0.28 | 0.24 | standing / none | standing / none | ok |
+| 58 | 346 | 2 | 0.37 | 0.43 | standing / feeding | standing / feeding | ok |
+| 59 | 346 | 2 | 0.41 | 0.25 | standing / none | standing / none | ok |
+| 60 | 346 | 2 | 0.47 | 0.40 | standing / none | standing / none | ok |
+| 61 | 346 | 2 | 0.48 | 0.21 | standing / none | standing / none | ok |
+| 62 | 346 | 2 | 0.53 | 0.16 | standing / none | standing / none | ok |
+| 63 | 346 | 2 | 0.54 | 0.28 | lying / none | lying / none | ok |
+| 64 | 346 | 2 | 0.64 | 0.48 | standing / feeding | standing / feeding | ok |
+| 65 | 346 | 2 | 0.70 | 0.20 | standing / none | standing / none | ok |
+| 66 | 346 | 2 | 0.84 | 0.28 | standing / none | standing / none | ok |
+| 67 | 346 | 2 | 0.85 | 0.46 | standing / feeding | standing / feeding | ok |
+| 68 | 346 | 2 | 0.94 | 0.26 | lying / none | lying / none | ok |
+| 69 | 346 | 2 | 0.96 | 0.34 | lying / none | lying / none | ok |
+| 70 | 346 | 3 | 0.03 | 0.51 | standing / feeding | standing / feeding | ok |
+| 71 | 346 | 3 | 0.11 | 0.26 | standing / none | standing / none | ok |
+| 72 | 346 | 3 | 0.13 | 0.50 | standing / feeding | standing / feeding | ok |
+| 73 | 346 | 3 | 0.27 | 0.47 | standing / feeding | standing / feeding | ok |
+| 74 | 346 | 3 | 0.28 | 0.24 | standing / none | standing / none | ok |
+| 75 | 346 | 3 | 0.37 | 0.43 | standing / feeding | standing / feeding | ok |
+| 76 | 346 | 3 | 0.41 | 0.25 | standing / none | standing / none | ok |
+| 77 | 346 | 3 | 0.47 | 0.40 | standing / none | standing / feeding | activity |
+| 78 | 346 | 3 | 0.48 | 0.21 | standing / none | standing / none | ok |
+| 79 | 346 | 3 | 0.53 | 0.16 | standing / none | standing / none | ok |
+| 80 | 346 | 3 | 0.54 | 0.28 | lying / none | lying / none | ok |
+| 81 | 346 | 3 | 0.64 | 0.49 | standing / feeding | standing / feeding | ok |
+| 82 | 346 | 3 | 0.70 | 0.20 | standing / none | standing / none | ok |
+| 83 | 346 | 3 | 0.85 | 0.28 | standing / none | standing / none | ok |
+| 84 | 346 | 3 | 0.85 | 0.46 | standing / feeding | standing / feeding | ok |
+| 85 | 346 | 3 | 0.94 | 0.26 | lying / none | lying / none | ok |
+| 86 | 346 | 3 | 0.96 | 0.35 | lying / none | lying / none | ok |
+| 87 | 346 | 4 | 0.03 | 0.51 | standing / feeding | standing / none | activity |
+| 88 | 346 | 4 | 0.11 | 0.26 | standing / none | standing / none | ok |
+| 89 | 346 | 4 | 0.13 | 0.50 | standing / feeding | standing / feeding | ok |
+| 90 | 346 | 4 | 0.27 | 0.47 | standing / feeding | standing / feeding | ok |
+| 91 | 346 | 4 | 0.28 | 0.24 | standing / none | standing / none | ok |
+| 92 | 346 | 4 | 0.37 | 0.44 | standing / feeding | standing / feeding | ok |
+| 93 | 346 | 4 | 0.41 | 0.25 | standing / none | standing / none | ok |
+| 94 | 346 | 4 | 0.47 | 0.40 | standing / none | standing / none | ok |
+| 95 | 346 | 4 | 0.48 | 0.21 | standing / none | standing / none | ok |
+| 96 | 346 | 4 | 0.53 | 0.16 | standing / none | standing / none | ok |
+| 97 | 346 | 4 | 0.54 | 0.28 | lying / none | lying / none | ok |
+| 98 | 346 | 4 | 0.64 | 0.49 | standing / feeding | standing / feeding | ok |
+| 99 | 346 | 4 | 0.70 | 0.20 | standing / none | standing / none | ok |
+| 100 | 346 | 4 | 0.85 | 0.28 | standing / none | standing / none | ok |
+| 101 | 346 | 4 | 0.85 | 0.47 | standing / feeding | standing / feeding | ok |
+| 102 | 346 | 4 | 0.94 | 0.26 | lying / none | lying / none | ok |
+| 103 | 346 | 4 | 0.96 | 0.36 | lying / none | lying / none | ok |
+| 104 | 346 | 5 | 0.03 | 0.51 | standing / feeding | standing / feeding | ok |
+| 105 | 346 | 5 | 0.11 | 0.26 | standing / none | lying / none | posture |
+| 106 | 346 | 5 | 0.13 | 0.50 | standing / feeding | standing / feeding | ok |
+| 107 | 346 | 5 | 0.27 | 0.48 | standing / feeding | standing / feeding | ok |
+| 108 | 346 | 5 | 0.28 | 0.24 | standing / none | standing / none | ok |
+| 109 | 346 | 5 | 0.37 | 0.45 | standing / feeding | standing / feeding | ok |
+| 110 | 346 | 5 | 0.41 | 0.25 | standing / none | standing / none | ok |
+| 111 | 346 | 5 | 0.47 | 0.40 | standing / none | standing / feeding | activity |
+| 112 | 346 | 5 | 0.48 | 0.21 | standing / none | standing / none | ok |
+| 113 | 346 | 5 | 0.53 | 0.16 | standing / none | standing / feeding | activity |
+| 114 | 346 | 5 | 0.54 | 0.28 | lying / none | lying / none | ok |
+| 115 | 346 | 5 | 0.64 | 0.50 | standing / feeding | standing / feeding | ok |
+| 116 | 346 | 5 | 0.70 | 0.20 | standing / none | standing / none | ok |
+| 117 | 346 | 5 | 0.85 | 0.28 | standing / none | standing / feeding | activity |
+| 118 | 346 | 5 | 0.85 | 0.48 | standing / feeding | standing / feeding | ok |
+| 119 | 346 | 5 | 0.94 | 0.26 | lying / none | lying / none | ok |
+| 120 | 346 | 5 | 0.96 | 0.37 | lying / none | lying / none | ok |
+| 121 | 346 | 6 | 0.03 | 0.51 | standing / feeding | standing / feeding | ok |
+| 122 | 346 | 6 | 0.11 | 0.26 | standing / none | standing / none | ok |
+| 123 | 346 | 6 | 0.13 | 0.50 | standing / feeding | standing / feeding | ok |
+| 124 | 346 | 6 | 0.27 | 0.48 | standing / feeding | standing / feeding | ok |
+| 125 | 346 | 6 | 0.28 | 0.24 | standing / none | standing / none | ok |
+| 126 | 346 | 6 | 0.37 | 0.46 | standing / feeding | standing / feeding | ok |
+| 127 | 346 | 6 | 0.41 | 0.25 | standing / none | standing / none | ok |
+| 128 | 346 | 6 | 0.47 | 0.40 | standing / none | standing / feeding | activity |
+| 129 | 346 | 6 | 0.48 | 0.21 | standing / none | standing / none | ok |
+| 130 | 346 | 6 | 0.53 | 0.16 | standing / none | standing / none | ok |
+| 131 | 346 | 6 | 0.54 | 0.28 | lying / none | lying / none | ok |
+| 132 | 346 | 6 | 0.64 | 0.51 | standing / feeding | standing / feeding | ok |
+| 133 | 346 | 6 | 0.70 | 0.20 | standing / none | standing / none | ok |
+| 134 | 346 | 6 | 0.85 | 0.28 | standing / none | standing / none | ok |
+| 135 | 346 | 6 | 0.85 | 0.49 | standing / feeding | standing / feeding | ok |
+| 136 | 346 | 6 | 0.94 | 0.26 | lying / none | lying / none | ok |
+| 137 | 346 | 6 | 0.96 | 0.38 | lying / none | lying / none | ok |
+| 138 | 346 | 7 | 0.03 | 0.52 | standing / feeding | standing / feeding | ok |
+| 139 | 346 | 7 | 0.11 | 0.26 | standing / none | standing / none | ok |
+| 140 | 346 | 7 | 0.13 | 0.50 | standing / feeding | standing / feeding | ok |
+| 141 | 346 | 7 | 0.27 | 0.49 | standing / feeding | standing / feeding | ok |
+| 142 | 346 | 7 | 0.28 | 0.24 | standing / none | standing / none | ok |
+| 143 | 346 | 7 | 0.37 | 0.48 | standing / feeding | standing / feeding | ok |
+| 144 | 346 | 7 | 0.41 | 0.25 | standing / none | standing / none | ok |
+| 145 | 346 | 7 | 0.47 | 0.41 | standing / none | standing / feeding | activity |
+| 146 | 346 | 7 | 0.48 | 0.21 | standing / none | standing / none | ok |
+| 147 | 346 | 7 | 0.53 | 0.16 | standing / none | standing / none | ok |
+| 148 | 346 | 7 | 0.54 | 0.28 | lying / none | lying / none | ok |
+| 149 | 346 | 7 | 0.64 | 0.48 | standing / feeding | standing / feeding | ok |
+| 150 | 346 | 7 | 0.70 | 0.20 | standing / none | standing / none | ok |
+| 151 | 346 | 7 | 0.85 | 0.28 | standing / none | standing / none | ok |
+| 152 | 346 | 7 | 0.86 | 0.49 | standing / feeding | standing / feeding | ok |
+| 153 | 346 | 7 | 0.94 | 0.26 | lying / none | lying / none | ok |
+| 154 | 346 | 7 | 0.96 | 0.39 | lying / none | lying / none | ok |
+| 155 | 347 | 2 | 0.01 | 0.47 | standing / feeding | standing / feeding | ok |
+| 156 | 347 | 2 | 0.04 | 0.48 | standing / feeding | standing / feeding | ok |
+| 157 | 347 | 2 | 0.09 | 0.46 | standing / feeding | standing / feeding | ok |
+| 158 | 347 | 2 | 0.11 | 0.43 | standing / feeding | standing / feeding | ok |
+| 159 | 347 | 2 | 0.17 | 0.39 | standing / feeding | standing / feeding | ok |
+| 160 | 347 | 2 | 0.21 | 0.46 | standing / feeding | standing / feeding | ok |
+| 161 | 347 | 2 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 162 | 347 | 2 | 0.32 | 0.48 | standing / feeding | standing / none | activity |
+| 163 | 347 | 2 | 0.38 | 0.44 | standing / feeding | standing / none | activity |
+| 164 | 347 | 2 | 0.47 | 0.47 | standing / feeding | standing / feeding | ok |
+| 165 | 347 | 2 | 0.54 | 0.40 | standing / feeding | standing / feeding | ok |
+| 166 | 347 | 2 | 0.60 | 0.49 | standing / feeding | standing / feeding | ok |
+| 167 | 347 | 2 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 168 | 347 | 2 | 0.71 | 0.22 | standing / none | standing / none | ok |
+| 169 | 347 | 2 | 0.72 | 0.25 | standing / drinking | standing / none | activity |
+| 170 | 347 | 2 | 0.77 | 0.18 | standing / none | standing / feeding | activity |
+| 171 | 347 | 2 | 0.77 | 0.51 | standing / feeding | standing / feeding | ok |
+| 172 | 347 | 2 | 0.83 | 0.25 | standing / none | standing / none | ok |
+| 173 | 347 | 2 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 174 | 347 | 2 | 0.88 | 0.49 | standing / feeding | standing / feeding | ok |
+| 175 | 347 | 2 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 176 | 347 | 2 | 0.94 | 0.47 | standing / feeding | standing / feeding | ok |
+| 177 | 347 | 3 | 0.01 | 0.47 | standing / feeding | standing / feeding | ok |
+| 178 | 347 | 3 | 0.04 | 0.48 | standing / feeding | standing / feeding | ok |
+| 179 | 347 | 3 | 0.09 | 0.46 | standing / feeding | standing / feeding | ok |
+| 180 | 347 | 3 | 0.11 | 0.43 | standing / feeding | standing / feeding | ok |
+| 181 | 347 | 3 | 0.17 | 0.39 | standing / feeding | standing / feeding | ok |
+| 182 | 347 | 3 | 0.21 | 0.46 | standing / feeding | standing / feeding | ok |
+| 183 | 347 | 3 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 184 | 347 | 3 | 0.32 | 0.48 | standing / feeding | standing / none | activity |
+| 185 | 347 | 3 | 0.38 | 0.44 | standing / feeding | standing / none | activity |
+| 186 | 347 | 3 | 0.47 | 0.47 | standing / feeding | standing / feeding | ok |
+| 187 | 347 | 3 | 0.54 | 0.40 | standing / feeding | standing / feeding | ok |
+| 188 | 347 | 3 | 0.60 | 0.49 | standing / feeding | standing / none | activity |
+| 189 | 347 | 3 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 190 | 347 | 3 | 0.71 | 0.22 | standing / none | standing / none | ok |
+| 191 | 347 | 3 | 0.72 | 0.25 | standing / drinking | standing / none | activity |
+| 192 | 347 | 3 | 0.77 | 0.18 | standing / none | standing / none | ok |
+| 193 | 347 | 3 | 0.77 | 0.51 | standing / feeding | standing / feeding | ok |
+| 194 | 347 | 3 | 0.83 | 0.25 | standing / none | standing / none | ok |
+| 195 | 347 | 3 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 196 | 347 | 3 | 0.88 | 0.49 | standing / feeding | standing / feeding | ok |
+| 197 | 347 | 3 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 198 | 347 | 3 | 0.94 | 0.47 | standing / feeding | standing / feeding | ok |
+| 199 | 347 | 4 | 0.01 | 0.47 | standing / feeding | standing / feeding | ok |
+| 200 | 347 | 4 | 0.04 | 0.48 | standing / feeding | standing / feeding | ok |
+| 201 | 347 | 4 | 0.09 | 0.47 | standing / feeding | standing / feeding | ok |
+| 202 | 347 | 4 | 0.11 | 0.43 | standing / feeding | standing / feeding | ok |
+| 203 | 347 | 4 | 0.17 | 0.39 | standing / feeding | standing / feeding | ok |
+| 204 | 347 | 4 | 0.21 | 0.46 | standing / feeding | standing / feeding | ok |
+| 205 | 347 | 4 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 206 | 347 | 4 | 0.32 | 0.48 | standing / feeding | standing / none | activity |
+| 207 | 347 | 4 | 0.38 | 0.44 | standing / feeding | standing / none | activity |
+| 208 | 347 | 4 | 0.47 | 0.47 | standing / feeding | standing / feeding | ok |
+| 209 | 347 | 4 | 0.54 | 0.40 | standing / feeding | standing / feeding | ok |
+| 210 | 347 | 4 | 0.60 | 0.49 | standing / feeding | standing / feeding | ok |
+| 211 | 347 | 4 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 212 | 347 | 4 | 0.71 | 0.22 | standing / none | standing / none | ok |
+| 213 | 347 | 4 | 0.72 | 0.25 | standing / drinking | standing / none | activity |
+| 214 | 347 | 4 | 0.77 | 0.18 | standing / none | standing / none | ok |
+| 215 | 347 | 4 | 0.77 | 0.51 | standing / feeding | standing / none | activity |
+| 216 | 347 | 4 | 0.83 | 0.25 | standing / none | standing / feeding | activity |
+| 217 | 347 | 4 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 218 | 347 | 4 | 0.88 | 0.49 | standing / feeding | standing / feeding | ok |
+| 219 | 347 | 4 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 220 | 347 | 4 | 0.94 | 0.47 | standing / feeding | standing / feeding | ok |
+| 221 | 347 | 5 | 0.01 | 0.47 | standing / feeding | standing / feeding | ok |
+| 222 | 347 | 5 | 0.04 | 0.49 | standing / feeding | standing / feeding | ok |
+| 223 | 347 | 5 | 0.09 | 0.48 | standing / feeding | standing / feeding | ok |
+| 224 | 347 | 5 | 0.11 | 0.43 | standing / feeding | standing / feeding | ok |
+| 225 | 347 | 5 | 0.17 | 0.39 | standing / feeding | standing / feeding | ok |
+| 226 | 347 | 5 | 0.21 | 0.46 | standing / feeding | standing / feeding | ok |
+| 227 | 347 | 5 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 228 | 347 | 5 | 0.32 | 0.48 | standing / feeding | standing / none | activity |
+| 229 | 347 | 5 | 0.38 | 0.44 | standing / feeding | standing / none | activity |
+| 230 | 347 | 5 | 0.47 | 0.47 | standing / feeding | standing / feeding | ok |
+| 231 | 347 | 5 | 0.54 | 0.40 | standing / feeding | standing / feeding | ok |
+| 232 | 347 | 5 | 0.60 | 0.49 | standing / feeding | standing / none | activity |
+| 233 | 347 | 5 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 234 | 347 | 5 | 0.71 | 0.22 | standing / none | standing / none | ok |
+| 235 | 347 | 5 | 0.72 | 0.25 | standing / drinking | standing / none | activity |
+| 236 | 347 | 5 | 0.77 | 0.18 | standing / none | standing / none | ok |
+| 237 | 347 | 5 | 0.77 | 0.51 | standing / feeding | standing / feeding | ok |
+| 238 | 347 | 5 | 0.83 | 0.25 | standing / none | standing / feeding | activity |
+| 239 | 347 | 5 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 240 | 347 | 5 | 0.88 | 0.49 | standing / feeding | standing / feeding | ok |
+| 241 | 347 | 5 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 242 | 347 | 5 | 0.94 | 0.48 | standing / feeding | standing / feeding | ok |
+| 243 | 347 | 6 | 0.01 | 0.48 | standing / feeding | standing / feeding | ok |
+| 244 | 347 | 6 | 0.04 | 0.50 | standing / feeding | standing / feeding | ok |
+| 245 | 347 | 6 | 0.09 | 0.49 | standing / feeding | standing / feeding | ok |
+| 246 | 347 | 6 | 0.11 | 0.43 | standing / feeding | standing / feeding | ok |
+| 247 | 347 | 6 | 0.17 | 0.39 | standing / feeding | standing / none | activity |
+| 248 | 347 | 6 | 0.21 | 0.46 | standing / feeding | standing / feeding | ok |
+| 249 | 347 | 6 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 250 | 347 | 6 | 0.32 | 0.48 | standing / feeding | standing / feeding | ok |
+| 251 | 347 | 6 | 0.38 | 0.44 | standing / feeding | standing / feeding | ok |
+| 252 | 347 | 6 | 0.47 | 0.47 | standing / feeding | standing / feeding | ok |
+| 253 | 347 | 6 | 0.54 | 0.40 | standing / feeding | standing / feeding | ok |
+| 254 | 347 | 6 | 0.60 | 0.49 | standing / feeding | standing / feeding | ok |
+| 255 | 347 | 6 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 256 | 347 | 6 | 0.71 | 0.22 | standing / none | standing / none | ok |
+| 257 | 347 | 6 | 0.72 | 0.25 | standing / drinking | standing / feeding | activity |
+| 258 | 347 | 6 | 0.77 | 0.18 | standing / none | standing / none | ok |
+| 259 | 347 | 6 | 0.77 | 0.51 | standing / feeding | standing / feeding | ok |
+| 260 | 347 | 6 | 0.83 | 0.25 | standing / none | standing / none | ok |
+| 261 | 347 | 6 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 262 | 347 | 6 | 0.88 | 0.49 | standing / feeding | standing / feeding | ok |
+| 263 | 347 | 6 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 264 | 347 | 6 | 0.94 | 0.48 | standing / feeding | standing / feeding | ok |
+| 265 | 347 | 7 | 0.01 | 0.49 | standing / feeding | standing / feeding | ok |
+| 266 | 347 | 7 | 0.04 | 0.51 | standing / feeding | standing / feeding | ok |
+| 267 | 347 | 7 | 0.09 | 0.50 | standing / feeding | standing / feeding | ok |
+| 268 | 347 | 7 | 0.11 | 0.43 | standing / feeding | standing / feeding | ok |
+| 269 | 347 | 7 | 0.17 | 0.39 | standing / feeding | standing / feeding | ok |
+| 270 | 347 | 7 | 0.21 | 0.46 | standing / feeding | standing / feeding | ok |
+| 271 | 347 | 7 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 272 | 347 | 7 | 0.32 | 0.48 | standing / feeding | standing / none | activity |
+| 273 | 347 | 7 | 0.38 | 0.44 | standing / feeding | standing / feeding | ok |
+| 274 | 347 | 7 | 0.47 | 0.47 | standing / feeding | standing / feeding | ok |
+| 275 | 347 | 7 | 0.54 | 0.40 | standing / feeding | standing / feeding | ok |
+| 276 | 347 | 7 | 0.60 | 0.49 | standing / feeding | standing / feeding | ok |
+| 277 | 347 | 7 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 278 | 347 | 7 | 0.71 | 0.22 | standing / none | standing / none | ok |
+| 279 | 347 | 7 | 0.73 | 0.25 | standing / drinking | standing / drinking | ok |
+| 280 | 347 | 7 | 0.77 | 0.18 | standing / none | standing / feeding | activity |
+| 281 | 347 | 7 | 0.78 | 0.51 | standing / feeding | standing / feeding | ok |
+| 282 | 347 | 7 | 0.83 | 0.25 | standing / none | standing / none | ok |
+| 283 | 347 | 7 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 284 | 347 | 7 | 0.88 | 0.49 | standing / feeding | standing / feeding | ok |
+| 285 | 347 | 7 | 0.92 | 0.27 | standing / none | standing / feeding | activity |
+| 286 | 347 | 7 | 0.94 | 0.49 | standing / feeding | standing / feeding | ok |
+| 287 | 348 | 2 | 0.11 | 0.37 | lying / ruminating | lying / none | activity |
+| 288 | 348 | 2 | 0.17 | 0.32 | lying / ruminating | standing / none | posture + activity |
+| 289 | 348 | 2 | 0.18 | 0.47 | standing / feeding | standing / feeding | ok |
+| 290 | 348 | 2 | 0.26 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 291 | 348 | 2 | 0.30 | 0.41 | standing / feeding | standing / feeding | ok |
+| 292 | 348 | 2 | 0.36 | 0.23 | standing / none | standing / none | ok |
+| 293 | 348 | 2 | 0.37 | 0.48 | standing / feeding | standing / feeding | ok |
+| 294 | 348 | 2 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 295 | 348 | 2 | 0.45 | 0.48 | standing / feeding | standing / feeding | ok |
+| 296 | 348 | 2 | 0.52 | 0.45 | standing / feeding | standing / feeding | ok |
+| 297 | 348 | 2 | 0.54 | 0.20 | lying / none | lying / none | ok |
+| 298 | 348 | 2 | 0.58 | 0.48 | standing / feeding | standing / feeding | ok |
+| 299 | 348 | 2 | 0.59 | 0.27 | standing / none | lying / none | posture |
+| 300 | 348 | 2 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 301 | 348 | 2 | 0.71 | 0.21 | standing / none | standing / none | ok |
+| 302 | 348 | 2 | 0.81 | 0.23 | standing / none | standing / drinking | activity |
+| 303 | 348 | 2 | 0.83 | 0.45 | standing / feeding | standing / feeding | ok |
+| 304 | 348 | 2 | 0.92 | 0.46 | standing / feeding | standing / feeding | ok |
+| 305 | 348 | 2 | 0.93 | 0.29 | standing / none | standing / none | ok |
+| 306 | 348 | 3 | 0.11 | 0.37 | lying / ruminating | lying / none | activity |
+| 307 | 348 | 3 | 0.17 | 0.32 | lying / ruminating | lying / none | activity |
+| 308 | 348 | 3 | 0.18 | 0.47 | standing / feeding | standing / feeding | ok |
+| 309 | 348 | 3 | 0.26 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 310 | 348 | 3 | 0.30 | 0.41 | standing / feeding | standing / feeding | ok |
+| 311 | 348 | 3 | 0.36 | 0.23 | standing / none | standing / none | ok |
+| 312 | 348 | 3 | 0.37 | 0.48 | standing / feeding | standing / feeding | ok |
+| 313 | 348 | 3 | 0.44 | 0.23 | lying / ruminating | standing / none | posture + activity |
+| 314 | 348 | 3 | 0.45 | 0.48 | standing / feeding | standing / feeding | ok |
+| 315 | 348 | 3 | 0.52 | 0.45 | standing / feeding | standing / feeding | ok |
+| 316 | 348 | 3 | 0.54 | 0.20 | lying / none | standing / none | posture |
+| 317 | 348 | 3 | 0.58 | 0.48 | standing / feeding | standing / feeding | ok |
+| 318 | 348 | 3 | 0.59 | 0.27 | standing / none | lying / none | posture |
+| 319 | 348 | 3 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 320 | 348 | 3 | 0.71 | 0.21 | standing / none | standing / feeding | activity |
+| 321 | 348 | 3 | 0.81 | 0.23 | standing / none | standing / drinking | activity |
+| 322 | 348 | 3 | 0.83 | 0.45 | standing / feeding | standing / feeding | ok |
+| 323 | 348 | 3 | 0.92 | 0.46 | standing / feeding | standing / feeding | ok |
+| 324 | 348 | 3 | 0.93 | 0.29 | standing / none | standing / none | ok |
+| 325 | 348 | 4 | 0.11 | 0.37 | lying / ruminating | lying / none | activity |
+| 326 | 348 | 4 | 0.17 | 0.32 | lying / ruminating | lying / none | activity |
+| 327 | 348 | 4 | 0.18 | 0.47 | standing / feeding | standing / feeding | ok |
+| 328 | 348 | 4 | 0.26 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 329 | 348 | 4 | 0.30 | 0.41 | standing / feeding | standing / feeding | ok |
+| 330 | 348 | 4 | 0.36 | 0.23 | standing / none | standing / none | ok |
+| 331 | 348 | 4 | 0.37 | 0.49 | standing / feeding | standing / feeding | ok |
+| 332 | 348 | 4 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 333 | 348 | 4 | 0.45 | 0.48 | standing / feeding | standing / feeding | ok |
+| 334 | 348 | 4 | 0.52 | 0.45 | standing / feeding | standing / feeding | ok |
+| 335 | 348 | 4 | 0.54 | 0.20 | lying / none | lying / none | ok |
+| 336 | 348 | 4 | 0.58 | 0.48 | standing / feeding | standing / feeding | ok |
+| 337 | 348 | 4 | 0.59 | 0.27 | standing / none | standing / none | ok |
+| 338 | 348 | 4 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 339 | 348 | 4 | 0.71 | 0.21 | standing / none | standing / none | ok |
+| 340 | 348 | 4 | 0.81 | 0.23 | standing / none | standing / drinking | activity |
+| 341 | 348 | 4 | 0.83 | 0.45 | standing / feeding | standing / feeding | ok |
+| 342 | 348 | 4 | 0.92 | 0.46 | standing / feeding | standing / feeding | ok |
+| 343 | 348 | 4 | 0.93 | 0.29 | standing / none | lying / none | posture |
+| 344 | 348 | 5 | 0.03 | 0.37 | standing / none | lying / none | posture |
+| 345 | 348 | 5 | 0.11 | 0.37 | lying / ruminating | lying / none | activity |
+| 346 | 348 | 5 | 0.17 | 0.32 | lying / ruminating | lying / none | activity |
+| 347 | 348 | 5 | 0.18 | 0.47 | standing / feeding | standing / feeding | ok |
+| 348 | 348 | 5 | 0.27 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 349 | 348 | 5 | 0.30 | 0.41 | standing / feeding | standing / none | activity |
+| 350 | 348 | 5 | 0.36 | 0.23 | standing / none | standing / none | ok |
+| 351 | 348 | 5 | 0.37 | 0.49 | standing / feeding | standing / feeding | ok |
+| 352 | 348 | 5 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 353 | 348 | 5 | 0.45 | 0.48 | standing / feeding | standing / feeding | ok |
+| 354 | 348 | 5 | 0.52 | 0.45 | standing / feeding | standing / feeding | ok |
+| 355 | 348 | 5 | 0.54 | 0.20 | lying / none | lying / none | ok |
+| 356 | 348 | 5 | 0.58 | 0.48 | standing / feeding | standing / feeding | ok |
+| 357 | 348 | 5 | 0.59 | 0.27 | standing / none | standing / none | ok |
+| 358 | 348 | 5 | 0.71 | 0.50 | standing / feeding | standing / feeding | ok |
+| 359 | 348 | 5 | 0.71 | 0.21 | standing / none | standing / none | ok |
+| 360 | 348 | 5 | 0.81 | 0.23 | standing / none | standing / feeding | activity |
+| 361 | 348 | 5 | 0.84 | 0.45 | standing / feeding | standing / feeding | ok |
+| 362 | 348 | 5 | 0.92 | 0.46 | standing / feeding | standing / feeding | ok |
+| 363 | 348 | 5 | 0.93 | 0.29 | standing / none | lying / none | posture |
+| 364 | 348 | 6 | 0.11 | 0.37 | lying / ruminating | lying / none | activity |
+| 365 | 348 | 6 | 0.17 | 0.32 | lying / ruminating | lying / none | activity |
+| 366 | 348 | 6 | 0.18 | 0.47 | standing / feeding | standing / feeding | ok |
+| 367 | 348 | 6 | 0.27 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 368 | 348 | 6 | 0.30 | 0.41 | standing / feeding | standing / feeding | ok |
+| 369 | 348 | 6 | 0.36 | 0.23 | standing / none | standing / none | ok |
+| 370 | 348 | 6 | 0.37 | 0.50 | standing / feeding | standing / feeding | ok |
+| 371 | 348 | 6 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 372 | 348 | 6 | 0.45 | 0.49 | standing / feeding | standing / feeding | ok |
+| 373 | 348 | 6 | 0.52 | 0.45 | standing / feeding | standing / feeding | ok |
+| 374 | 348 | 6 | 0.54 | 0.20 | lying / none | standing / none | posture |
+| 375 | 348 | 6 | 0.58 | 0.48 | standing / feeding | standing / feeding | ok |
+| 376 | 348 | 6 | 0.59 | 0.27 | standing / none | lying / none | posture |
+| 377 | 348 | 6 | 0.71 | 0.51 | standing / feeding | standing / feeding | ok |
+| 378 | 348 | 6 | 0.71 | 0.21 | standing / none | standing / none | ok |
+| 379 | 348 | 6 | 0.81 | 0.23 | standing / none | standing / feeding | activity |
+| 380 | 348 | 6 | 0.84 | 0.45 | standing / feeding | standing / feeding | ok |
+| 381 | 348 | 6 | 0.92 | 0.46 | standing / feeding | standing / feeding | ok |
+| 382 | 348 | 6 | 0.93 | 0.29 | standing / none | standing / feeding | activity |
+| 383 | 348 | 7 | 0.11 | 0.37 | lying / ruminating | lying / none | activity |
+| 384 | 348 | 7 | 0.17 | 0.32 | lying / ruminating | lying / none | activity |
+| 385 | 348 | 7 | 0.18 | 0.47 | standing / feeding | lying / feeding | posture |
+| 386 | 348 | 7 | 0.28 | 0.30 | lying / ruminating | lying / none | activity |
+| 387 | 348 | 7 | 0.30 | 0.41 | standing / feeding | standing / feeding | ok |
+| 388 | 348 | 7 | 0.36 | 0.23 | standing / none | standing / none | ok |
+| 389 | 348 | 7 | 0.37 | 0.50 | standing / feeding | standing / feeding | ok |
+| 390 | 348 | 7 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 391 | 348 | 7 | 0.45 | 0.49 | standing / feeding | standing / feeding | ok |
+| 392 | 348 | 7 | 0.52 | 0.46 | standing / feeding | standing / feeding | ok |
+| 393 | 348 | 7 | 0.54 | 0.20 | lying / none | lying / none | ok |
+| 394 | 348 | 7 | 0.58 | 0.48 | standing / feeding | standing / feeding | ok |
+| 395 | 348 | 7 | 0.59 | 0.27 | standing / none | lying / none | posture |
+| 396 | 348 | 7 | 0.71 | 0.51 | standing / feeding | standing / feeding | ok |
+| 397 | 348 | 7 | 0.71 | 0.21 | standing / none | standing / none | ok |
+| 398 | 348 | 7 | 0.82 | 0.23 | standing / none | standing / none | ok |
+| 399 | 348 | 7 | 0.85 | 0.45 | standing / feeding | standing / feeding | ok |
+| 400 | 348 | 7 | 0.92 | 0.46 | standing / feeding | standing / feeding | ok |
+| 401 | 348 | 7 | 0.93 | 0.29 | standing / none | standing / none | ok |
+| 402 | 349 | 2 | 0.10 | 0.51 | standing / feeding | standing / feeding | ok |
+| 403 | 349 | 2 | 0.17 | 0.49 | standing / feeding | standing / feeding | ok |
+| 404 | 349 | 2 | 0.18 | 0.25 | lying / ruminating | lying / none | activity |
+| 405 | 349 | 2 | 0.24 | 0.25 | standing / none | standing / none | ok |
+| 406 | 349 | 2 | 0.33 | 0.23 | lying / none | lying / none | ok |
+| 407 | 349 | 2 | 0.35 | 0.50 | standing / feeding | standing / feeding | ok |
+| 408 | 349 | 2 | 0.39 | 0.29 | lying / ruminating | standing / none | posture + activity |
+| 409 | 349 | 2 | 0.60 | 0.48 | standing / feeding | standing / feeding | ok |
+| 410 | 349 | 2 | 0.72 | 0.21 | standing / none | standing / none | ok |
+| 411 | 349 | 2 | 0.82 | 0.43 | standing / feeding | standing / feeding | ok |
+| 412 | 349 | 2 | 0.88 | 0.28 | lying / none | standing / none | posture |
+| 413 | 349 | 2 | 0.94 | 0.47 | standing / feeding | standing / feeding | ok |
+| 414 | 349 | 3 | 0.10 | 0.51 | standing / feeding | standing / feeding | ok |
+| 415 | 349 | 3 | 0.17 | 0.49 | standing / feeding | standing / feeding | ok |
+| 416 | 349 | 3 | 0.18 | 0.25 | lying / ruminating | standing / none | posture + activity |
+| 417 | 349 | 3 | 0.24 | 0.25 | standing / none | standing / none | ok |
+| 418 | 349 | 3 | 0.33 | 0.23 | lying / none | lying / none | ok |
+| 419 | 349 | 3 | 0.35 | 0.50 | standing / feeding | standing / feeding | ok |
+| 420 | 349 | 3 | 0.39 | 0.29 | lying / ruminating | standing / none | posture + activity |
+| 421 | 349 | 3 | 0.60 | 0.48 | standing / feeding | standing / feeding | ok |
+| 422 | 349 | 3 | 0.72 | 0.21 | standing / none | standing / drinking | activity |
+| 423 | 349 | 3 | 0.82 | 0.43 | standing / feeding | standing / feeding | ok |
+| 424 | 349 | 3 | 0.88 | 0.28 | lying / none | standing / none | posture |
+| 425 | 349 | 3 | 0.94 | 0.47 | standing / feeding | standing / feeding | ok |
+| 426 | 349 | 4 | 0.10 | 0.51 | standing / feeding | standing / feeding | ok |
+| 427 | 349 | 4 | 0.17 | 0.49 | standing / feeding | standing / feeding | ok |
+| 428 | 349 | 4 | 0.18 | 0.25 | lying / ruminating | standing / none | posture + activity |
+| 429 | 349 | 4 | 0.24 | 0.25 | standing / none | standing / none | ok |
+| 430 | 349 | 4 | 0.33 | 0.23 | lying / none | lying / none | ok |
+| 431 | 349 | 4 | 0.35 | 0.50 | standing / feeding | standing / feeding | ok |
+| 432 | 349 | 4 | 0.39 | 0.29 | lying / ruminating | standing / none | posture + activity |
+| 433 | 349 | 4 | 0.60 | 0.48 | standing / feeding | standing / feeding | ok |
+| 434 | 349 | 4 | 0.72 | 0.21 | standing / none | standing / none | ok |
+| 435 | 349 | 4 | 0.82 | 0.43 | standing / feeding | standing / feeding | ok |
+| 436 | 349 | 4 | 0.88 | 0.28 | lying / none | standing / none | posture |
+| 437 | 349 | 4 | 0.94 | 0.47 | standing / feeding | standing / feeding | ok |
+| 438 | 349 | 5 | 0.10 | 0.51 | standing / feeding | standing / feeding | ok |
+| 439 | 349 | 5 | 0.17 | 0.49 | standing / feeding | standing / feeding | ok |
+| 440 | 349 | 5 | 0.18 | 0.25 | lying / ruminating | standing / none | posture + activity |
+| 441 | 349 | 5 | 0.24 | 0.25 | standing / none | standing / none | ok |
+| 442 | 349 | 5 | 0.33 | 0.23 | lying / none | standing / none | posture |
+| 443 | 349 | 5 | 0.35 | 0.50 | standing / feeding | standing / feeding | ok |
+| 444 | 349 | 5 | 0.39 | 0.29 | lying / ruminating | standing / none | posture + activity |
+| 445 | 349 | 5 | 0.60 | 0.48 | standing / feeding | standing / feeding | ok |
+| 446 | 349 | 5 | 0.72 | 0.21 | standing / none | standing / none | ok |
+| 447 | 349 | 5 | 0.82 | 0.43 | standing / feeding | standing / feeding | ok |
+| 448 | 349 | 5 | 0.94 | 0.47 | standing / feeding | standing / feeding | ok |
+| 449 | 349 | 6 | 0.10 | 0.51 | standing / feeding | standing / feeding | ok |
+| 450 | 349 | 6 | 0.17 | 0.49 | standing / feeding | standing / feeding | ok |
+| 451 | 349 | 6 | 0.24 | 0.25 | standing / none | standing / none | ok |
+| 452 | 349 | 6 | 0.33 | 0.23 | lying / none | lying / none | ok |
+| 453 | 349 | 6 | 0.36 | 0.50 | standing / feeding | standing / feeding | ok |
+| 454 | 349 | 6 | 0.39 | 0.29 | lying / ruminating | standing / none | posture + activity |
+| 455 | 349 | 6 | 0.60 | 0.48 | standing / feeding | standing / feeding | ok |
+| 456 | 349 | 6 | 0.72 | 0.21 | standing / none | standing / none | ok |
+| 457 | 349 | 6 | 0.82 | 0.43 | standing / feeding | standing / feeding | ok |
+| 458 | 349 | 6 | 0.94 | 0.47 | standing / feeding | standing / feeding | ok |
+| 459 | 349 | 7 | 0.10 | 0.51 | standing / feeding | standing / feeding | ok |
+| 460 | 349 | 7 | 0.17 | 0.49 | standing / feeding | standing / feeding | ok |
+| 461 | 349 | 7 | 0.24 | 0.25 | standing / none | standing / none | ok |
+| 462 | 349 | 7 | 0.33 | 0.23 | lying / none | lying / none | ok |
+| 463 | 349 | 7 | 0.36 | 0.50 | standing / feeding | standing / feeding | ok |
+| 464 | 349 | 7 | 0.39 | 0.29 | lying / ruminating | standing / none | posture + activity |
+| 465 | 349 | 7 | 0.60 | 0.48 | standing / feeding | standing / feeding | ok |
+| 466 | 349 | 7 | 0.72 | 0.21 | standing / none | standing / none | ok |
+| 467 | 349 | 7 | 0.82 | 0.43 | standing / feeding | standing / feeding | ok |
+| 468 | 349 | 7 | 0.94 | 0.47 | standing / feeding | standing / feeding | ok |
+| 469 | 350 | 2 | 0.06 | 0.46 | standing / none | standing / none | ok |
+| 470 | 350 | 2 | 0.15 | 0.47 | standing / none | standing / none | ok |
+| 471 | 350 | 2 | 0.19 | 0.27 | lying / none | lying / none | ok |
+| 472 | 350 | 2 | 0.27 | 0.19 | standing / none | standing / none | ok |
+| 473 | 350 | 2 | 0.40 | 0.26 | standing / none | standing / none | ok |
+| 474 | 350 | 2 | 0.62 | 0.49 | standing / feeding | standing / feeding | ok |
+| 475 | 350 | 2 | 0.77 | 0.41 | standing / feeding | standing / feeding | ok |
+| 476 | 350 | 2 | 0.92 | 0.23 | standing / none | standing / none | ok |
+| 477 | 350 | 2 | 0.97 | 0.28 | lying / none | standing / none | posture |
+| 478 | 350 | 3 | 0.06 | 0.46 | standing / none | standing / none | ok |
+| 479 | 350 | 3 | 0.13 | 0.48 | standing / none | standing / none | ok |
+| 480 | 350 | 3 | 0.19 | 0.28 | lying / none | lying / none | ok |
+| 481 | 350 | 3 | 0.26 | 0.20 | standing / none | standing / none | ok |
+| 482 | 350 | 3 | 0.38 | 0.27 | standing / none | standing / none | ok |
+| 483 | 350 | 3 | 0.62 | 0.46 | standing / feeding | standing / feeding | ok |
+| 484 | 350 | 3 | 0.77 | 0.42 | standing / feeding | standing / feeding | ok |
+| 485 | 350 | 3 | 0.91 | 0.23 | standing / none | standing / none | ok |
+| 486 | 350 | 3 | 0.96 | 0.27 | lying / none | standing / none | posture |
+| 487 | 350 | 4 | 0.03 | 0.46 | standing / none | standing / none | ok |
+| 488 | 350 | 4 | 0.17 | 0.50 | standing / none | standing / feeding | activity |
+| 489 | 350 | 4 | 0.19 | 0.27 | lying / ruminating | lying / none | activity |
+| 490 | 350 | 4 | 0.25 | 0.18 | standing / none | standing / none | ok |
+| 491 | 350 | 4 | 0.37 | 0.26 | standing / none | standing / none | ok |
+| 492 | 350 | 4 | 0.62 | 0.48 | standing / feeding | standing / feeding | ok |
+| 493 | 350 | 4 | 0.77 | 0.42 | standing / feeding | standing / feeding | ok |
+| 494 | 350 | 4 | 0.91 | 0.23 | standing / none | standing / none | ok |
+| 495 | 350 | 4 | 0.97 | 0.28 | lying / none | lying / none | ok |
+| 496 | 350 | 5 | 0.05 | 0.46 | standing / none | standing / none | ok |
+| 497 | 350 | 5 | 0.14 | 0.47 | standing / none | standing / none | ok |
+| 498 | 350 | 5 | 0.19 | 0.28 | lying / none | lying / none | ok |
+| 499 | 350 | 5 | 0.27 | 0.19 | standing / none | standing / none | ok |
+| 500 | 350 | 5 | 0.38 | 0.27 | standing / none | standing / none | ok |
+| 501 | 350 | 5 | 0.62 | 0.46 | standing / feeding | standing / feeding | ok |
+| 502 | 350 | 5 | 0.77 | 0.43 | standing / feeding | standing / feeding | ok |
+| 503 | 350 | 5 | 0.92 | 0.25 | standing / none | standing / none | ok |
+| 504 | 350 | 5 | 0.96 | 0.28 | lying / none | lying / none | ok |
+| 505 | 350 | 6 | 0.05 | 0.46 | standing / none | standing / feeding | activity |
+| 506 | 350 | 6 | 0.15 | 0.46 | standing / none | standing / none | ok |
+| 507 | 350 | 6 | 0.18 | 0.27 | lying / none | lying / none | ok |
+| 508 | 350 | 6 | 0.27 | 0.20 | standing / none | standing / none | ok |
+| 509 | 350 | 6 | 0.38 | 0.26 | standing / none | standing / none | ok |
+| 510 | 350 | 6 | 0.62 | 0.46 | standing / feeding | standing / feeding | ok |
+| 511 | 350 | 6 | 0.76 | 0.44 | standing / feeding | standing / feeding | ok |
+| 512 | 350 | 6 | 0.92 | 0.24 | standing / none | lying / none | posture |
+| 513 | 350 | 6 | 0.97 | 0.29 | lying / none | standing / none | posture |
+| 514 | 350 | 7 | 0.06 | 0.47 | standing / none | standing / feeding | activity |
+| 515 | 350 | 7 | 0.14 | 0.47 | standing / none | standing / feeding | activity |
+| 516 | 350 | 7 | 0.19 | 0.27 | lying / none | lying / none | ok |
+| 517 | 350 | 7 | 0.26 | 0.20 | standing / none | standing / none | ok |
+| 518 | 350 | 7 | 0.38 | 0.26 | standing / none | standing / none | ok |
+| 519 | 350 | 7 | 0.61 | 0.48 | standing / feeding | standing / feeding | ok |
+| 520 | 350 | 7 | 0.78 | 0.43 | standing / feeding | standing / feeding | ok |
+| 521 | 350 | 7 | 0.92 | 0.24 | standing / none | standing / none | ok |
+| 522 | 350 | 7 | 0.96 | 0.28 | lying / none | standing / none | posture |
+| 523 | 351 | 2 | 0.04 | 0.46 | standing / feeding | standing / feeding | ok |
+| 524 | 351 | 2 | 0.10 | 0.36 | lying / none | lying / none | ok |
+| 525 | 351 | 2 | 0.19 | 0.28 | lying / ruminating | lying / none | activity |
+| 526 | 351 | 2 | 0.22 | 0.20 | standing / none | standing / none | ok |
+| 527 | 351 | 2 | 0.23 | 0.46 | standing / feeding | standing / feeding | ok |
+| 528 | 351 | 2 | 0.35 | 0.19 | standing / none | standing / none | ok |
+| 529 | 351 | 2 | 0.66 | 0.47 | standing / feeding | standing / feeding | ok |
+| 530 | 351 | 2 | 0.85 | 0.32 | standing / drinking | standing / none | activity |
+| 531 | 351 | 2 | 0.95 | 0.32 | lying / none | lying / none | ok |
+| 532 | 351 | 3 | 0.04 | 0.45 | standing / feeding | lying / none | posture + activity |
+| 533 | 351 | 3 | 0.10 | 0.32 | lying / none | lying / none | ok |
+| 534 | 351 | 3 | 0.19 | 0.27 | lying / none | standing / none | posture |
+| 535 | 351 | 3 | 0.20 | 0.44 | standing / feeding | standing / none | activity |
+| 536 | 351 | 3 | 0.22 | 0.20 | standing / none | standing / none | ok |
+| 537 | 351 | 3 | 0.36 | 0.19 | standing / none | standing / none | ok |
+| 538 | 351 | 3 | 0.67 | 0.46 | standing / feeding | standing / feeding | ok |
+| 539 | 351 | 3 | 0.83 | 0.29 | standing / drinking | standing / drinking | ok |
+| 540 | 351 | 3 | 0.95 | 0.33 | lying / none | lying / none | ok |
+| 541 | 351 | 4 | 0.04 | 0.45 | standing / feeding | lying / none | posture + activity |
+| 542 | 351 | 4 | 0.11 | 0.34 | lying / ruminating | lying / none | activity |
+| 543 | 351 | 4 | 0.19 | 0.27 | lying / none | lying / none | ok |
+| 544 | 351 | 4 | 0.22 | 0.50 | standing / feeding | standing / feeding | ok |
+| 545 | 351 | 4 | 0.23 | 0.20 | standing / none | standing / none | ok |
+| 546 | 351 | 4 | 0.36 | 0.20 | standing / none | standing / none | ok |
+| 547 | 351 | 4 | 0.67 | 0.48 | standing / feeding | standing / feeding | ok |
+| 548 | 351 | 4 | 0.84 | 0.32 | standing / drinking | standing / feeding | activity |
+| 549 | 351 | 4 | 0.95 | 0.32 | lying / none | lying / none | ok |
+| 550 | 351 | 5 | 0.04 | 0.45 | standing / feeding | lying / none | posture + activity |
+| 551 | 351 | 5 | 0.11 | 0.34 | lying / ruminating | standing / none | posture + activity |
+| 552 | 351 | 5 | 0.20 | 0.29 | lying / none | lying / none | ok |
+| 553 | 351 | 5 | 0.22 | 0.45 | standing / feeding | standing / none | activity |
+| 554 | 351 | 5 | 0.23 | 0.22 | standing / none | standing / none | ok |
+| 555 | 351 | 5 | 0.36 | 0.20 | standing / none | standing / none | ok |
+| 556 | 351 | 5 | 0.66 | 0.47 | standing / feeding | standing / feeding | ok |
+| 557 | 351 | 5 | 0.84 | 0.30 | standing / drinking | standing / none | activity |
+| 558 | 351 | 5 | 0.94 | 0.32 | lying / none | lying / none | ok |
+| 559 | 351 | 6 | 0.04 | 0.44 | standing / feeding | lying / none | posture + activity |
+| 560 | 351 | 6 | 0.10 | 0.33 | lying / ruminating | lying / none | activity |
+| 561 | 351 | 6 | 0.20 | 0.28 | lying / none | lying / none | ok |
+| 562 | 351 | 6 | 0.21 | 0.47 | standing / feeding | standing / none | activity |
+| 563 | 351 | 6 | 0.22 | 0.18 | standing / none | standing / none | ok |
+| 564 | 351 | 6 | 0.36 | 0.19 | standing / none | standing / none | ok |
+| 565 | 351 | 6 | 0.65 | 0.46 | standing / feeding | standing / feeding | ok |
+| 566 | 351 | 6 | 0.84 | 0.29 | standing / drinking | standing / drinking | ok |
+| 567 | 351 | 6 | 0.95 | 0.30 | lying / none | lying / none | ok |
+| 568 | 351 | 7 | 0.05 | 0.47 | standing / feeding | standing / none | activity |
+| 569 | 351 | 7 | 0.10 | 0.35 | lying / ruminating | lying / none | activity |
+| 570 | 351 | 7 | 0.18 | 0.27 | lying / none | lying / none | ok |
+| 571 | 351 | 7 | 0.22 | 0.45 | standing / feeding | standing / none | activity |
+| 572 | 351 | 7 | 0.23 | 0.18 | standing / none | standing / none | ok |
+| 573 | 351 | 7 | 0.35 | 0.21 | standing / none | standing / none | ok |
+| 574 | 351 | 7 | 0.66 | 0.49 | standing / feeding | standing / feeding | ok |
+| 575 | 351 | 7 | 0.83 | 0.31 | standing / drinking | standing / feeding | activity |
+| 576 | 351 | 7 | 0.95 | 0.30 | lying / none | lying / none | ok |
+| 577 | 352 | 2 | 0.07 | 0.31 | lying / none | standing / none | posture |
+| 578 | 352 | 2 | 0.10 | 0.50 | standing / feeding | standing / feeding | ok |
+| 579 | 352 | 2 | 0.25 | 0.30 | standing / none | standing / none | ok |
+| 580 | 352 | 2 | 0.96 | 0.32 | standing / none | standing / none | ok |
+| 581 | 352 | 3 | 0.08 | 0.31 | lying / none | standing / none | posture |
+| 582 | 352 | 3 | 0.09 | 0.52 | standing / feeding | standing / feeding | ok |
+| 583 | 352 | 3 | 0.25 | 0.28 | standing / none | standing / none | ok |
+| 584 | 352 | 3 | 0.96 | 0.32 | standing / none | standing / feeding | activity |
+| 585 | 352 | 4 | 0.06 | 0.31 | lying / none | standing / feeding | posture + activity |
+| 586 | 352 | 4 | 0.09 | 0.51 | standing / none | standing / feeding | activity |
+| 587 | 352 | 4 | 0.26 | 0.29 | standing / none | standing / none | ok |
+| 588 | 352 | 4 | 0.95 | 0.32 | standing / none | standing / none | ok |
+| 589 | 352 | 5 | 0.08 | 0.30 | lying / none | standing / feeding | posture + activity |
+| 590 | 352 | 5 | 0.10 | 0.51 | standing / feeding | standing / feeding | ok |
+| 591 | 352 | 5 | 0.25 | 0.29 | standing / none | standing / feeding | activity |
+| 592 | 352 | 5 | 0.95 | 0.31 | standing / none | standing / none | ok |
+| 593 | 352 | 6 | 0.07 | 0.31 | lying / none | lying / none | ok |
+| 594 | 352 | 6 | 0.10 | 0.50 | standing / feeding | standing / feeding | ok |
+| 595 | 352 | 6 | 0.25 | 0.28 | standing / none | standing / none | ok |
+| 596 | 352 | 6 | 0.96 | 0.32 | standing / none | standing / none | ok |
+| 597 | 352 | 7 | 0.07 | 0.32 | lying / none | lying / none | ok |
+| 598 | 352 | 7 | 0.09 | 0.49 | standing / feeding | standing / feeding | ok |
+| 599 | 352 | 7 | 0.27 | 0.29 | standing / none | standing / none | ok |
+| 600 | 352 | 7 | 0.96 | 0.32 | standing / none | standing / feeding | activity |
+| 601 | 353 | 2 | 0.06 | 0.33 | lying / none | standing / none | posture |
+| 602 | 353 | 2 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 603 | 353 | 3 | 0.07 | 0.32 | lying / none | standing / none | posture |
+| 604 | 353 | 3 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 605 | 353 | 4 | 0.08 | 0.33 | lying / none | standing / none | posture |
+| 606 | 353 | 4 | 0.27 | 0.33 | lying / ruminating | lying / none | activity |
+| 607 | 353 | 5 | 0.08 | 0.33 | lying / none | lying / none | ok |
+| 608 | 353 | 5 | 0.27 | 0.30 | lying / ruminating | lying / none | activity |
+| 609 | 353 | 6 | 0.06 | 0.33 | lying / none | lying / none | ok |
+| 610 | 353 | 6 | 0.27 | 0.30 | lying / ruminating | lying / none | activity |
+| 611 | 353 | 7 | 0.06 | 0.32 | lying / none | lying / none | ok |
+| 612 | 353 | 7 | 0.27 | 0.30 | lying / ruminating | lying / none | activity |
+| 613 | 354 | 2 | 0.13 | 0.31 | lying / ruminating | lying / none | activity |
+| 614 | 354 | 2 | 0.26 | 0.32 | lying / ruminating | lying / none | activity |
+| 615 | 354 | 2 | 0.86 | 0.33 | standing / ruminating | standing / none | activity |
+| 616 | 354 | 3 | 0.13 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 617 | 354 | 3 | 0.27 | 0.31 | lying / ruminating | lying / none | activity |
+| 618 | 354 | 3 | 0.86 | 0.32 | standing / ruminating | standing / feeding | activity |
+| 619 | 354 | 4 | 0.13 | 0.30 | lying / ruminating | lying / none | activity |
+| 620 | 354 | 4 | 0.27 | 0.31 | lying / ruminating | lying / none | activity |
+| 621 | 354 | 4 | 0.86 | 0.33 | standing / ruminating | standing / drinking | activity |
+| 622 | 354 | 5 | 0.12 | 0.29 | lying / ruminating | standing / none | posture + activity |
+| 623 | 354 | 5 | 0.25 | 0.30 | lying / ruminating | lying / none | activity |
+| 624 | 354 | 5 | 0.86 | 0.32 | standing / ruminating | standing / none | activity |
+| 625 | 354 | 6 | 0.13 | 0.30 | lying / ruminating | lying / none | activity |
+| 626 | 354 | 6 | 0.27 | 0.30 | lying / ruminating | lying / none | activity |
+| 627 | 354 | 6 | 0.86 | 0.33 | standing / ruminating | standing / none | activity |
+| 628 | 354 | 7 | 0.13 | 0.32 | lying / ruminating | standing / none | posture + activity |
+| 629 | 354 | 7 | 0.27 | 0.30 | lying / ruminating | lying / none | activity |
+| 630 | 354 | 7 | 0.85 | 0.33 | standing / ruminating | standing / none | activity |
+| 631 | 355 | 2 | 0.06 | 0.36 | lying / none | lying / none | ok |
+| 632 | 355 | 2 | 0.62 | 0.51 | standing / feeding | standing / feeding | ok |
+| 633 | 355 | 2 | 0.87 | 0.26 | lying / ruminating | lying / none | activity |
+| 634 | 355 | 2 | 0.92 | 0.44 | standing / none | standing / none | ok |
+| 635 | 355 | 3 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 636 | 355 | 3 | 0.64 | 0.51 | standing / feeding | standing / feeding | ok |
+| 637 | 355 | 3 | 0.87 | 0.26 | lying / ruminating | lying / none | activity |
+| 638 | 355 | 3 | 0.94 | 0.42 | standing / none | standing / none | ok |
+| 639 | 355 | 4 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 640 | 355 | 4 | 0.62 | 0.48 | standing / feeding | standing / feeding | ok |
+| 641 | 355 | 4 | 0.87 | 0.26 | lying / ruminating | lying / none | activity |
+| 642 | 355 | 4 | 0.94 | 0.44 | standing / none | standing / feeding | activity |
+| 643 | 355 | 5 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 644 | 355 | 5 | 0.63 | 0.49 | standing / feeding | standing / feeding | ok |
+| 645 | 355 | 5 | 0.87 | 0.27 | lying / ruminating | lying / none | activity |
+| 646 | 355 | 5 | 0.94 | 0.45 | standing / none | standing / feeding | activity |
+| 647 | 355 | 6 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 648 | 355 | 6 | 0.63 | 0.49 | standing / feeding | standing / feeding | ok |
+| 649 | 355 | 6 | 0.87 | 0.27 | lying / ruminating | lying / none | activity |
+| 650 | 355 | 6 | 0.95 | 0.43 | standing / none | standing / none | ok |
+| 651 | 355 | 7 | 0.08 | 0.37 | lying / none | lying / none | ok |
+| 652 | 355 | 7 | 0.62 | 0.48 | standing / feeding | standing / feeding | ok |
+| 653 | 355 | 7 | 0.87 | 0.27 | lying / ruminating | lying / none | activity |
+| 654 | 356 | 2 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 655 | 356 | 2 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 656 | 356 | 2 | 0.31 | 0.43 | standing / none | standing / feeding | activity |
+| 657 | 356 | 2 | 0.56 | 0.31 | standing / none | standing / none | ok |
+| 658 | 356 | 2 | 0.88 | 0.28 | lying / ruminating | lying / none | activity |
+| 659 | 356 | 3 | 0.08 | 0.36 | lying / none | lying / none | ok |
+| 660 | 356 | 3 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 661 | 356 | 3 | 0.30 | 0.44 | standing / none | standing / feeding | activity |
+| 662 | 356 | 3 | 0.61 | 0.30 | standing / none | standing / none | ok |
+| 663 | 356 | 3 | 0.88 | 0.25 | lying / ruminating | lying / none | activity |
+| 664 | 356 | 4 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 665 | 356 | 4 | 0.25 | 0.29 | lying / ruminating | lying / none | activity |
+| 666 | 356 | 4 | 0.31 | 0.43 | standing / none | lying / none | posture |
+| 667 | 356 | 4 | 0.66 | 0.30 | standing / none | standing / none | ok |
+| 668 | 356 | 4 | 0.88 | 0.26 | lying / ruminating | lying / none | activity |
+| 669 | 356 | 5 | 0.07 | 0.34 | lying / none | lying / none | ok |
+| 670 | 356 | 5 | 0.26 | 0.29 | lying / ruminating | lying / none | activity |
+| 671 | 356 | 5 | 0.30 | 0.43 | standing / none | standing / feeding | activity |
+| 672 | 356 | 5 | 0.69 | 0.32 | standing / none | standing / none | ok |
+| 673 | 356 | 5 | 0.87 | 0.26 | lying / ruminating | lying / none | activity |
+| 674 | 356 | 6 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 675 | 356 | 6 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 676 | 356 | 6 | 0.30 | 0.44 | standing / none | standing / feeding | activity |
+| 677 | 356 | 6 | 0.75 | 0.31 | standing / none | standing / none | ok |
+| 678 | 356 | 6 | 0.87 | 0.26 | lying / ruminating | lying / none | activity |
+| 679 | 356 | 7 | 0.07 | 0.34 | lying / none | lying / none | ok |
+| 680 | 356 | 7 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 681 | 356 | 7 | 0.30 | 0.47 | standing / feeding | standing / feeding | ok |
+| 682 | 356 | 7 | 0.80 | 0.30 | standing / none | standing / none | ok |
+| 683 | 356 | 7 | 0.87 | 0.25 | lying / none | lying / none | ok |
+| 684 | 357 | 2 | 0.07 | 0.35 | lying / none | lying / none | ok |
+| 685 | 357 | 2 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 686 | 357 | 2 | 0.24 | 0.31 | lying / ruminating | lying / none | activity |
+| 687 | 357 | 2 | 0.30 | 0.44 | standing / feeding | standing / feeding | ok |
+| 688 | 357 | 2 | 0.65 | 0.47 | standing / feeding | standing / feeding | ok |
+| 689 | 357 | 2 | 0.84 | 0.21 | standing / none | standing / none | ok |
+| 690 | 357 | 2 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 691 | 357 | 2 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 692 | 357 | 2 | 0.95 | 0.49 | standing / feeding | standing / feeding | ok |
+| 693 | 357 | 2 | 0.98 | 0.32 | lying / none | standing / none | posture |
+| 694 | 357 | 3 | 0.07 | 0.35 | lying / none | lying / none | ok |
+| 695 | 357 | 3 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 696 | 357 | 3 | 0.25 | 0.28 | lying / ruminating | lying / none | activity |
+| 697 | 357 | 3 | 0.30 | 0.44 | standing / none | standing / feeding | activity |
+| 698 | 357 | 3 | 0.65 | 0.47 | standing / feeding | standing / feeding | ok |
+| 699 | 357 | 3 | 0.84 | 0.21 | standing / none | standing / none | ok |
+| 700 | 357 | 3 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 701 | 357 | 3 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 702 | 357 | 3 | 0.95 | 0.49 | standing / feeding | standing / feeding | ok |
+| 703 | 357 | 3 | 0.98 | 0.32 | lying / none | standing / none | posture |
+| 704 | 357 | 4 | 0.07 | 0.35 | lying / none | lying / none | ok |
+| 705 | 357 | 4 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 706 | 357 | 4 | 0.25 | 0.28 | lying / ruminating | lying / none | activity |
+| 707 | 357 | 4 | 0.30 | 0.44 | standing / none | standing / feeding | activity |
+| 708 | 357 | 4 | 0.65 | 0.47 | standing / feeding | standing / feeding | ok |
+| 709 | 357 | 4 | 0.84 | 0.21 | standing / none | standing / none | ok |
+| 710 | 357 | 4 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 711 | 357 | 4 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 712 | 357 | 4 | 0.95 | 0.49 | standing / feeding | standing / feeding | ok |
+| 713 | 357 | 4 | 0.98 | 0.32 | lying / none | standing / feeding | posture + activity |
+| 714 | 357 | 5 | 0.07 | 0.35 | lying / none | lying / none | ok |
+| 715 | 357 | 5 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 716 | 357 | 5 | 0.25 | 0.29 | lying / ruminating | lying / none | activity |
+| 717 | 357 | 5 | 0.31 | 0.44 | standing / none | lying / none | posture |
+| 718 | 357 | 5 | 0.65 | 0.47 | standing / feeding | standing / feeding | ok |
+| 719 | 357 | 5 | 0.84 | 0.21 | standing / none | standing / none | ok |
+| 720 | 357 | 5 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 721 | 357 | 5 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 722 | 357 | 5 | 0.95 | 0.49 | standing / feeding | standing / feeding | ok |
+| 723 | 357 | 5 | 0.98 | 0.32 | lying / none | standing / none | posture |
+| 724 | 357 | 6 | 0.07 | 0.35 | lying / none | lying / none | ok |
+| 725 | 357 | 6 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 726 | 357 | 6 | 0.25 | 0.29 | lying / ruminating | lying / none | activity |
+| 727 | 357 | 6 | 0.30 | 0.44 | standing / none | lying / none | posture |
+| 728 | 357 | 6 | 0.65 | 0.47 | standing / feeding | standing / feeding | ok |
+| 729 | 357 | 6 | 0.84 | 0.21 | standing / none | standing / none | ok |
+| 730 | 357 | 6 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 731 | 357 | 6 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 732 | 357 | 6 | 0.95 | 0.49 | standing / feeding | standing / feeding | ok |
+| 733 | 357 | 6 | 0.98 | 0.32 | lying / none | standing / none | posture |
+| 734 | 357 | 7 | 0.07 | 0.35 | lying / none | lying / none | ok |
+| 735 | 357 | 7 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 736 | 357 | 7 | 0.26 | 0.28 | lying / ruminating | lying / none | activity |
+| 737 | 357 | 7 | 0.28 | 0.44 | standing / feeding | standing / none | activity |
+| 738 | 357 | 7 | 0.33 | 2.11 | standing / feeding | standing / feeding | ok |
+| 739 | 357 | 7 | 0.66 | 0.50 | standing / feeding | standing / feeding | ok |
+| 740 | 357 | 7 | 0.84 | 0.21 | standing / none | standing / none | ok |
+| 741 | 357 | 7 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 742 | 357 | 7 | 0.92 | 0.27 | standing / none | standing / none | ok |
+| 743 | 357 | 7 | 0.95 | 0.49 | standing / feeding | standing / feeding | ok |
+| 744 | 357 | 7 | 0.98 | 0.32 | lying / none | standing / none | posture |
+| 745 | 357 | 7 | 5.33 | 0.47 | standing / feeding | standing / feeding | ok |
+| 746 | 358 | 2 | 0.05 | 0.51 | standing / feeding | standing / none | activity |
+| 747 | 358 | 2 | 0.15 | 0.32 | lying / none | standing / none | posture |
+| 748 | 358 | 2 | 0.17 | 0.51 | standing / feeding | standing / feeding | ok |
+| 749 | 358 | 2 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 750 | 358 | 2 | 0.43 | 0.22 | lying / ruminating | lying / none | activity |
+| 751 | 358 | 2 | 0.44 | 0.50 | standing / feeding | standing / feeding | ok |
+| 752 | 358 | 2 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 753 | 358 | 2 | 0.95 | 0.33 | lying / ruminating | lying / none | activity |
+| 754 | 358 | 3 | 0.05 | 0.51 | standing / feeding | standing / none | activity |
+| 755 | 358 | 3 | 0.15 | 0.32 | lying / none | standing / feeding | posture + activity |
+| 756 | 358 | 3 | 0.17 | 0.50 | standing / feeding | standing / feeding | ok |
+| 757 | 358 | 3 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 758 | 358 | 3 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 759 | 358 | 3 | 0.44 | 0.50 | standing / feeding | standing / feeding | ok |
+| 760 | 358 | 3 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 761 | 358 | 3 | 0.95 | 0.33 | lying / ruminating | lying / none | activity |
+| 762 | 358 | 4 | 0.05 | 0.51 | standing / feeding | standing / none | activity |
+| 763 | 358 | 4 | 0.15 | 0.32 | lying / none | standing / none | posture |
+| 764 | 358 | 4 | 0.17 | 0.51 | standing / feeding | standing / feeding | ok |
+| 765 | 358 | 4 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 766 | 358 | 4 | 0.44 | 0.50 | standing / feeding | standing / feeding | ok |
+| 767 | 358 | 4 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 768 | 358 | 4 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 769 | 358 | 4 | 0.95 | 0.33 | lying / ruminating | lying / none | activity |
+| 770 | 358 | 5 | 0.05 | 0.51 | standing / feeding | standing / feeding | ok |
+| 771 | 358 | 5 | 0.15 | 0.32 | lying / none | standing / none | posture |
+| 772 | 358 | 5 | 0.16 | 0.51 | standing / feeding | standing / feeding | ok |
+| 773 | 358 | 5 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 774 | 358 | 5 | 0.44 | 0.50 | standing / feeding | standing / feeding | ok |
+| 775 | 358 | 5 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 776 | 358 | 5 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 777 | 358 | 5 | 0.95 | 0.33 | lying / ruminating | lying / none | activity |
+| 778 | 358 | 6 | 0.05 | 0.51 | standing / feeding | standing / none | activity |
+| 779 | 358 | 6 | 0.15 | 0.32 | lying / none | standing / none | posture |
+| 780 | 358 | 6 | 0.15 | 0.50 | standing / feeding | standing / feeding | ok |
+| 781 | 358 | 6 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 782 | 358 | 6 | 0.44 | 0.51 | standing / feeding | standing / feeding | ok |
+| 783 | 358 | 6 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 784 | 358 | 6 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 785 | 358 | 6 | 0.95 | 0.33 | lying / ruminating | lying / none | activity |
+| 786 | 358 | 7 | 0.05 | 0.51 | standing / feeding | standing / none | activity |
+| 787 | 358 | 7 | 0.15 | 0.32 | lying / none | standing / none | posture |
+| 788 | 358 | 7 | 0.17 | 0.53 | standing / feeding | standing / feeding | ok |
+| 789 | 358 | 7 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 790 | 358 | 7 | 0.43 | 0.22 | lying / ruminating | lying / none | activity |
+| 791 | 358 | 7 | 0.44 | 0.50 | standing / feeding | standing / feeding | ok |
+| 792 | 358 | 7 | 0.87 | 0.48 | standing / feeding | standing / feeding | ok |
+| 793 | 358 | 7 | 0.95 | 0.33 | lying / ruminating | lying / none | activity |
+| 794 | 359 | 2 | 0.05 | 0.33 | lying / none | lying / none | ok |
+| 795 | 359 | 2 | 0.14 | 0.31 | lying / none | lying / none | ok |
+| 796 | 359 | 2 | 0.24 | 0.26 | lying / none | lying / none | ok |
+| 797 | 359 | 2 | 0.37 | 0.30 | lying / none | lying / none | ok |
+| 798 | 359 | 2 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 799 | 359 | 2 | 0.94 | 0.28 | lying / none | lying / none | ok |
+| 800 | 359 | 3 | 0.05 | 0.32 | lying / none | lying / none | ok |
+| 801 | 359 | 3 | 0.14 | 0.30 | lying / none | lying / none | ok |
+| 802 | 359 | 3 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 803 | 359 | 3 | 0.37 | 0.28 | lying / none | lying / none | ok |
+| 804 | 359 | 3 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 805 | 359 | 3 | 0.94 | 0.26 | lying / none | lying / none | ok |
+| 806 | 359 | 4 | 0.04 | 0.32 | lying / none | standing / none | posture |
+| 807 | 359 | 4 | 0.13 | 0.29 | lying / none | lying / none | ok |
+| 808 | 359 | 4 | 0.23 | 0.26 | lying / none | lying / none | ok |
+| 809 | 359 | 4 | 0.38 | 0.30 | lying / none | lying / none | ok |
+| 810 | 359 | 4 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 811 | 359 | 4 | 0.92 | 0.27 | lying / none | lying / none | ok |
+| 812 | 359 | 5 | 0.04 | 0.33 | lying / none | standing / none | posture |
+| 813 | 359 | 5 | 0.13 | 0.29 | lying / none | lying / none | ok |
+| 814 | 359 | 5 | 0.24 | 0.28 | lying / none | lying / none | ok |
+| 815 | 359 | 5 | 0.37 | 0.30 | lying / none | lying / none | ok |
+| 816 | 359 | 5 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 817 | 359 | 5 | 0.96 | 0.28 | lying / none | lying / none | ok |
+| 818 | 359 | 6 | 0.04 | 0.32 | lying / none | standing / none | posture |
+| 819 | 359 | 6 | 0.13 | 0.30 | lying / none | lying / none | ok |
+| 820 | 359 | 6 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 821 | 359 | 6 | 0.37 | 0.30 | lying / none | lying / none | ok |
+| 822 | 359 | 6 | 0.90 | 0.32 | lying / none | lying / none | ok |
+| 823 | 359 | 6 | 0.96 | 0.28 | lying / none | lying / none | ok |
+| 824 | 359 | 7 | 0.04 | 0.33 | lying / none | standing / none | posture |
+| 825 | 359 | 7 | 0.12 | 0.29 | lying / none | lying / none | ok |
+| 826 | 359 | 7 | 0.24 | 0.27 | lying / none | lying / none | ok |
+| 827 | 359 | 7 | 0.38 | 0.29 | lying / none | lying / none | ok |
+| 828 | 359 | 7 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 829 | 359 | 7 | 0.97 | 0.28 | lying / none | lying / none | ok |
+| 830 | 360 | 2 | 0.05 | 0.34 | lying / none | standing / none | posture |
+| 831 | 360 | 2 | 0.13 | 0.31 | lying / none | lying / none | ok |
+| 832 | 360 | 2 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 833 | 360 | 2 | 0.38 | 0.30 | lying / none | lying / none | ok |
+| 834 | 360 | 2 | 0.88 | 0.24 | lying / none | lying / none | ok |
+| 835 | 360 | 2 | 0.90 | 0.34 | lying / none | lying / none | ok |
+| 836 | 360 | 2 | 0.96 | 0.24 | standing / none | standing / none | ok |
+| 837 | 360 | 3 | 0.05 | 0.33 | lying / none | standing / none | posture |
+| 838 | 360 | 3 | 0.13 | 0.29 | lying / none | standing / none | posture |
+| 839 | 360 | 3 | 0.24 | 0.26 | lying / none | lying / none | ok |
+| 840 | 360 | 3 | 0.37 | 0.30 | lying / none | lying / none | ok |
+| 841 | 360 | 3 | 0.87 | 0.26 | lying / none | standing / none | posture |
+| 842 | 360 | 3 | 0.90 | 0.35 | lying / none | lying / none | ok |
+| 843 | 360 | 3 | 0.96 | 0.25 | standing / none | standing / none | ok |
+| 844 | 360 | 4 | 0.05 | 0.34 | lying / none | standing / none | posture |
+| 845 | 360 | 4 | 0.14 | 0.30 | lying / none | standing / none | posture |
+| 846 | 360 | 4 | 0.25 | 0.26 | lying / none | lying / none | ok |
+| 847 | 360 | 4 | 0.36 | 0.28 | lying / none | lying / none | ok |
+| 848 | 360 | 4 | 0.87 | 0.26 | lying / none | standing / none | posture |
+| 849 | 360 | 4 | 0.89 | 0.33 | lying / none | lying / none | ok |
+| 850 | 360 | 4 | 0.97 | 0.25 | standing / none | standing / none | ok |
+| 851 | 360 | 5 | 0.04 | 0.33 | lying / none | standing / none | posture |
+| 852 | 360 | 5 | 0.12 | 0.29 | lying / none | lying / none | ok |
+| 853 | 360 | 5 | 0.24 | 0.27 | lying / none | lying / none | ok |
+| 854 | 360 | 5 | 0.38 | 0.29 | lying / none | lying / none | ok |
+| 855 | 360 | 5 | 0.86 | 0.24 | lying / none | lying / none | ok |
+| 856 | 360 | 5 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 857 | 360 | 5 | 0.96 | 0.25 | lying / none | standing / none | posture |
+| 858 | 360 | 6 | 0.05 | 0.33 | lying / none | lying / none | ok |
+| 859 | 360 | 6 | 0.12 | 0.30 | lying / none | lying / none | ok |
+| 860 | 360 | 6 | 0.25 | 0.26 | lying / none | lying / none | ok |
+| 861 | 360 | 6 | 0.38 | 0.28 | lying / none | lying / none | ok |
+| 862 | 360 | 6 | 0.86 | 0.26 | lying / none | lying / none | ok |
+| 863 | 360 | 6 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 864 | 360 | 6 | 0.96 | 0.25 | standing / none | standing / none | ok |
+| 865 | 360 | 7 | 0.13 | 0.30 | lying / none | lying / none | ok |
+| 866 | 360 | 7 | 0.24 | 0.26 | lying / none | lying / none | ok |
+| 867 | 360 | 7 | 0.37 | 0.30 | lying / ruminating | lying / none | activity |
+| 868 | 360 | 7 | 0.86 | 0.25 | lying / none | lying / none | ok |
+| 869 | 360 | 7 | 0.90 | 0.34 | lying / none | lying / none | ok |
+| 870 | 360 | 7 | 0.96 | 0.26 | standing / none | standing / feeding | activity |
+| 871 | 361 | 2 | 0.07 | 0.31 | lying / none | standing / feeding | posture + activity |
+| 872 | 361 | 2 | 0.14 | 0.28 | lying / none | lying / none | ok |
+| 873 | 361 | 2 | 0.24 | 0.26 | lying / none | lying / none | ok |
+| 874 | 361 | 2 | 0.55 | 0.29 | lying / none | lying / none | ok |
+| 875 | 361 | 2 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 876 | 361 | 2 | 0.94 | 0.32 | lying / none | lying / none | ok |
+| 877 | 361 | 3 | 0.07 | 0.33 | lying / none | lying / none | ok |
+| 878 | 361 | 3 | 0.15 | 0.29 | lying / none | lying / none | ok |
+| 879 | 361 | 3 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 880 | 361 | 3 | 0.55 | 0.27 | lying / none | lying / none | ok |
+| 881 | 361 | 3 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 882 | 361 | 3 | 0.95 | 0.32 | lying / none | lying / none | ok |
+| 883 | 361 | 4 | 0.07 | 0.33 | lying / none | lying / none | ok |
+| 884 | 361 | 4 | 0.15 | 0.30 | lying / none | lying / none | ok |
+| 885 | 361 | 4 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 886 | 361 | 4 | 0.56 | 0.28 | lying / none | lying / none | ok |
+| 887 | 361 | 4 | 0.88 | 0.32 | lying / none | lying / none | ok |
+| 888 | 361 | 4 | 0.95 | 0.33 | lying / none | lying / none | ok |
+| 889 | 361 | 5 | 0.07 | 0.32 | lying / none | standing / feeding | posture + activity |
+| 890 | 361 | 5 | 0.15 | 0.29 | lying / none | standing / none | posture |
+| 891 | 361 | 5 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 892 | 361 | 5 | 0.56 | 0.26 | lying / none | lying / none | ok |
+| 893 | 361 | 5 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 894 | 361 | 5 | 0.94 | 0.32 | lying / none | lying / none | ok |
+| 895 | 361 | 6 | 0.07 | 0.32 | lying / none | lying / none | ok |
+| 896 | 361 | 6 | 0.15 | 0.29 | lying / none | lying / none | ok |
+| 897 | 361 | 6 | 0.24 | 0.27 | lying / none | lying / none | ok |
+| 898 | 361 | 6 | 0.56 | 0.27 | lying / none | lying / none | ok |
+| 899 | 361 | 6 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 900 | 361 | 6 | 0.95 | 0.31 | lying / none | lying / none | ok |
+| 901 | 361 | 7 | 0.07 | 0.32 | lying / none | lying / none | ok |
+| 902 | 361 | 7 | 0.14 | 0.30 | lying / none | standing / feeding | posture + activity |
+| 903 | 361 | 7 | 0.26 | 0.27 | lying / none | lying / none | ok |
+| 904 | 361 | 7 | 0.56 | 0.28 | lying / none | lying / none | ok |
+| 905 | 361 | 7 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 906 | 361 | 7 | 0.94 | 0.32 | lying / none | lying / none | ok |
+| 907 | 362 | 2 | 0.06 | 0.34 | lying / none | standing / feeding | posture + activity |
+| 908 | 362 | 2 | 0.08 | 0.32 | lying / none | standing / feeding | posture + activity |
+| 909 | 362 | 2 | 0.15 | 0.29 | lying / none | lying / none | ok |
+| 910 | 362 | 2 | 0.25 | 0.26 | lying / none | lying / none | ok |
+| 911 | 362 | 2 | 0.55 | 0.28 | lying / none | lying / none | ok |
+| 912 | 362 | 2 | 0.88 | 0.25 | lying / none | standing / feeding | posture + activity |
+| 913 | 362 | 2 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 914 | 362 | 2 | 0.96 | 0.30 | standing / none | standing / none | ok |
+| 915 | 362 | 3 | 0.03 | 0.32 | lying / none | standing / feeding | posture + activity |
+| 916 | 362 | 3 | 0.08 | 0.31 | lying / none | standing / feeding | posture + activity |
+| 917 | 362 | 3 | 0.14 | 0.29 | lying / none | lying / none | ok |
+| 918 | 362 | 3 | 0.25 | 0.28 | lying / none | standing / feeding | posture + activity |
+| 919 | 362 | 3 | 0.55 | 0.29 | lying / none | lying / none | ok |
+| 920 | 362 | 3 | 0.87 | 0.26 | lying / none | standing / feeding | posture + activity |
+| 921 | 362 | 3 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 922 | 362 | 3 | 0.95 | 0.31 | standing / none | standing / feeding | activity |
+| 923 | 362 | 4 | 0.07 | 0.31 | lying / none | standing / feeding | posture + activity |
+| 924 | 362 | 4 | 0.15 | 0.29 | lying / none | lying / none | ok |
+| 925 | 362 | 4 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 926 | 362 | 4 | 0.55 | 0.28 | lying / none | lying / none | ok |
+| 927 | 362 | 4 | 0.87 | 0.24 | lying / none | standing / feeding | posture + activity |
+| 928 | 362 | 4 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 929 | 362 | 4 | 0.96 | 0.30 | standing / none | standing / feeding | activity |
+| 930 | 362 | 5 | 0.06 | 0.31 | lying / none | lying / feeding | activity |
+| 931 | 362 | 5 | 0.15 | 0.29 | lying / none | lying / none | ok |
+| 932 | 362 | 5 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 933 | 362 | 5 | 0.55 | 0.28 | lying / none | lying / none | ok |
+| 934 | 362 | 5 | 0.87 | 0.25 | lying / none | standing / feeding | posture + activity |
+| 935 | 362 | 5 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 936 | 362 | 5 | 0.96 | 0.30 | standing / none | standing / none | ok |
+| 937 | 362 | 6 | 0.08 | 0.31 | lying / none | standing / feeding | posture + activity |
+| 938 | 362 | 6 | 0.15 | 0.29 | lying / none | standing / feeding | posture + activity |
+| 939 | 362 | 6 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 940 | 362 | 6 | 0.55 | 0.28 | lying / none | lying / none | ok |
+| 941 | 362 | 6 | 0.87 | 0.25 | lying / none | standing / feeding | posture + activity |
+| 942 | 362 | 6 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 943 | 362 | 6 | 0.96 | 0.31 | standing / none | standing / feeding | activity |
+| 944 | 362 | 7 | 0.08 | 0.31 | lying / none | standing / feeding | posture + activity |
+| 945 | 362 | 7 | 0.14 | 0.29 | lying / none | lying / none | ok |
+| 946 | 362 | 7 | 0.24 | 0.26 | lying / none | standing / feeding | posture + activity |
+| 947 | 362 | 7 | 0.56 | 0.27 | lying / none | lying / none | ok |
+| 948 | 362 | 7 | 0.87 | 0.24 | lying / none | standing / none | posture |
+| 949 | 362 | 7 | 0.89 | 0.33 | lying / none | lying / none | ok |
+| 950 | 362 | 7 | 0.95 | 0.29 | standing / none | standing / none | ok |
+| 951 | 363 | 2 | 0.02 | 0.37 | lying / none | standing / none | posture |
+| 952 | 363 | 2 | 0.13 | 0.30 | lying / none | standing / feeding | posture + activity |
+| 953 | 363 | 2 | 0.25 | 0.27 | lying / none | lying / none | ok |
+| 954 | 363 | 2 | 0.53 | 0.30 | lying / none | lying / none | ok |
+| 955 | 363 | 2 | 0.87 | 0.23 | lying / none | lying / none | ok |
+| 956 | 363 | 2 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 957 | 363 | 2 | 0.97 | 0.31 | lying / none | lying / none | ok |
+| 958 | 363 | 3 | 0.02 | 0.38 | lying / none | standing / feeding | posture + activity |
+| 959 | 363 | 3 | 0.12 | 0.29 | lying / none | lying / none | ok |
+| 960 | 363 | 3 | 0.25 | 0.25 | lying / none | standing / none | posture |
+| 961 | 363 | 3 | 0.52 | 0.29 | lying / none | lying / none | ok |
+| 962 | 363 | 3 | 0.86 | 0.23 | lying / none | lying / none | ok |
+| 963 | 363 | 3 | 0.90 | 0.34 | lying / none | lying / none | ok |
+| 964 | 363 | 3 | 0.97 | 0.31 | lying / none | lying / none | ok |
+| 965 | 363 | 4 | 0.02 | 0.37 | lying / none | lying / none | ok |
+| 966 | 363 | 4 | 0.12 | 0.30 | lying / none | standing / feeding | posture + activity |
+| 967 | 363 | 4 | 0.25 | 0.26 | lying / none | lying / none | ok |
+| 968 | 363 | 4 | 0.53 | 0.28 | lying / none | lying / none | ok |
+| 969 | 363 | 4 | 0.86 | 0.25 | lying / none | lying / none | ok |
+| 970 | 363 | 4 | 0.89 | 0.33 | lying / none | lying / none | ok |
+| 971 | 363 | 4 | 0.98 | 0.32 | lying / none | lying / none | ok |
+| 972 | 363 | 5 | 0.02 | 0.37 | lying / none | standing / none | posture |
+| 973 | 363 | 5 | 0.13 | 0.31 | lying / none | lying / none | ok |
+| 974 | 363 | 5 | 0.25 | 0.26 | lying / none | standing / feeding | posture + activity |
+| 975 | 363 | 5 | 0.52 | 0.27 | lying / none | lying / none | ok |
+| 976 | 363 | 5 | 0.86 | 0.25 | lying / none | lying / none | ok |
+| 977 | 363 | 5 | 0.97 | 0.31 | lying / none | lying / none | ok |
+| 978 | 363 | 6 | 0.02 | 0.37 | lying / none | standing / none | posture |
+| 979 | 363 | 6 | 0.13 | 0.30 | lying / none | standing / feeding | posture + activity |
+| 980 | 363 | 6 | 0.25 | 0.26 | lying / none | lying / none | ok |
+| 981 | 363 | 6 | 0.52 | 0.28 | lying / none | lying / none | ok |
+| 982 | 363 | 6 | 0.86 | 0.25 | lying / none | lying / none | ok |
+| 983 | 363 | 6 | 0.89 | 0.32 | lying / none | lying / none | ok |
+| 984 | 363 | 6 | 0.97 | 0.32 | lying / none | lying / none | ok |
+| 985 | 363 | 7 | 0.02 | 0.37 | lying / none | lying / none | ok |
+| 986 | 363 | 7 | 0.13 | 0.29 | lying / none | standing / none | posture |
+| 987 | 363 | 7 | 0.26 | 0.27 | lying / none | lying / none | ok |
+| 988 | 363 | 7 | 0.53 | 0.27 | lying / none | lying / none | ok |
+| 989 | 363 | 7 | 0.88 | 0.29 | lying / none | lying / none | ok |
+| 990 | 363 | 7 | 0.97 | 0.31 | lying / none | lying / none | ok |
+| 991 | 364 | 2 | 0.91 | 0.32 | standing / none | standing / none | ok |
+| 992 | 364 | 3 | 0.90 | 0.30 | standing / none | standing / none | ok |
+| 993 | 364 | 4 | 0.89 | 0.29 | standing / none | standing / none | ok |
+| 994 | 364 | 5 | 0.90 | 0.30 | standing / none | standing / none | ok |
+| 995 | 364 | 6 | 0.90 | 0.31 | standing / none | standing / none | ok |
+| 996 | 364 | 7 | 0.90 | 0.30 | standing / none | standing / none | ok |
+| 997 | 365 | 2 | 0.04 | 0.47 | standing / feeding | standing / feeding | ok |
+| 998 | 365 | 2 | 0.09 | 0.45 | standing / feeding | standing / feeding | ok |
+| 999 | 365 | 2 | 0.16 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1000 | 365 | 2 | 0.20 | 0.27 | lying / ruminating | lying / none | activity |
+| 1001 | 365 | 2 | 0.27 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1002 | 365 | 2 | 0.34 | 0.24 | lying / ruminating | lying / none | activity |
+| 1003 | 365 | 2 | 0.37 | 0.52 | standing / feeding | standing / feeding | ok |
+| 1004 | 365 | 2 | 0.43 | 0.23 | lying / ruminating | lying / none | activity |
+| 1005 | 365 | 2 | 0.47 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1006 | 365 | 2 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1007 | 365 | 2 | 0.67 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1008 | 365 | 2 | 0.76 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1009 | 365 | 2 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1010 | 365 | 2 | 0.95 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1011 | 365 | 3 | 0.04 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1012 | 365 | 3 | 0.09 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1013 | 365 | 3 | 0.16 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1014 | 365 | 3 | 0.20 | 0.27 | lying / ruminating | lying / none | activity |
+| 1015 | 365 | 3 | 0.27 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1016 | 365 | 3 | 0.34 | 0.24 | lying / ruminating | lying / none | activity |
+| 1017 | 365 | 3 | 0.37 | 0.52 | standing / feeding | standing / feeding | ok |
+| 1018 | 365 | 3 | 0.43 | 0.23 | lying / ruminating | standing / none | posture + activity |
+| 1019 | 365 | 3 | 0.47 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1020 | 365 | 3 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1021 | 365 | 3 | 0.67 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1022 | 365 | 3 | 0.76 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1023 | 365 | 3 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1024 | 365 | 3 | 0.95 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1025 | 365 | 4 | 0.04 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1026 | 365 | 4 | 0.09 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1027 | 365 | 4 | 0.16 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1028 | 365 | 4 | 0.20 | 0.27 | lying / ruminating | lying / none | activity |
+| 1029 | 365 | 4 | 0.27 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1030 | 365 | 4 | 0.34 | 0.24 | lying / ruminating | lying / none | activity |
+| 1031 | 365 | 4 | 0.37 | 0.52 | standing / feeding | standing / feeding | ok |
+| 1032 | 365 | 4 | 0.43 | 0.23 | lying / ruminating | lying / none | activity |
+| 1033 | 365 | 4 | 0.47 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1034 | 365 | 4 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1035 | 365 | 4 | 0.67 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1036 | 365 | 4 | 0.76 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1037 | 365 | 4 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1038 | 365 | 4 | 0.95 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1039 | 365 | 5 | 0.04 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1040 | 365 | 5 | 0.09 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1041 | 365 | 5 | 0.16 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1042 | 365 | 5 | 0.20 | 0.27 | lying / ruminating | lying / none | activity |
+| 1043 | 365 | 5 | 0.28 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1044 | 365 | 5 | 0.34 | 0.24 | lying / ruminating | lying / none | activity |
+| 1045 | 365 | 5 | 0.37 | 0.52 | standing / feeding | standing / feeding | ok |
+| 1046 | 365 | 5 | 0.43 | 0.23 | lying / ruminating | lying / none | activity |
+| 1047 | 365 | 5 | 0.47 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1048 | 365 | 5 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1049 | 365 | 5 | 0.67 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1050 | 365 | 5 | 0.76 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1051 | 365 | 5 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1052 | 365 | 5 | 0.95 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1053 | 365 | 6 | 0.04 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1054 | 365 | 6 | 0.09 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1055 | 365 | 6 | 0.16 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1056 | 365 | 6 | 0.20 | 0.27 | lying / ruminating | lying / none | activity |
+| 1057 | 365 | 6 | 0.27 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1058 | 365 | 6 | 0.34 | 0.24 | lying / ruminating | lying / none | activity |
+| 1059 | 365 | 6 | 0.37 | 0.52 | standing / feeding | standing / feeding | ok |
+| 1060 | 365 | 6 | 0.43 | 0.23 | lying / ruminating | lying / none | activity |
+| 1061 | 365 | 6 | 0.47 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1062 | 365 | 6 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1063 | 365 | 6 | 0.67 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1064 | 365 | 6 | 0.76 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1065 | 365 | 6 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1066 | 365 | 6 | 0.95 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1067 | 365 | 7 | 0.04 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1068 | 365 | 7 | 0.09 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1069 | 365 | 7 | 0.16 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1070 | 365 | 7 | 0.20 | 0.27 | lying / ruminating | lying / none | activity |
+| 1071 | 365 | 7 | 0.27 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1072 | 365 | 7 | 0.34 | 0.24 | lying / ruminating | lying / none | activity |
+| 1073 | 365 | 7 | 0.37 | 0.52 | standing / feeding | standing / feeding | ok |
+| 1074 | 365 | 7 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1075 | 365 | 7 | 0.47 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1076 | 365 | 7 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1077 | 365 | 7 | 0.67 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1078 | 365 | 7 | 0.76 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1079 | 365 | 7 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1080 | 365 | 7 | 0.95 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1081 | 366 | 2 | 0.03 | 0.38 | lying / none | lying / none | ok |
+| 1082 | 366 | 2 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1083 | 366 | 2 | 0.20 | 0.34 | standing / none | standing / none | ok |
+| 1084 | 366 | 2 | 0.27 | 0.29 | lying / none | lying / none | ok |
+| 1085 | 366 | 2 | 0.29 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1086 | 366 | 2 | 0.40 | 0.28 | standing / none | standing / none | ok |
+| 1087 | 366 | 2 | 0.45 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1088 | 366 | 2 | 0.52 | 0.23 | standing / none | standing / none | ok |
+| 1089 | 366 | 2 | 0.68 | 0.22 | standing / none | standing / none | ok |
+| 1090 | 366 | 2 | 0.72 | 0.26 | standing / drinking | standing / none | activity |
+| 1091 | 366 | 2 | 0.79 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1092 | 366 | 2 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 1093 | 366 | 3 | 0.03 | 0.38 | lying / none | lying / none | ok |
+| 1094 | 366 | 3 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1095 | 366 | 3 | 0.20 | 0.34 | standing / none | standing / none | ok |
+| 1096 | 366 | 3 | 0.27 | 0.29 | lying / none | lying / none | ok |
+| 1097 | 366 | 3 | 0.29 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1098 | 366 | 3 | 0.40 | 0.28 | standing / none | standing / none | ok |
+| 1099 | 366 | 3 | 0.45 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1100 | 366 | 3 | 0.52 | 0.23 | standing / none | standing / feeding | activity |
+| 1101 | 366 | 3 | 0.68 | 0.22 | standing / none | standing / none | ok |
+| 1102 | 366 | 3 | 0.72 | 0.26 | standing / drinking | standing / feeding | activity |
+| 1103 | 366 | 3 | 0.80 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1104 | 366 | 3 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 1105 | 366 | 4 | 0.03 | 0.38 | lying / none | lying / none | ok |
+| 1106 | 366 | 4 | 0.10 | 0.35 | lying / none | standing / feeding | posture + activity |
+| 1107 | 366 | 4 | 0.20 | 0.34 | standing / none | standing / none | ok |
+| 1108 | 366 | 4 | 0.27 | 0.29 | lying / none | lying / none | ok |
+| 1109 | 366 | 4 | 0.29 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1110 | 366 | 4 | 0.40 | 0.28 | standing / none | standing / none | ok |
+| 1111 | 366 | 4 | 0.46 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1112 | 366 | 4 | 0.52 | 0.23 | standing / none | standing / none | ok |
+| 1113 | 366 | 4 | 0.68 | 0.22 | standing / none | standing / none | ok |
+| 1114 | 366 | 4 | 0.72 | 0.26 | standing / drinking | standing / feeding | activity |
+| 1115 | 366 | 4 | 0.79 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1116 | 366 | 4 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 1117 | 366 | 5 | 0.03 | 0.38 | lying / none | lying / none | ok |
+| 1118 | 366 | 5 | 0.10 | 0.35 | lying / none | standing / feeding | posture + activity |
+| 1119 | 366 | 5 | 0.20 | 0.34 | standing / none | standing / none | ok |
+| 1120 | 366 | 5 | 0.27 | 0.29 | lying / none | lying / none | ok |
+| 1121 | 366 | 5 | 0.29 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1122 | 366 | 5 | 0.40 | 0.28 | standing / none | standing / none | ok |
+| 1123 | 366 | 5 | 0.46 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1124 | 366 | 5 | 0.52 | 0.23 | standing / none | standing / none | ok |
+| 1125 | 366 | 5 | 0.68 | 0.22 | standing / none | standing / none | ok |
+| 1126 | 366 | 5 | 0.72 | 0.26 | standing / drinking | standing / feeding | activity |
+| 1127 | 366 | 5 | 0.80 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1128 | 366 | 5 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 1129 | 366 | 6 | 0.03 | 0.38 | lying / none | lying / none | ok |
+| 1130 | 366 | 6 | 0.07 | 0.36 | lying / none | standing / none | posture |
+| 1131 | 366 | 6 | 0.10 | 0.35 | lying / none | standing / feeding | posture + activity |
+| 1132 | 366 | 6 | 0.20 | 0.34 | standing / none | standing / none | ok |
+| 1133 | 366 | 6 | 0.27 | 0.29 | lying / none | lying / none | ok |
+| 1134 | 366 | 6 | 0.29 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1135 | 366 | 6 | 0.40 | 0.28 | standing / none | standing / none | ok |
+| 1136 | 366 | 6 | 0.46 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1137 | 366 | 6 | 0.52 | 0.23 | standing / none | standing / feeding | activity |
+| 1138 | 366 | 6 | 0.68 | 0.22 | standing / none | standing / none | ok |
+| 1139 | 366 | 6 | 0.72 | 0.26 | standing / drinking | standing / none | activity |
+| 1140 | 366 | 6 | 0.80 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1141 | 366 | 6 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 1142 | 366 | 7 | 0.03 | 0.38 | lying / none | lying / none | ok |
+| 1143 | 366 | 7 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1144 | 366 | 7 | 0.20 | 0.34 | standing / none | standing / none | ok |
+| 1145 | 366 | 7 | 0.27 | 0.29 | lying / none | standing / none | posture |
+| 1146 | 366 | 7 | 0.29 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1147 | 366 | 7 | 0.40 | 0.28 | standing / none | standing / none | ok |
+| 1148 | 366 | 7 | 0.46 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1149 | 366 | 7 | 0.52 | 0.23 | standing / none | standing / none | ok |
+| 1150 | 366 | 7 | 0.68 | 0.22 | standing / none | standing / none | ok |
+| 1151 | 366 | 7 | 0.72 | 0.26 | standing / drinking | standing / feeding | activity |
+| 1152 | 366 | 7 | 0.80 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1153 | 366 | 7 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 1154 | 367 | 2 | 0.04 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1155 | 367 | 2 | 0.10 | 0.26 | standing / none | standing / none | ok |
+| 1156 | 367 | 2 | 0.12 | 0.34 | standing / none | standing / none | ok |
+| 1157 | 367 | 2 | 0.15 | 0.24 | standing / none | standing / none | ok |
+| 1158 | 367 | 2 | 0.16 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1159 | 367 | 2 | 0.17 | 0.19 | standing / none | standing / none | ok |
+| 1160 | 367 | 2 | 0.24 | 0.21 | standing / none | standing / none | ok |
+| 1161 | 367 | 2 | 0.26 | 0.31 | lying / none | standing / none | posture |
+| 1162 | 367 | 2 | 0.29 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1163 | 367 | 2 | 0.32 | 0.21 | standing / none | standing / none | ok |
+| 1164 | 367 | 2 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1165 | 367 | 2 | 0.47 | 0.17 | standing / none | standing / none | ok |
+| 1166 | 367 | 2 | 0.53 | 0.22 | lying / none | lying / none | ok |
+| 1167 | 367 | 2 | 0.90 | 0.32 | lying / none | lying / none | ok |
+| 1168 | 367 | 3 | 0.04 | 0.45 | standing / feeding | lying / none | posture + activity |
+| 1169 | 367 | 3 | 0.10 | 0.26 | standing / none | standing / none | ok |
+| 1170 | 367 | 3 | 0.12 | 0.34 | standing / none | standing / none | ok |
+| 1171 | 367 | 3 | 0.15 | 0.24 | standing / none | standing / feeding | activity |
+| 1172 | 367 | 3 | 0.16 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1173 | 367 | 3 | 0.17 | 0.19 | standing / none | standing / none | ok |
+| 1174 | 367 | 3 | 0.24 | 0.21 | standing / none | standing / none | ok |
+| 1175 | 367 | 3 | 0.26 | 0.31 | lying / none | lying / none | ok |
+| 1176 | 367 | 3 | 0.29 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1177 | 367 | 3 | 0.32 | 0.21 | standing / none | standing / feeding | activity |
+| 1178 | 367 | 3 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1179 | 367 | 3 | 0.47 | 0.17 | standing / none | lying / none | posture |
+| 1180 | 367 | 3 | 0.53 | 0.22 | lying / none | lying / none | ok |
+| 1181 | 367 | 3 | 0.90 | 0.32 | lying / none | lying / none | ok |
+| 1182 | 367 | 4 | 0.04 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1183 | 367 | 4 | 0.10 | 0.26 | standing / none | standing / none | ok |
+| 1184 | 367 | 4 | 0.12 | 0.34 | standing / none | standing / none | ok |
+| 1185 | 367 | 4 | 0.15 | 0.24 | standing / none | standing / none | ok |
+| 1186 | 367 | 4 | 0.16 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1187 | 367 | 4 | 0.17 | 0.19 | standing / none | standing / none | ok |
+| 1188 | 367 | 4 | 0.24 | 0.21 | standing / none | standing / none | ok |
+| 1189 | 367 | 4 | 0.26 | 0.31 | lying / none | lying / none | ok |
+| 1190 | 367 | 4 | 0.29 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1191 | 367 | 4 | 0.32 | 0.21 | standing / none | standing / feeding | activity |
+| 1192 | 367 | 4 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1193 | 367 | 4 | 0.47 | 0.17 | standing / none | standing / none | ok |
+| 1194 | 367 | 4 | 0.53 | 0.22 | lying / none | lying / none | ok |
+| 1195 | 367 | 4 | 0.90 | 0.32 | lying / none | lying / none | ok |
+| 1196 | 367 | 5 | 0.04 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1197 | 367 | 5 | 0.10 | 0.26 | standing / none | standing / none | ok |
+| 1198 | 367 | 5 | 0.12 | 0.34 | standing / none | standing / none | ok |
+| 1199 | 367 | 5 | 0.15 | 0.24 | standing / none | standing / none | ok |
+| 1200 | 367 | 5 | 0.16 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1201 | 367 | 5 | 0.17 | 0.19 | standing / none | standing / none | ok |
+| 1202 | 367 | 5 | 0.24 | 0.21 | standing / none | standing / none | ok |
+| 1203 | 367 | 5 | 0.26 | 0.31 | lying / none | standing / none | posture |
+| 1204 | 367 | 5 | 0.29 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1205 | 367 | 5 | 0.32 | 0.21 | standing / none | standing / none | ok |
+| 1206 | 367 | 5 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1207 | 367 | 5 | 0.47 | 0.17 | standing / none | standing / none | ok |
+| 1208 | 367 | 5 | 0.53 | 0.22 | lying / none | lying / none | ok |
+| 1209 | 367 | 5 | 0.90 | 0.32 | lying / none | lying / none | ok |
+| 1210 | 367 | 6 | 0.04 | 0.45 | standing / feeding | lying / none | posture + activity |
+| 1211 | 367 | 6 | 0.10 | 0.26 | standing / none | standing / none | ok |
+| 1212 | 367 | 6 | 0.12 | 0.34 | standing / none | lying / none | posture |
+| 1213 | 367 | 6 | 0.15 | 0.24 | standing / none | standing / none | ok |
+| 1214 | 367 | 6 | 0.16 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1215 | 367 | 6 | 0.17 | 0.19 | standing / none | standing / none | ok |
+| 1216 | 367 | 6 | 0.24 | 0.21 | standing / none | standing / none | ok |
+| 1217 | 367 | 6 | 0.26 | 0.31 | lying / none | lying / none | ok |
+| 1218 | 367 | 6 | 0.29 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1219 | 367 | 6 | 0.32 | 0.21 | standing / none | standing / none | ok |
+| 1220 | 367 | 6 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1221 | 367 | 6 | 0.47 | 0.17 | standing / none | standing / none | ok |
+| 1222 | 367 | 6 | 0.53 | 0.22 | lying / none | lying / none | ok |
+| 1223 | 367 | 6 | 0.90 | 0.32 | lying / none | lying / none | ok |
+| 1224 | 367 | 7 | 0.04 | 0.45 | standing / feeding | lying / none | posture + activity |
+| 1225 | 367 | 7 | 0.10 | 0.26 | standing / none | standing / none | ok |
+| 1226 | 367 | 7 | 0.12 | 0.34 | standing / none | lying / none | posture |
+| 1227 | 367 | 7 | 0.15 | 0.24 | standing / none | standing / none | ok |
+| 1228 | 367 | 7 | 0.16 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1229 | 367 | 7 | 0.17 | 0.19 | standing / none | standing / none | ok |
+| 1230 | 367 | 7 | 0.24 | 0.21 | standing / none | standing / none | ok |
+| 1231 | 367 | 7 | 0.26 | 0.31 | lying / none | lying / none | ok |
+| 1232 | 367 | 7 | 0.29 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1233 | 367 | 7 | 0.32 | 0.21 | standing / none | standing / none | ok |
+| 1234 | 367 | 7 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1235 | 367 | 7 | 0.47 | 0.17 | standing / none | standing / none | ok |
+| 1236 | 367 | 7 | 0.53 | 0.22 | lying / none | lying / none | ok |
+| 1237 | 367 | 7 | 0.90 | 0.32 | lying / none | lying / none | ok |
+| 1238 | 370 | 2 | 0.03 | 0.41 | standing / none | lying / none | posture |
+| 1239 | 370 | 2 | 0.04 | 0.28 | standing / none | standing / none | ok |
+| 1240 | 370 | 2 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 1241 | 370 | 2 | 0.11 | 0.35 | lying / none | lying / none | ok |
+| 1242 | 370 | 2 | 0.11 | 0.25 | standing / none | standing / none | ok |
+| 1243 | 370 | 2 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 1244 | 370 | 2 | 0.20 | 0.21 | standing / none | standing / none | ok |
+| 1245 | 370 | 2 | 0.23 | 0.31 | standing / none | standing / none | ok |
+| 1246 | 370 | 2 | 0.30 | 0.28 | lying / none | lying / none | ok |
+| 1247 | 370 | 2 | 0.30 | 0.19 | standing / none | standing / feeding | activity |
+| 1248 | 370 | 2 | 0.35 | 0.19 | standing / none | standing / feeding | activity |
+| 1249 | 370 | 2 | 0.37 | 0.30 | lying / none | lying / none | ok |
+| 1250 | 370 | 2 | 0.41 | 0.16 | standing / none | standing / none | ok |
+| 1251 | 370 | 2 | 0.42 | 0.23 | lying / none | lying / none | ok |
+| 1252 | 370 | 2 | 0.46 | 0.16 | standing / none | standing / none | ok |
+| 1253 | 370 | 2 | 0.53 | 0.42 | standing / none | standing / none | ok |
+| 1254 | 370 | 2 | 0.54 | 0.21 | standing / none | standing / none | ok |
+| 1255 | 370 | 2 | 0.57 | 0.16 | standing / none | standing / none | ok |
+| 1256 | 370 | 2 | 0.69 | 0.17 | standing / none | standing / none | ok |
+| 1257 | 370 | 2 | 0.84 | 0.29 | standing / drinking | standing / none | activity |
+| 1258 | 370 | 3 | 0.02 | 0.42 | standing / none | standing / none | ok |
+| 1259 | 370 | 3 | 0.04 | 0.28 | standing / none | standing / none | ok |
+| 1260 | 370 | 3 | 0.06 | 0.37 | lying / none | lying / none | ok |
+| 1261 | 370 | 3 | 0.11 | 0.34 | lying / none | lying / none | ok |
+| 1262 | 370 | 3 | 0.11 | 0.25 | standing / none | standing / feeding | activity |
+| 1263 | 370 | 3 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 1264 | 370 | 3 | 0.17 | 0.21 | standing / none | standing / feeding | activity |
+| 1265 | 370 | 3 | 0.19 | 0.29 | lying / none | standing / feeding | posture + activity |
+| 1266 | 370 | 3 | 0.22 | 0.20 | standing / none | standing / feeding | activity |
+| 1267 | 370 | 3 | 0.23 | 0.33 | standing / none | standing / none | ok |
+| 1268 | 370 | 3 | 0.28 | 0.19 | standing / none | standing / feeding | activity |
+| 1269 | 370 | 3 | 0.30 | 0.29 | standing / none | standing / none | ok |
+| 1270 | 370 | 3 | 0.35 | 0.18 | standing / none | standing / feeding | activity |
+| 1271 | 370 | 3 | 0.37 | 0.30 | lying / none | lying / none | ok |
+| 1272 | 370 | 3 | 0.38 | 0.16 | standing / none | standing / feeding | activity |
+| 1273 | 370 | 3 | 0.43 | 0.23 | lying / none | standing / none | posture |
+| 1274 | 370 | 3 | 0.45 | 0.16 | standing / none | standing / feeding | activity |
+| 1275 | 370 | 3 | 0.52 | 0.23 | standing / none | standing / feeding | activity |
+| 1276 | 370 | 3 | 0.53 | 0.17 | standing / none | standing / feeding | activity |
+| 1277 | 370 | 3 | 0.56 | 0.38 | standing / none | standing / none | ok |
+| 1278 | 370 | 3 | 0.65 | 0.17 | standing / none | standing / feeding | activity |
+| 1279 | 370 | 3 | 0.67 | 0.21 | standing / none | standing / none | ok |
+| 1280 | 370 | 3 | 0.84 | 0.28 | standing / none | standing / none | ok |
+| 1281 | 370 | 4 | 0.02 | 0.42 | standing / none | standing / none | ok |
+| 1282 | 370 | 4 | 0.05 | 0.28 | standing / none | standing / none | ok |
+| 1283 | 370 | 4 | 0.07 | 0.38 | standing / none | lying / none | posture |
+| 1284 | 370 | 4 | 0.10 | 0.25 | standing / none | standing / none | ok |
+| 1285 | 370 | 4 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1286 | 370 | 4 | 0.16 | 0.33 | lying / none | lying / none | ok |
+| 1287 | 370 | 4 | 0.16 | 0.23 | standing / none | standing / feeding | activity |
+| 1288 | 370 | 4 | 0.24 | 0.33 | standing / none | standing / none | ok |
+| 1289 | 370 | 4 | 0.24 | 0.22 | standing / none | standing / feeding | activity |
+| 1290 | 370 | 4 | 0.31 | 0.29 | standing / none | standing / none | ok |
+| 1291 | 370 | 4 | 0.35 | 0.18 | standing / none | standing / feeding | activity |
+| 1292 | 370 | 4 | 0.37 | 0.29 | lying / none | lying / none | ok |
+| 1293 | 370 | 4 | 0.42 | 0.17 | standing / none | standing / feeding | activity |
+| 1294 | 370 | 4 | 0.43 | 0.20 | standing / none | standing / none | ok |
+| 1295 | 370 | 4 | 0.48 | 0.15 | standing / none | standing / feeding | activity |
+| 1296 | 370 | 4 | 0.53 | 0.37 | standing / none | standing / none | ok |
+| 1297 | 370 | 4 | 0.56 | 0.21 | standing / none | standing / none | ok |
+| 1298 | 370 | 4 | 0.61 | 0.16 | standing / none | standing / none | ok |
+| 1299 | 370 | 4 | 0.63 | 0.19 | standing / none | standing / none | ok |
+| 1300 | 370 | 4 | 0.83 | 0.28 | standing / none | standing / none | ok |
+| 1301 | 370 | 5 | 0.03 | 0.37 | standing / none | lying / none | posture |
+| 1302 | 370 | 5 | 0.06 | 0.26 | standing / none | standing / none | ok |
+| 1303 | 370 | 5 | 0.07 | 0.37 | standing / none | lying / none | posture |
+| 1304 | 370 | 5 | 0.10 | 0.35 | standing / none | lying / none | posture |
+| 1305 | 370 | 5 | 0.11 | 0.25 | standing / none | standing / none | ok |
+| 1306 | 370 | 5 | 0.14 | 0.23 | standing / none | standing / none | ok |
+| 1307 | 370 | 5 | 0.16 | 0.33 | standing / none | lying / none | posture |
+| 1308 | 370 | 5 | 0.22 | 0.33 | standing / none | standing / none | ok |
+| 1309 | 370 | 5 | 0.22 | 0.21 | standing / none | standing / feeding | activity |
+| 1310 | 370 | 5 | 0.30 | 0.29 | standing / none | standing / none | ok |
+| 1311 | 370 | 5 | 0.30 | 0.18 | standing / none | standing / feeding | activity |
+| 1312 | 370 | 5 | 0.33 | 0.21 | standing / none | standing / feeding | activity |
+| 1313 | 370 | 5 | 0.37 | 0.28 | standing / none | lying / none | posture |
+| 1314 | 370 | 5 | 0.38 | 0.16 | standing / none | standing / feeding | activity |
+| 1315 | 370 | 5 | 0.43 | 0.20 | standing / none | standing / none | ok |
+| 1316 | 370 | 5 | 0.49 | 0.16 | standing / none | standing / none | ok |
+| 1317 | 370 | 5 | 0.53 | 0.34 | standing / none | standing / none | ok |
+| 1318 | 370 | 5 | 0.53 | 0.20 | standing / none | standing / none | ok |
+| 1319 | 370 | 5 | 0.57 | 0.15 | standing / none | standing / none | ok |
+| 1320 | 370 | 5 | 0.59 | 0.18 | standing / none | standing / none | ok |
+| 1321 | 370 | 5 | 0.84 | 0.30 | standing / none | standing / feeding | activity |
+| 1322 | 370 | 6 | 0.03 | 0.38 | lying / none | lying / none | ok |
+| 1323 | 370 | 6 | 0.03 | 0.28 | standing / none | standing / none | ok |
+| 1324 | 370 | 6 | 0.06 | 0.37 | lying / none | lying / none | ok |
+| 1325 | 370 | 6 | 0.06 | 0.27 | standing / none | standing / none | ok |
+| 1326 | 370 | 6 | 0.10 | 0.36 | lying / none | lying / none | ok |
+| 1327 | 370 | 6 | 0.12 | 0.27 | standing / none | standing / feeding | activity |
+| 1328 | 370 | 6 | 0.13 | 0.23 | standing / none | standing / feeding | activity |
+| 1329 | 370 | 6 | 0.15 | 0.35 | lying / none | lying / none | ok |
+| 1330 | 370 | 6 | 0.19 | 0.22 | standing / none | standing / feeding | activity |
+| 1331 | 370 | 6 | 0.20 | 0.34 | standing / none | standing / none | ok |
+| 1332 | 370 | 6 | 0.27 | 0.19 | standing / none | standing / feeding | activity |
+| 1333 | 370 | 6 | 0.29 | 0.28 | standing / none | standing / none | ok |
+| 1334 | 370 | 6 | 0.31 | 0.21 | standing / none | standing / none | ok |
+| 1335 | 370 | 6 | 0.36 | 0.30 | lying / none | lying / none | ok |
+| 1336 | 370 | 6 | 0.37 | 0.17 | standing / none | standing / feeding | activity |
+| 1337 | 370 | 6 | 0.44 | 0.18 | standing / none | standing / none | ok |
+| 1338 | 370 | 6 | 0.46 | 0.14 | standing / none | standing / none | ok |
+| 1339 | 370 | 6 | 0.49 | 0.34 | standing / none | standing / none | ok |
+| 1340 | 370 | 6 | 0.55 | 0.17 | standing / none | standing / none | ok |
+| 1341 | 370 | 6 | 0.56 | 0.29 | standing / none | standing / feeding | activity |
+| 1342 | 370 | 6 | 0.84 | 0.29 | standing / none | standing / feeding | activity |
+| 1343 | 370 | 7 | 0.03 | 0.37 | lying / ruminating | lying / none | activity |
+| 1344 | 370 | 7 | 0.06 | 0.37 | lying / ruminating | lying / none | activity |
+| 1345 | 370 | 7 | 0.07 | 0.26 | standing / none | standing / feeding | activity |
+| 1346 | 370 | 7 | 0.11 | 0.25 | lying / ruminating | standing / none | posture + activity |
+| 1347 | 370 | 7 | 0.11 | 0.34 | lying / ruminating | standing / none | posture + activity |
+| 1348 | 370 | 7 | 0.16 | 0.22 | standing / none | standing / none | ok |
+| 1349 | 370 | 7 | 0.19 | 0.34 | standing / none | standing / none | ok |
+| 1350 | 370 | 7 | 0.24 | 0.20 | standing / none | standing / none | ok |
+| 1351 | 370 | 7 | 0.30 | 0.28 | standing / none | standing / none | ok |
+| 1352 | 370 | 7 | 0.31 | 0.16 | standing / none | standing / none | ok |
+| 1353 | 370 | 7 | 0.33 | 0.18 | standing / none | standing / none | ok |
+| 1354 | 370 | 7 | 0.41 | 0.16 | standing / none | standing / feeding | activity |
+| 1355 | 370 | 7 | 0.43 | 0.32 | standing / none | standing / none | ok |
+| 1356 | 370 | 7 | 0.44 | 0.17 | standing / none | standing / feeding | activity |
+| 1357 | 370 | 7 | 0.49 | 0.16 | standing / none | standing / none | ok |
+| 1358 | 370 | 7 | 0.54 | 0.29 | standing / none | standing / none | ok |
+| 1359 | 370 | 7 | 0.83 | 0.28 | standing / none | standing / feeding | activity |
+| 1360 | 371 | 2 | 0.04 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1361 | 371 | 2 | 0.08 | 0.32 | lying / none | standing / feeding | posture + activity |
+| 1362 | 371 | 2 | 0.08 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1363 | 371 | 2 | 0.17 | 0.33 | lying / ruminating | standing / none | posture + activity |
+| 1364 | 371 | 2 | 0.17 | 0.24 | standing / none | standing / feeding | activity |
+| 1365 | 371 | 2 | 0.18 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1366 | 371 | 2 | 0.24 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1367 | 371 | 2 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1368 | 371 | 2 | 0.37 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1369 | 371 | 2 | 0.38 | 0.28 | lying / ruminating | standing / none | posture + activity |
+| 1370 | 371 | 2 | 0.45 | 0.21 | lying / ruminating | standing / feeding | posture + activity |
+| 1371 | 371 | 2 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1372 | 371 | 2 | 0.57 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1373 | 371 | 2 | 0.66 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1374 | 371 | 2 | 0.70 | 0.23 | standing / none | standing / none | ok |
+| 1375 | 371 | 2 | 0.73 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1376 | 371 | 2 | 0.82 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1377 | 371 | 2 | 0.86 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1378 | 371 | 2 | 0.86 | 0.24 | standing / drinking | standing / feeding | activity |
+| 1379 | 371 | 2 | 0.93 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1380 | 371 | 3 | 0.04 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1381 | 371 | 3 | 0.08 | 0.32 | lying / none | standing / none | posture |
+| 1382 | 371 | 3 | 0.08 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1383 | 371 | 3 | 0.17 | 0.33 | lying / ruminating | standing / none | posture + activity |
+| 1384 | 371 | 3 | 0.17 | 0.24 | standing / none | standing / none | ok |
+| 1385 | 371 | 3 | 0.18 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1386 | 371 | 3 | 0.24 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1387 | 371 | 3 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1388 | 371 | 3 | 0.37 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1389 | 371 | 3 | 0.38 | 0.28 | lying / ruminating | lying / none | activity |
+| 1390 | 371 | 3 | 0.45 | 0.21 | lying / ruminating | standing / feeding | posture + activity |
+| 1391 | 371 | 3 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1392 | 371 | 3 | 0.57 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1393 | 371 | 3 | 0.66 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1394 | 371 | 3 | 0.70 | 0.23 | standing / none | standing / none | ok |
+| 1395 | 371 | 3 | 0.73 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1396 | 371 | 3 | 0.82 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1397 | 371 | 3 | 0.86 | 0.46 | standing / feeding | standing / none | activity |
+| 1398 | 371 | 3 | 0.86 | 0.24 | standing / drinking | lying / none | posture + activity |
+| 1399 | 371 | 3 | 0.93 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1400 | 371 | 4 | 0.04 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1401 | 371 | 4 | 0.08 | 0.32 | lying / none | standing / none | posture |
+| 1402 | 371 | 4 | 0.08 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1403 | 371 | 4 | 0.17 | 0.33 | lying / ruminating | standing / none | posture + activity |
+| 1404 | 371 | 4 | 0.17 | 0.24 | standing / none | standing / none | ok |
+| 1405 | 371 | 4 | 0.18 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1406 | 371 | 4 | 0.24 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1407 | 371 | 4 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1408 | 371 | 4 | 0.37 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1409 | 371 | 4 | 0.38 | 0.28 | lying / ruminating | standing / none | posture + activity |
+| 1410 | 371 | 4 | 0.45 | 0.21 | lying / ruminating | standing / none | posture + activity |
+| 1411 | 371 | 4 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1412 | 371 | 4 | 0.57 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1413 | 371 | 4 | 0.66 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1414 | 371 | 4 | 0.70 | 0.23 | standing / none | standing / none | ok |
+| 1415 | 371 | 4 | 0.73 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1416 | 371 | 4 | 0.82 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1417 | 371 | 4 | 0.86 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1418 | 371 | 4 | 0.86 | 0.24 | standing / drinking | standing / none | activity |
+| 1419 | 371 | 4 | 0.93 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1420 | 371 | 5 | 0.04 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1421 | 371 | 5 | 0.08 | 0.32 | lying / none | standing / feeding | posture + activity |
+| 1422 | 371 | 5 | 0.08 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1423 | 371 | 5 | 0.17 | 0.33 | lying / ruminating | standing / none | posture + activity |
+| 1424 | 371 | 5 | 0.17 | 0.24 | standing / none | standing / none | ok |
+| 1425 | 371 | 5 | 0.18 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1426 | 371 | 5 | 0.24 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1427 | 371 | 5 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1428 | 371 | 5 | 0.37 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1429 | 371 | 5 | 0.38 | 0.28 | lying / ruminating | lying / none | activity |
+| 1430 | 371 | 5 | 0.45 | 0.21 | lying / ruminating | standing / none | posture + activity |
+| 1431 | 371 | 5 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1432 | 371 | 5 | 0.57 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1433 | 371 | 5 | 0.66 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1434 | 371 | 5 | 0.70 | 0.23 | standing / none | standing / none | ok |
+| 1435 | 371 | 5 | 0.73 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1436 | 371 | 5 | 0.82 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1437 | 371 | 5 | 0.86 | 0.46 | standing / feeding | standing / none | activity |
+| 1438 | 371 | 5 | 0.86 | 0.24 | standing / drinking | standing / drinking | ok |
+| 1439 | 371 | 5 | 0.93 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1440 | 371 | 6 | 0.04 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1441 | 371 | 6 | 0.08 | 0.32 | lying / none | standing / feeding | posture + activity |
+| 1442 | 371 | 6 | 0.08 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1443 | 371 | 6 | 0.17 | 0.33 | lying / ruminating | standing / none | posture + activity |
+| 1444 | 371 | 6 | 0.17 | 0.24 | standing / none | standing / none | ok |
+| 1445 | 371 | 6 | 0.18 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1446 | 371 | 6 | 0.24 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1447 | 371 | 6 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1448 | 371 | 6 | 0.37 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1449 | 371 | 6 | 0.38 | 0.28 | lying / ruminating | lying / none | activity |
+| 1450 | 371 | 6 | 0.45 | 0.21 | lying / ruminating | standing / feeding | posture + activity |
+| 1451 | 371 | 6 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1452 | 371 | 6 | 0.57 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1453 | 371 | 6 | 0.66 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1454 | 371 | 6 | 0.70 | 0.23 | standing / none | standing / none | ok |
+| 1455 | 371 | 6 | 0.73 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1456 | 371 | 6 | 0.82 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1457 | 371 | 6 | 0.86 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1458 | 371 | 6 | 0.86 | 0.24 | standing / drinking | standing / none | activity |
+| 1459 | 371 | 6 | 0.93 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1460 | 371 | 7 | 0.04 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1461 | 371 | 7 | 0.08 | 0.32 | lying / none | standing / none | posture |
+| 1462 | 371 | 7 | 0.08 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1463 | 371 | 7 | 0.17 | 0.33 | lying / ruminating | standing / none | posture + activity |
+| 1464 | 371 | 7 | 0.17 | 0.24 | standing / none | standing / none | ok |
+| 1465 | 371 | 7 | 0.18 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1466 | 371 | 7 | 0.24 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1467 | 371 | 7 | 0.26 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1468 | 371 | 7 | 0.37 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1469 | 371 | 7 | 0.38 | 0.28 | lying / ruminating | standing / none | posture + activity |
+| 1470 | 371 | 7 | 0.45 | 0.21 | lying / ruminating | lying / none | activity |
+| 1471 | 371 | 7 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1472 | 371 | 7 | 0.57 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1473 | 371 | 7 | 0.66 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1474 | 371 | 7 | 0.70 | 0.23 | standing / none | standing / none | ok |
+| 1475 | 371 | 7 | 0.73 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1476 | 371 | 7 | 0.82 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1477 | 371 | 7 | 0.86 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1478 | 371 | 7 | 0.86 | 0.24 | standing / drinking | standing / feeding | activity |
+| 1479 | 371 | 7 | 0.93 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1480 | 372 | 2 | 0.04 | 0.48 | standing / feeding | lying / none | posture + activity |
+| 1481 | 372 | 2 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1482 | 372 | 2 | 0.18 | 0.33 | lying / none | lying / none | ok |
+| 1483 | 372 | 2 | 0.18 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1484 | 372 | 2 | 0.27 | 0.20 | standing / none | standing / none | ok |
+| 1485 | 372 | 2 | 0.27 | 0.31 | lying / none | lying / none | ok |
+| 1486 | 372 | 2 | 0.30 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1487 | 372 | 2 | 0.35 | 0.23 | lying / none | standing / none | posture |
+| 1488 | 372 | 2 | 0.40 | 0.20 | standing / none | standing / none | ok |
+| 1489 | 372 | 2 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1490 | 372 | 2 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1491 | 372 | 2 | 0.50 | 0.19 | standing / none | standing / none | ok |
+| 1492 | 372 | 2 | 0.55 | 0.33 | standing / none | standing / none | ok |
+| 1493 | 372 | 2 | 0.60 | 0.17 | standing / none | standing / none | ok |
+| 1494 | 372 | 2 | 0.69 | 0.22 | standing / drinking | standing / none | activity |
+| 1495 | 372 | 2 | 0.82 | 0.30 | standing / none | standing / drinking | activity |
+| 1496 | 372 | 2 | 0.94 | 0.46 | standing / feeding | standing / none | activity |
+| 1497 | 372 | 2 | 0.95 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 1498 | 372 | 3 | 0.04 | 0.48 | standing / feeding | lying / none | posture + activity |
+| 1499 | 372 | 3 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1500 | 372 | 3 | 0.18 | 0.33 | lying / none | lying / none | ok |
+| 1501 | 372 | 3 | 0.18 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1502 | 372 | 3 | 0.27 | 0.20 | standing / none | standing / none | ok |
+| 1503 | 372 | 3 | 0.27 | 0.31 | lying / none | lying / none | ok |
+| 1504 | 372 | 3 | 0.30 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1505 | 372 | 3 | 0.35 | 0.23 | lying / none | lying / none | ok |
+| 1506 | 372 | 3 | 0.40 | 0.20 | standing / none | standing / none | ok |
+| 1507 | 372 | 3 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1508 | 372 | 3 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1509 | 372 | 3 | 0.50 | 0.19 | standing / none | standing / none | ok |
+| 1510 | 372 | 3 | 0.55 | 0.33 | standing / none | standing / none | ok |
+| 1511 | 372 | 3 | 0.60 | 0.17 | standing / none | standing / none | ok |
+| 1512 | 372 | 3 | 0.69 | 0.22 | standing / drinking | standing / none | activity |
+| 1513 | 372 | 3 | 0.82 | 0.30 | standing / none | standing / feeding | activity |
+| 1514 | 372 | 3 | 0.94 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1515 | 372 | 3 | 0.95 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 1516 | 372 | 4 | 0.04 | 0.48 | standing / feeding | lying / none | posture + activity |
+| 1517 | 372 | 4 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1518 | 372 | 4 | 0.18 | 0.33 | lying / none | lying / none | ok |
+| 1519 | 372 | 4 | 0.18 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1520 | 372 | 4 | 0.27 | 0.20 | standing / none | lying / none | posture |
+| 1521 | 372 | 4 | 0.27 | 0.31 | lying / none | lying / none | ok |
+| 1522 | 372 | 4 | 0.30 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1523 | 372 | 4 | 0.35 | 0.23 | lying / none | lying / none | ok |
+| 1524 | 372 | 4 | 0.40 | 0.20 | standing / none | standing / none | ok |
+| 1525 | 372 | 4 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1526 | 372 | 4 | 0.48 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1527 | 372 | 4 | 0.50 | 0.19 | standing / none | standing / none | ok |
+| 1528 | 372 | 4 | 0.55 | 0.33 | standing / none | standing / none | ok |
+| 1529 | 372 | 4 | 0.60 | 0.17 | standing / none | standing / none | ok |
+| 1530 | 372 | 4 | 0.69 | 0.22 | standing / drinking | standing / none | activity |
+| 1531 | 372 | 4 | 0.82 | 0.30 | standing / none | standing / none | ok |
+| 1532 | 372 | 4 | 0.94 | 0.46 | standing / feeding | standing / none | activity |
+| 1533 | 372 | 4 | 0.95 | 0.30 | lying / ruminating | lying / none | activity |
+| 1534 | 372 | 5 | 0.04 | 0.48 | standing / feeding | lying / none | posture + activity |
+| 1535 | 372 | 5 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1536 | 372 | 5 | 0.18 | 0.33 | lying / none | lying / none | ok |
+| 1537 | 372 | 5 | 0.18 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1538 | 372 | 5 | 0.27 | 0.20 | standing / none | lying / none | posture |
+| 1539 | 372 | 5 | 0.27 | 0.31 | lying / none | lying / none | ok |
+| 1540 | 372 | 5 | 0.30 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1541 | 372 | 5 | 0.35 | 0.23 | lying / none | lying / none | ok |
+| 1542 | 372 | 5 | 0.40 | 0.20 | standing / none | standing / none | ok |
+| 1543 | 372 | 5 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1544 | 372 | 5 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1545 | 372 | 5 | 0.50 | 0.19 | standing / none | standing / none | ok |
+| 1546 | 372 | 5 | 0.55 | 0.33 | standing / none | standing / none | ok |
+| 1547 | 372 | 5 | 0.60 | 0.17 | standing / none | standing / none | ok |
+| 1548 | 372 | 5 | 0.69 | 0.22 | standing / drinking | standing / none | activity |
+| 1549 | 372 | 5 | 0.82 | 0.30 | standing / none | standing / none | ok |
+| 1550 | 372 | 5 | 0.94 | 0.46 | standing / feeding | standing / none | activity |
+| 1551 | 372 | 5 | 0.95 | 0.30 | lying / ruminating | lying / none | activity |
+| 1552 | 372 | 6 | 0.04 | 0.48 | standing / feeding | lying / none | posture + activity |
+| 1553 | 372 | 6 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1554 | 372 | 6 | 0.18 | 0.33 | lying / none | lying / none | ok |
+| 1555 | 372 | 6 | 0.18 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1556 | 372 | 6 | 0.27 | 0.20 | standing / none | lying / none | posture |
+| 1557 | 372 | 6 | 0.27 | 0.31 | lying / none | lying / none | ok |
+| 1558 | 372 | 6 | 0.30 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1559 | 372 | 6 | 0.35 | 0.23 | lying / none | lying / none | ok |
+| 1560 | 372 | 6 | 0.40 | 0.20 | standing / none | standing / none | ok |
+| 1561 | 372 | 6 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1562 | 372 | 6 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1563 | 372 | 6 | 0.50 | 0.19 | standing / none | standing / none | ok |
+| 1564 | 372 | 6 | 0.55 | 0.33 | standing / none | standing / none | ok |
+| 1565 | 372 | 6 | 0.60 | 0.17 | standing / none | standing / none | ok |
+| 1566 | 372 | 6 | 0.69 | 0.22 | standing / none | standing / feeding | activity |
+| 1567 | 372 | 6 | 0.82 | 0.30 | standing / none | standing / feeding | activity |
+| 1568 | 372 | 6 | 0.94 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1569 | 372 | 6 | 0.95 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 1570 | 372 | 7 | 0.04 | 0.48 | standing / feeding | lying / none | posture + activity |
+| 1571 | 372 | 7 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 1572 | 372 | 7 | 0.18 | 0.33 | lying / none | lying / none | ok |
+| 1573 | 372 | 7 | 0.18 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1574 | 372 | 7 | 0.27 | 0.20 | standing / none | lying / none | posture |
+| 1575 | 372 | 7 | 0.27 | 0.31 | lying / none | lying / none | ok |
+| 1576 | 372 | 7 | 0.30 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1577 | 372 | 7 | 0.35 | 0.23 | lying / none | lying / none | ok |
+| 1578 | 372 | 7 | 0.40 | 0.20 | standing / none | standing / none | ok |
+| 1579 | 372 | 7 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1580 | 372 | 7 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1581 | 372 | 7 | 0.50 | 0.19 | standing / none | standing / none | ok |
+| 1582 | 372 | 7 | 0.55 | 0.33 | standing / none | standing / none | ok |
+| 1583 | 372 | 7 | 0.60 | 0.17 | standing / none | standing / drinking | activity |
+| 1584 | 372 | 7 | 0.69 | 0.22 | standing / drinking | standing / none | activity |
+| 1585 | 372 | 7 | 0.82 | 0.30 | standing / none | standing / none | ok |
+| 1586 | 372 | 7 | 0.94 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1587 | 372 | 7 | 0.95 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 1588 | 373 | 2 | 0.10 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1589 | 373 | 2 | 0.16 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1590 | 373 | 2 | 0.25 | 0.30 | lying / ruminating | lying / none | activity |
+| 1591 | 373 | 2 | 0.27 | 0.21 | standing / none | lying / none | posture |
+| 1592 | 373 | 2 | 0.32 | 0.20 | standing / none | lying / none | posture |
+| 1593 | 373 | 2 | 0.37 | 0.41 | standing / feeding | standing / feeding | ok |
+| 1594 | 373 | 2 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 1595 | 373 | 2 | 0.39 | 0.18 | standing / none | standing / feeding | activity |
+| 1596 | 373 | 2 | 0.44 | 0.22 | lying / none | lying / none | ok |
+| 1597 | 373 | 2 | 0.46 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1598 | 373 | 2 | 0.54 | 0.17 | standing / none | standing / none | ok |
+| 1599 | 373 | 2 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1600 | 373 | 2 | 0.75 | 0.19 | standing / drinking | standing / drinking | ok |
+| 1601 | 373 | 2 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1602 | 373 | 2 | 0.84 | 0.19 | standing / none | standing / none | ok |
+| 1603 | 373 | 2 | 0.93 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1604 | 373 | 2 | 0.93 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1605 | 373 | 3 | 0.10 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1606 | 373 | 3 | 0.16 | 0.47 | standing / feeding | lying / none | posture + activity |
+| 1607 | 373 | 3 | 0.25 | 0.30 | lying / ruminating | standing / feeding | posture + activity |
+| 1608 | 373 | 3 | 0.32 | 0.20 | standing / none | lying / none | posture |
+| 1609 | 373 | 3 | 0.37 | 0.41 | standing / feeding | lying / none | posture + activity |
+| 1610 | 373 | 3 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 1611 | 373 | 3 | 0.39 | 0.18 | standing / none | standing / none | ok |
+| 1612 | 373 | 3 | 0.44 | 0.22 | lying / none | standing / none | posture |
+| 1613 | 373 | 3 | 0.46 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1614 | 373 | 3 | 0.54 | 0.17 | standing / none | standing / none | ok |
+| 1615 | 373 | 3 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1616 | 373 | 3 | 0.75 | 0.19 | standing / drinking | standing / drinking | ok |
+| 1617 | 373 | 3 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1618 | 373 | 3 | 0.84 | 0.19 | standing / none | standing / none | ok |
+| 1619 | 373 | 3 | 0.90 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1620 | 373 | 3 | 0.92 | 0.28 | lying / none | standing / none | posture |
+| 1621 | 373 | 3 | 0.93 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1622 | 373 | 3 | 0.97 | 0.30 | lying / none | standing / none | posture |
+| 1623 | 373 | 4 | 0.10 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1624 | 373 | 4 | 0.16 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1625 | 373 | 4 | 0.25 | 0.30 | lying / ruminating | lying / none | activity |
+| 1626 | 373 | 4 | 0.32 | 0.20 | standing / none | lying / none | posture |
+| 1627 | 373 | 4 | 0.37 | 0.41 | standing / feeding | standing / feeding | ok |
+| 1628 | 373 | 4 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 1629 | 373 | 4 | 0.39 | 0.18 | standing / none | standing / none | ok |
+| 1630 | 373 | 4 | 0.44 | 0.22 | lying / none | standing / none | posture |
+| 1631 | 373 | 4 | 0.46 | 0.46 | standing / feeding | lying / feeding | posture |
+| 1632 | 373 | 4 | 0.54 | 0.17 | standing / none | standing / none | ok |
+| 1633 | 373 | 4 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1634 | 373 | 4 | 0.75 | 0.19 | standing / drinking | standing / drinking | ok |
+| 1635 | 373 | 4 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1636 | 373 | 4 | 0.84 | 0.19 | standing / none | standing / none | ok |
+| 1637 | 373 | 4 | 0.90 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1638 | 373 | 4 | 0.92 | 0.28 | lying / none | lying / none | ok |
+| 1639 | 373 | 4 | 0.93 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1640 | 373 | 4 | 0.97 | 0.30 | lying / none | standing / none | posture |
+| 1641 | 373 | 5 | 0.10 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1642 | 373 | 5 | 0.16 | 0.47 | standing / feeding | standing / none | activity |
+| 1643 | 373 | 5 | 0.25 | 0.30 | lying / ruminating | lying / none | activity |
+| 1644 | 373 | 5 | 0.32 | 0.20 | standing / none | standing / none | ok |
+| 1645 | 373 | 5 | 0.37 | 0.41 | standing / feeding | standing / feeding | ok |
+| 1646 | 373 | 5 | 0.38 | 0.30 | lying / ruminating | standing / none | posture + activity |
+| 1647 | 373 | 5 | 0.39 | 0.18 | standing / none | standing / none | ok |
+| 1648 | 373 | 5 | 0.44 | 0.22 | lying / none | standing / none | posture |
+| 1649 | 373 | 5 | 0.46 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1650 | 373 | 5 | 0.54 | 0.17 | standing / none | standing / none | ok |
+| 1651 | 373 | 5 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1652 | 373 | 5 | 0.75 | 0.19 | standing / drinking | standing / drinking | ok |
+| 1653 | 373 | 5 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1654 | 373 | 5 | 0.84 | 0.19 | standing / none | standing / none | ok |
+| 1655 | 373 | 5 | 0.90 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1656 | 373 | 5 | 0.92 | 0.28 | lying / none | standing / none | posture |
+| 1657 | 373 | 5 | 0.93 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1658 | 373 | 5 | 0.97 | 0.30 | lying / none | standing / none | posture |
+| 1659 | 373 | 6 | 0.10 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1660 | 373 | 6 | 0.16 | 0.47 | standing / feeding | lying / none | posture + activity |
+| 1661 | 373 | 6 | 0.25 | 0.30 | lying / ruminating | lying / none | activity |
+| 1662 | 373 | 6 | 0.32 | 0.20 | standing / none | standing / feeding | activity |
+| 1663 | 373 | 6 | 0.37 | 0.41 | standing / feeding | standing / feeding | ok |
+| 1664 | 373 | 6 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 1665 | 373 | 6 | 0.39 | 0.18 | standing / none | standing / none | ok |
+| 1666 | 373 | 6 | 0.44 | 0.22 | lying / none | standing / none | posture |
+| 1667 | 373 | 6 | 0.46 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1668 | 373 | 6 | 0.54 | 0.17 | standing / none | standing / none | ok |
+| 1669 | 373 | 6 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1670 | 373 | 6 | 0.75 | 0.19 | standing / drinking | standing / drinking | ok |
+| 1671 | 373 | 6 | 0.83 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1672 | 373 | 6 | 0.84 | 0.19 | standing / none | standing / none | ok |
+| 1673 | 373 | 6 | 0.90 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1674 | 373 | 6 | 0.93 | 0.42 | standing / feeding | standing / feeding | ok |
+| 1675 | 373 | 7 | 0.10 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1676 | 373 | 7 | 0.16 | 0.47 | standing / none | standing / feeding | activity |
+| 1677 | 373 | 7 | 0.25 | 0.30 | lying / ruminating | lying / none | activity |
+| 1678 | 373 | 7 | 0.27 | 0.21 | standing / none | lying / none | posture |
+| 1679 | 373 | 7 | 0.32 | 0.20 | standing / none | lying / none | posture |
+| 1680 | 373 | 7 | 0.37 | 0.41 | standing / feeding | standing / feeding | ok |
+| 1681 | 373 | 7 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 1682 | 373 | 7 | 0.39 | 0.18 | standing / none | standing / feeding | activity |
+| 1683 | 373 | 7 | 0.44 | 0.22 | lying / none | lying / none | ok |
+| 1684 | 373 | 7 | 0.46 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1685 | 373 | 7 | 0.54 | 0.17 | standing / none | standing / none | ok |
+| 1686 | 373 | 7 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1687 | 373 | 7 | 0.75 | 0.19 | standing / drinking | standing / drinking | ok |
+| 1688 | 373 | 7 | 0.84 | 0.19 | standing / none | standing / none | ok |
+| 1689 | 373 | 7 | 0.84 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1690 | 373 | 7 | 0.94 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1691 | 373 | 7 | 0.96 | 0.42 | standing / feeding | standing / none | activity |
+| 1692 | 374 | 2 | 0.82 | 0.25 | standing / none | standing / drinking | activity |
+| 1693 | 374 | 2 | 0.87 | 0.42 | standing / none | standing / feeding | activity |
+| 1694 | 374 | 2 | 0.94 | 0.33 | lying / ruminating | standing / feeding | posture + activity |
+| 1695 | 374 | 3 | 0.81 | 0.26 | standing / none | standing / drinking | activity |
+| 1696 | 374 | 3 | 0.86 | 0.41 | standing / none | standing / none | ok |
+| 1697 | 374 | 3 | 0.94 | 0.32 | lying / ruminating | standing / none | posture + activity |
+| 1698 | 374 | 4 | 0.81 | 0.25 | standing / none | standing / drinking | activity |
+| 1699 | 374 | 4 | 0.86 | 0.40 | standing / none | standing / none | ok |
+| 1700 | 374 | 4 | 0.94 | 0.32 | lying / ruminating | lying / none | activity |
+| 1701 | 374 | 5 | 0.82 | 0.25 | standing / none | standing / drinking | activity |
+| 1702 | 374 | 5 | 0.86 | 0.40 | standing / none | standing / none | ok |
+| 1703 | 374 | 5 | 0.94 | 0.32 | lying / ruminating | standing / none | posture + activity |
+| 1704 | 374 | 6 | 0.80 | 0.26 | standing / none | standing / drinking | activity |
+| 1705 | 374 | 6 | 0.87 | 0.43 | standing / none | standing / feeding | activity |
+| 1706 | 374 | 6 | 0.94 | 0.31 | lying / ruminating | standing / none | posture + activity |
+| 1707 | 374 | 7 | 0.83 | 0.23 | standing / none | standing / feeding | activity |
+| 1708 | 374 | 7 | 0.85 | 0.43 | standing / none | standing / feeding | activity |
+| 1709 | 374 | 7 | 0.95 | 0.33 | lying / ruminating | standing / feeding | posture + activity |
+| 1710 | 375 | 2 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 1711 | 375 | 2 | 0.09 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1712 | 375 | 2 | 0.19 | 0.26 | lying / none | lying / none | ok |
+| 1713 | 375 | 2 | 0.34 | 0.21 | standing / none | standing / none | ok |
+| 1714 | 375 | 2 | 0.36 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1715 | 375 | 2 | 0.76 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1716 | 375 | 2 | 0.93 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1717 | 375 | 2 | 0.94 | 0.32 | lying / none | lying / none | ok |
+| 1718 | 375 | 3 | 0.07 | 0.38 | lying / none | lying / none | ok |
+| 1719 | 375 | 3 | 0.08 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1720 | 375 | 3 | 0.19 | 0.29 | lying / none | lying / none | ok |
+| 1721 | 375 | 3 | 0.34 | 0.22 | standing / none | standing / none | ok |
+| 1722 | 375 | 3 | 0.37 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1723 | 375 | 3 | 0.77 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1724 | 375 | 3 | 0.93 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1725 | 375 | 3 | 0.94 | 0.31 | lying / none | standing / none | posture |
+| 1726 | 375 | 4 | 0.07 | 0.35 | lying / none | standing / none | posture |
+| 1727 | 375 | 4 | 0.09 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1728 | 375 | 4 | 0.20 | 0.28 | lying / ruminating | lying / none | activity |
+| 1729 | 375 | 4 | 0.34 | 0.21 | standing / none | standing / none | ok |
+| 1730 | 375 | 4 | 0.36 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1731 | 375 | 4 | 0.77 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1732 | 375 | 4 | 0.93 | 0.46 | standing / feeding | standing / none | activity |
+| 1733 | 375 | 4 | 0.94 | 0.31 | lying / none | lying / none | ok |
+| 1734 | 375 | 5 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1735 | 375 | 5 | 0.08 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1736 | 375 | 5 | 0.18 | 0.28 | lying / none | lying / none | ok |
+| 1737 | 375 | 5 | 0.34 | 0.20 | standing / feeding | standing / none | activity |
+| 1738 | 375 | 5 | 0.34 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1739 | 375 | 5 | 0.77 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1740 | 375 | 5 | 0.92 | 0.44 | standing / feeding | standing / feeding | ok |
+| 1741 | 375 | 5 | 0.94 | 0.31 | lying / ruminating | lying / none | activity |
+| 1742 | 375 | 6 | 0.07 | 0.35 | lying / none | standing / none | posture |
+| 1743 | 375 | 6 | 0.08 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1744 | 375 | 6 | 0.18 | 0.28 | lying / ruminating | lying / none | activity |
+| 1745 | 375 | 6 | 0.33 | 0.21 | standing / none | standing / none | ok |
+| 1746 | 375 | 6 | 0.35 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1747 | 375 | 6 | 0.76 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1748 | 375 | 6 | 0.93 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1749 | 375 | 6 | 0.95 | 0.32 | lying / none | standing / none | posture |
+| 1750 | 375 | 7 | 0.08 | 0.35 | lying / none | standing / none | posture |
+| 1751 | 375 | 7 | 0.08 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1752 | 375 | 7 | 0.18 | 0.28 | lying / ruminating | lying / none | activity |
+| 1753 | 375 | 7 | 0.34 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1754 | 375 | 7 | 0.35 | 0.21 | standing / none | standing / none | ok |
+| 1755 | 375 | 7 | 0.76 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1756 | 375 | 7 | 0.92 | 0.44 | standing / feeding | standing / none | activity |
+| 1757 | 375 | 7 | 0.94 | 0.31 | lying / none | standing / none | posture |
+| 1758 | 376 | 2 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1759 | 376 | 2 | 0.13 | 0.29 | lying / none | lying / none | ok |
+| 1760 | 376 | 2 | 0.20 | 0.28 | lying / none | lying / none | ok |
+| 1761 | 376 | 2 | 0.33 | 0.25 | lying / none | lying / feeding | activity |
+| 1762 | 376 | 2 | 0.44 | 0.24 | lying / ruminating | lying / none | activity |
+| 1763 | 376 | 2 | 0.95 | 0.32 | lying / ruminating | lying / none | activity |
+| 1764 | 376 | 3 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 1765 | 376 | 3 | 0.13 | 0.29 | lying / none | lying / none | ok |
+| 1766 | 376 | 3 | 0.19 | 0.29 | lying / ruminating | lying / none | activity |
+| 1767 | 376 | 3 | 0.33 | 0.25 | lying / ruminating | lying / none | activity |
+| 1768 | 376 | 3 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1769 | 376 | 3 | 0.94 | 0.31 | lying / none | lying / none | ok |
+| 1770 | 376 | 4 | 0.07 | 0.35 | lying / none | lying / none | ok |
+| 1771 | 376 | 4 | 0.12 | 0.30 | lying / none | lying / none | ok |
+| 1772 | 376 | 4 | 0.19 | 0.28 | lying / none | lying / none | ok |
+| 1773 | 376 | 4 | 0.33 | 0.25 | lying / none | lying / none | ok |
+| 1774 | 376 | 4 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1775 | 376 | 4 | 0.95 | 0.32 | lying / ruminating | lying / none | activity |
+| 1776 | 376 | 5 | 0.08 | 0.37 | lying / none | lying / none | ok |
+| 1777 | 376 | 5 | 0.13 | 0.30 | lying / none | lying / none | ok |
+| 1778 | 376 | 5 | 0.20 | 0.28 | lying / none | lying / none | ok |
+| 1779 | 376 | 5 | 0.33 | 0.25 | lying / ruminating | lying / none | activity |
+| 1780 | 376 | 5 | 0.44 | 0.24 | lying / ruminating | lying / none | activity |
+| 1781 | 376 | 5 | 0.95 | 0.32 | lying / ruminating | lying / none | activity |
+| 1782 | 376 | 6 | 0.08 | 0.35 | lying / none | lying / none | ok |
+| 1783 | 376 | 6 | 0.13 | 0.29 | lying / none | standing / none | posture |
+| 1784 | 376 | 6 | 0.19 | 0.27 | lying / none | lying / none | ok |
+| 1785 | 376 | 6 | 0.33 | 0.25 | lying / none | lying / none | ok |
+| 1786 | 376 | 6 | 0.43 | 0.23 | lying / ruminating | standing / none | posture + activity |
+| 1787 | 376 | 6 | 0.93 | 0.31 | lying / ruminating | lying / none | activity |
+| 1788 | 376 | 7 | 0.08 | 0.36 | lying / none | lying / none | ok |
+| 1789 | 376 | 7 | 0.12 | 0.29 | lying / none | lying / none | ok |
+| 1790 | 376 | 7 | 0.18 | 0.28 | lying / none | lying / none | ok |
+| 1791 | 376 | 7 | 0.33 | 0.26 | lying / none | lying / none | ok |
+| 1792 | 376 | 7 | 0.44 | 0.24 | lying / ruminating | lying / none | activity |
+| 1793 | 376 | 7 | 0.95 | 0.32 | lying / ruminating | lying / none | activity |
+| 1794 | 377 | 2 | 0.07 | 0.38 | lying / none | lying / none | ok |
+| 1795 | 377 | 2 | 0.11 | 0.30 | lying / none | lying / none | ok |
+| 1796 | 377 | 2 | 0.17 | 0.28 | lying / none | lying / none | ok |
+| 1797 | 377 | 2 | 0.24 | 0.27 | lying / none | lying / none | ok |
+| 1798 | 377 | 2 | 0.33 | 0.25 | lying / none | lying / none | ok |
+| 1799 | 377 | 2 | 0.43 | 0.24 | lying / ruminating | lying / none | activity |
+| 1800 | 377 | 2 | 0.72 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1801 | 377 | 2 | 0.97 | 0.31 | standing / none | standing / none | ok |
+| 1802 | 377 | 3 | 0.07 | 0.38 | lying / none | lying / none | ok |
+| 1803 | 377 | 3 | 0.12 | 0.29 | lying / none | lying / none | ok |
+| 1804 | 377 | 3 | 0.18 | 0.28 | lying / none | lying / none | ok |
+| 1805 | 377 | 3 | 0.25 | 0.26 | lying / none | lying / none | ok |
+| 1806 | 377 | 3 | 0.34 | 0.26 | lying / none | lying / none | ok |
+| 1807 | 377 | 3 | 0.43 | 0.24 | lying / ruminating | lying / none | activity |
+| 1808 | 377 | 3 | 0.70 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1809 | 377 | 4 | 0.06 | 0.32 | lying / none | lying / none | ok |
+| 1810 | 377 | 4 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 1811 | 377 | 4 | 0.12 | 0.29 | lying / none | lying / none | ok |
+| 1812 | 377 | 4 | 0.18 | 0.28 | lying / none | lying / none | ok |
+| 1813 | 377 | 4 | 0.25 | 0.26 | lying / none | lying / none | ok |
+| 1814 | 377 | 4 | 0.34 | 0.25 | lying / none | lying / none | ok |
+| 1815 | 377 | 4 | 0.43 | 0.25 | lying / ruminating | lying / none | activity |
+| 1816 | 377 | 4 | 0.71 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1817 | 377 | 5 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1818 | 377 | 5 | 0.13 | 0.29 | lying / none | lying / none | ok |
+| 1819 | 377 | 5 | 0.19 | 0.28 | lying / none | lying / none | ok |
+| 1820 | 377 | 5 | 0.25 | 0.26 | lying / none | lying / none | ok |
+| 1821 | 377 | 5 | 0.34 | 0.24 | lying / none | lying / none | ok |
+| 1822 | 377 | 5 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1823 | 377 | 5 | 0.71 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1824 | 377 | 6 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1825 | 377 | 6 | 0.12 | 0.28 | lying / none | standing / none | posture |
+| 1826 | 377 | 6 | 0.18 | 0.27 | lying / none | lying / none | ok |
+| 1827 | 377 | 6 | 0.26 | 0.26 | lying / none | lying / none | ok |
+| 1828 | 377 | 6 | 0.34 | 0.24 | lying / none | lying / none | ok |
+| 1829 | 377 | 6 | 0.42 | 0.23 | lying / ruminating | lying / none | activity |
+| 1830 | 377 | 6 | 0.71 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1831 | 377 | 7 | 0.08 | 0.36 | lying / none | lying / none | ok |
+| 1832 | 377 | 7 | 0.12 | 0.29 | lying / none | standing / none | posture |
+| 1833 | 377 | 7 | 0.18 | 0.27 | lying / none | lying / none | ok |
+| 1834 | 377 | 7 | 0.24 | 0.26 | lying / none | lying / none | ok |
+| 1835 | 377 | 7 | 0.34 | 0.23 | lying / none | lying / none | ok |
+| 1836 | 377 | 7 | 0.43 | 0.24 | lying / ruminating | lying / none | activity |
+| 1837 | 377 | 7 | 0.70 | 0.43 | standing / feeding | standing / feeding | ok |
+| 1838 | 378 | 2 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1839 | 378 | 2 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 1840 | 378 | 2 | 0.27 | 0.20 | standing / none | lying / none | posture |
+| 1841 | 378 | 2 | 0.27 | 0.43 | standing / feeding | standing / feeding | ok |
+| 1842 | 378 | 2 | 0.34 | 0.24 | lying / none | lying / none | ok |
+| 1843 | 378 | 2 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1844 | 378 | 3 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1845 | 378 | 3 | 0.17 | 0.35 | lying / ruminating | lying / none | activity |
+| 1846 | 378 | 3 | 0.26 | 0.19 | standing / none | lying / none | posture |
+| 1847 | 378 | 3 | 0.26 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1848 | 378 | 3 | 0.34 | 0.26 | lying / none | lying / none | ok |
+| 1849 | 378 | 3 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1850 | 378 | 4 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 1851 | 378 | 4 | 0.15 | 0.33 | lying / ruminating | lying / none | activity |
+| 1852 | 378 | 4 | 0.26 | 0.20 | standing / none | lying / none | posture |
+| 1853 | 378 | 4 | 0.27 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1854 | 378 | 4 | 0.34 | 0.24 | lying / ruminating | lying / none | activity |
+| 1855 | 378 | 4 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1856 | 378 | 5 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1857 | 378 | 5 | 0.16 | 0.33 | lying / ruminating | lying / none | activity |
+| 1858 | 378 | 5 | 0.26 | 0.21 | standing / none | standing / none | ok |
+| 1859 | 378 | 5 | 0.26 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1860 | 378 | 5 | 0.34 | 0.24 | lying / ruminating | lying / none | activity |
+| 1861 | 378 | 5 | 0.43 | 0.24 | lying / ruminating | lying / none | activity |
+| 1862 | 378 | 6 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 1863 | 378 | 6 | 0.16 | 0.33 | lying / none | lying / none | ok |
+| 1864 | 378 | 6 | 0.26 | 0.20 | standing / none | standing / none | ok |
+| 1865 | 378 | 6 | 0.26 | 0.43 | standing / feeding | standing / feeding | ok |
+| 1866 | 378 | 6 | 0.34 | 0.25 | lying / ruminating | lying / none | activity |
+| 1867 | 378 | 6 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 1868 | 378 | 7 | 0.07 | 0.35 | lying / none | lying / none | ok |
+| 1869 | 378 | 7 | 0.16 | 0.32 | lying / none | lying / none | ok |
+| 1870 | 378 | 7 | 0.26 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1871 | 378 | 7 | 0.26 | 0.21 | standing / none | standing / none | ok |
+| 1872 | 378 | 7 | 0.34 | 0.25 | lying / ruminating | lying / none | activity |
+| 1873 | 378 | 7 | 0.43 | 0.22 | lying / ruminating | lying / none | activity |
+| 1874 | 379 | 2 | 0.08 | 0.35 | lying / none | lying / none | ok |
+| 1875 | 379 | 2 | 0.17 | 0.33 | lying / none | lying / none | ok |
+| 1876 | 379 | 2 | 0.27 | 0.32 | lying / ruminating | lying / none | activity |
+| 1877 | 379 | 2 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1878 | 379 | 2 | 0.62 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1879 | 379 | 2 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1880 | 379 | 2 | 0.89 | 0.29 | lying / none | lying / none | ok |
+| 1881 | 379 | 3 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1882 | 379 | 3 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 1883 | 379 | 3 | 0.26 | 0.32 | lying / ruminating | lying / none | activity |
+| 1884 | 379 | 3 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 1885 | 379 | 3 | 0.61 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1886 | 379 | 3 | 0.88 | 0.29 | lying / none | lying / none | ok |
+| 1887 | 379 | 3 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1888 | 379 | 4 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1889 | 379 | 4 | 0.17 | 0.33 | lying / none | lying / none | ok |
+| 1890 | 379 | 4 | 0.27 | 0.31 | lying / none | lying / none | ok |
+| 1891 | 379 | 4 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1892 | 379 | 4 | 0.61 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1893 | 379 | 4 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1894 | 379 | 4 | 0.90 | 0.31 | lying / none | lying / none | ok |
+| 1895 | 379 | 5 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 1896 | 379 | 5 | 0.17 | 0.33 | lying / none | lying / none | ok |
+| 1897 | 379 | 5 | 0.26 | 0.30 | lying / none | lying / none | ok |
+| 1898 | 379 | 5 | 0.38 | 0.28 | lying / ruminating | lying / none | activity |
+| 1899 | 379 | 5 | 0.61 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1900 | 379 | 5 | 0.88 | 0.30 | lying / none | lying / none | ok |
+| 1901 | 379 | 5 | 0.89 | 0.45 | standing / feeding | standing / feeding | ok |
+| 1902 | 379 | 6 | 0.08 | 0.36 | lying / none | lying / none | ok |
+| 1903 | 379 | 6 | 0.17 | 0.33 | lying / none | lying / none | ok |
+| 1904 | 379 | 6 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 1905 | 379 | 6 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 1906 | 379 | 6 | 0.62 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1907 | 379 | 6 | 0.89 | 0.29 | lying / none | lying / none | ok |
+| 1908 | 379 | 6 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1909 | 379 | 7 | 0.08 | 0.36 | lying / none | lying / none | ok |
+| 1910 | 379 | 7 | 0.17 | 0.33 | lying / none | lying / none | ok |
+| 1911 | 379 | 7 | 0.27 | 0.31 | lying / none | lying / none | ok |
+| 1912 | 379 | 7 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1913 | 379 | 7 | 0.60 | 0.46 | standing / feeding | standing / feeding | ok |
+| 1914 | 379 | 7 | 0.89 | 0.29 | lying / none | lying / none | ok |
+| 1915 | 379 | 7 | 0.89 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1916 | 380 | 2 | 0.07 | 0.38 | lying / none | lying / none | ok |
+| 1917 | 380 | 2 | 0.11 | 0.34 | lying / none | lying / none | ok |
+| 1918 | 380 | 2 | 0.19 | 0.28 | lying / none | lying / none | ok |
+| 1919 | 380 | 2 | 0.26 | 0.31 | lying / none | lying / none | ok |
+| 1920 | 380 | 2 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 1921 | 380 | 2 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 1922 | 380 | 3 | 0.05 | 0.36 | lying / none | lying / none | ok |
+| 1923 | 380 | 3 | 0.11 | 0.35 | lying / ruminating | lying / none | activity |
+| 1924 | 380 | 3 | 0.19 | 0.28 | lying / ruminating | lying / none | activity |
+| 1925 | 380 | 3 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 1926 | 380 | 3 | 0.38 | 0.28 | lying / ruminating | lying / none | activity |
+| 1927 | 380 | 3 | 0.88 | 0.30 | lying / none | lying / none | ok |
+| 1928 | 380 | 4 | 0.07 | 0.38 | lying / none | lying / none | ok |
+| 1929 | 380 | 4 | 0.11 | 0.34 | lying / ruminating | lying / none | activity |
+| 1930 | 380 | 4 | 0.18 | 0.27 | lying / ruminating | lying / none | activity |
+| 1931 | 380 | 4 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 1932 | 380 | 4 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 1933 | 380 | 4 | 0.88 | 0.31 | lying / none | lying / none | ok |
+| 1934 | 380 | 5 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 1935 | 380 | 5 | 0.12 | 0.35 | lying / ruminating | lying / none | activity |
+| 1936 | 380 | 5 | 0.19 | 0.28 | lying / ruminating | lying / none | activity |
+| 1937 | 380 | 5 | 0.26 | 0.29 | lying / ruminating | lying / none | activity |
+| 1938 | 380 | 5 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 1939 | 380 | 5 | 0.88 | 0.30 | lying / none | lying / none | ok |
+| 1940 | 380 | 6 | 0.06 | 0.38 | lying / none | lying / none | ok |
+| 1941 | 380 | 6 | 0.11 | 0.34 | lying / ruminating | lying / none | activity |
+| 1942 | 380 | 6 | 0.18 | 0.28 | lying / ruminating | lying / none | activity |
+| 1943 | 380 | 6 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 1944 | 380 | 6 | 0.37 | 0.30 | lying / ruminating | lying / none | activity |
+| 1945 | 380 | 6 | 0.88 | 0.31 | lying / none | lying / none | ok |
+| 1946 | 380 | 7 | 0.06 | 0.35 | lying / none | lying / none | ok |
+| 1947 | 380 | 7 | 0.11 | 0.36 | lying / ruminating | lying / none | activity |
+| 1948 | 380 | 7 | 0.18 | 0.27 | lying / ruminating | lying / none | activity |
+| 1949 | 380 | 7 | 0.25 | 0.30 | lying / ruminating | lying / none | activity |
+| 1950 | 380 | 7 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 1951 | 380 | 7 | 0.89 | 0.30 | lying / none | lying / none | ok |
+| 1952 | 381 | 2 | 0.05 | 0.38 | lying / none | lying / none | ok |
+| 1953 | 381 | 2 | 0.10 | 0.36 | lying / ruminating | lying / none | activity |
+| 1954 | 381 | 2 | 0.19 | 0.52 | standing / feeding | standing / feeding | ok |
+| 1955 | 381 | 2 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 1956 | 381 | 2 | 0.37 | 0.30 | lying / ruminating | lying / none | activity |
+| 1957 | 381 | 2 | 0.43 | 0.22 | lying / ruminating | standing / none | posture + activity |
+| 1958 | 381 | 2 | 0.68 | 0.49 | standing / feeding | standing / feeding | ok |
+| 1959 | 381 | 2 | 0.89 | 0.30 | lying / none | standing / none | posture |
+| 1960 | 381 | 2 | 0.91 | 0.44 | standing / feeding | standing / none | activity |
+| 1961 | 381 | 3 | 0.06 | 0.36 | lying / none | lying / none | ok |
+| 1962 | 381 | 3 | 0.10 | 0.35 | lying / ruminating | lying / none | activity |
+| 1963 | 381 | 3 | 0.18 | 0.50 | standing / feeding | standing / feeding | ok |
+| 1964 | 381 | 3 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 1965 | 381 | 3 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 1966 | 381 | 3 | 0.44 | 0.24 | lying / ruminating | standing / none | posture + activity |
+| 1967 | 381 | 3 | 0.68 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1968 | 381 | 3 | 0.89 | 0.29 | lying / none | standing / none | posture |
+| 1969 | 381 | 3 | 0.91 | 0.45 | standing / feeding | standing / none | activity |
+| 1970 | 381 | 4 | 0.06 | 0.37 | lying / none | lying / none | ok |
+| 1971 | 381 | 4 | 0.10 | 0.35 | lying / ruminating | lying / none | activity |
+| 1972 | 381 | 4 | 0.18 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1973 | 381 | 4 | 0.26 | 0.29 | lying / ruminating | lying / none | activity |
+| 1974 | 381 | 4 | 0.37 | 0.30 | lying / ruminating | lying / none | activity |
+| 1975 | 381 | 4 | 0.45 | 0.23 | lying / ruminating | standing / none | posture + activity |
+| 1976 | 381 | 4 | 0.69 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1977 | 381 | 4 | 0.89 | 0.29 | lying / none | lying / none | ok |
+| 1978 | 381 | 4 | 0.90 | 0.44 | standing / feeding | standing / none | activity |
+| 1979 | 381 | 5 | 0.06 | 0.36 | lying / none | lying / none | ok |
+| 1980 | 381 | 5 | 0.10 | 0.35 | lying / ruminating | lying / none | activity |
+| 1981 | 381 | 5 | 0.19 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1982 | 381 | 5 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 1983 | 381 | 5 | 0.38 | 0.31 | lying / ruminating | lying / none | activity |
+| 1984 | 381 | 5 | 0.44 | 0.24 | lying / ruminating | lying / none | activity |
+| 1985 | 381 | 5 | 0.67 | 0.48 | standing / feeding | standing / feeding | ok |
+| 1986 | 381 | 5 | 0.90 | 0.44 | standing / feeding | standing / none | activity |
+| 1987 | 381 | 6 | 0.06 | 0.38 | lying / none | lying / none | ok |
+| 1988 | 381 | 6 | 0.10 | 0.35 | lying / ruminating | lying / none | activity |
+| 1989 | 381 | 6 | 0.19 | 0.51 | standing / feeding | standing / feeding | ok |
+| 1990 | 381 | 6 | 0.26 | 0.29 | lying / ruminating | lying / none | activity |
+| 1991 | 381 | 6 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 1992 | 381 | 6 | 0.44 | 0.24 | lying / ruminating | standing / none | posture + activity |
+| 1993 | 381 | 6 | 0.69 | 0.47 | standing / feeding | standing / feeding | ok |
+| 1994 | 381 | 6 | 0.90 | 0.29 | lying / none | standing / none | posture |
+| 1995 | 381 | 6 | 0.91 | 0.44 | standing / feeding | standing / none | activity |
+| 1996 | 381 | 7 | 0.06 | 0.37 | lying / none | lying / none | ok |
+| 1997 | 381 | 7 | 0.10 | 0.36 | lying / ruminating | lying / none | activity |
+| 1998 | 381 | 7 | 0.19 | 0.52 | standing / feeding | standing / feeding | ok |
+| 1999 | 381 | 7 | 0.27 | 0.31 | lying / ruminating | lying / none | activity |
+| 2000 | 381 | 7 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 2001 | 381 | 7 | 0.44 | 0.23 | lying / ruminating | standing / none | posture + activity |
+| 2002 | 381 | 7 | 0.68 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2003 | 381 | 7 | 0.89 | 0.31 | lying / none | standing / none | posture |
+| 2004 | 381 | 7 | 0.91 | 0.46 | standing / feeding | standing / none | activity |
+| 2005 | 382 | 2 | 0.06 | 0.30 | standing / none | standing / none | ok |
+| 2006 | 382 | 2 | 0.10 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2007 | 382 | 2 | 0.17 | 0.33 | lying / none | lying / none | ok |
+| 2008 | 382 | 2 | 0.25 | 0.31 | lying / none | lying / none | ok |
+| 2009 | 382 | 2 | 0.38 | 0.31 | lying / ruminating | lying / none | activity |
+| 2010 | 382 | 2 | 0.53 | 0.16 | standing / none | standing / none | ok |
+| 2011 | 382 | 2 | 0.53 | 0.28 | lying / none | lying / none | ok |
+| 2012 | 382 | 2 | 0.58 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2013 | 382 | 2 | 0.67 | 0.17 | standing / drinking | standing / feeding | activity |
+| 2014 | 382 | 2 | 0.84 | 0.42 | standing / feeding | standing / feeding | ok |
+| 2015 | 382 | 2 | 0.94 | 0.33 | lying / none | lying / none | ok |
+| 2016 | 382 | 3 | 0.07 | 0.28 | standing / none | lying / none | posture |
+| 2017 | 382 | 3 | 0.11 | 0.51 | standing / feeding | standing / feeding | ok |
+| 2018 | 382 | 3 | 0.16 | 0.30 | lying / none | lying / none | ok |
+| 2019 | 382 | 3 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 2020 | 382 | 3 | 0.37 | 0.31 | lying / ruminating | lying / none | activity |
+| 2021 | 382 | 3 | 0.52 | 0.28 | lying / none | lying / none | ok |
+| 2022 | 382 | 3 | 0.54 | 0.16 | standing / none | standing / none | ok |
+| 2023 | 382 | 3 | 0.59 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2024 | 382 | 3 | 0.67 | 0.18 | standing / drinking | standing / none | activity |
+| 2025 | 382 | 3 | 0.84 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2026 | 382 | 3 | 0.93 | 0.33 | lying / none | lying / none | ok |
+| 2027 | 382 | 4 | 0.09 | 0.27 | standing / none | standing / none | ok |
+| 2028 | 382 | 4 | 0.10 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2029 | 382 | 4 | 0.17 | 0.33 | lying / none | lying / none | ok |
+| 2030 | 382 | 4 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 2031 | 382 | 4 | 0.37 | 0.29 | lying / ruminating | lying / none | activity |
+| 2032 | 382 | 4 | 0.53 | 0.16 | standing / none | standing / none | ok |
+| 2033 | 382 | 4 | 0.53 | 0.29 | lying / none | lying / none | ok |
+| 2034 | 382 | 4 | 0.58 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2035 | 382 | 4 | 0.68 | 0.19 | standing / drinking | standing / none | activity |
+| 2036 | 382 | 4 | 0.84 | 0.44 | standing / feeding | standing / feeding | ok |
+| 2037 | 382 | 4 | 0.94 | 0.32 | lying / none | lying / none | ok |
+| 2038 | 382 | 5 | 0.09 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2039 | 382 | 5 | 0.17 | 0.33 | lying / none | lying / none | ok |
+| 2040 | 382 | 5 | 0.27 | 0.31 | lying / ruminating | lying / none | activity |
+| 2041 | 382 | 5 | 0.34 | 0.24 | lying / none | lying / none | ok |
+| 2042 | 382 | 5 | 0.39 | 0.30 | lying / ruminating | lying / none | activity |
+| 2043 | 382 | 5 | 0.53 | 0.29 | lying / none | lying / none | ok |
+| 2044 | 382 | 5 | 0.53 | 0.16 | standing / none | standing / none | ok |
+| 2045 | 382 | 5 | 0.59 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2046 | 382 | 5 | 0.67 | 0.19 | standing / drinking | standing / none | activity |
+| 2047 | 382 | 5 | 0.84 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2048 | 382 | 5 | 0.94 | 0.32 | lying / none | lying / none | ok |
+| 2049 | 382 | 6 | 0.06 | 0.36 | lying / none | lying / none | ok |
+| 2050 | 382 | 6 | 0.10 | 0.51 | standing / feeding | standing / feeding | ok |
+| 2051 | 382 | 6 | 0.12 | 0.26 | standing / none | standing / none | ok |
+| 2052 | 382 | 6 | 0.16 | 0.33 | lying / none | lying / none | ok |
+| 2053 | 382 | 6 | 0.26 | 0.32 | lying / ruminating | lying / none | activity |
+| 2054 | 382 | 6 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 2055 | 382 | 6 | 0.52 | 0.28 | lying / none | lying / none | ok |
+| 2056 | 382 | 6 | 0.54 | 0.16 | standing / none | standing / none | ok |
+| 2057 | 382 | 6 | 0.59 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2058 | 382 | 6 | 0.68 | 0.19 | standing / drinking | standing / none | activity |
+| 2059 | 382 | 6 | 0.84 | 0.44 | standing / feeding | standing / feeding | ok |
+| 2060 | 382 | 6 | 0.95 | 0.32 | lying / none | lying / none | ok |
+| 2061 | 382 | 7 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 2062 | 382 | 7 | 0.09 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2063 | 382 | 7 | 0.13 | 0.25 | standing / none | lying / none | posture |
+| 2064 | 382 | 7 | 0.17 | 0.33 | lying / none | lying / none | ok |
+| 2065 | 382 | 7 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 2066 | 382 | 7 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 2067 | 382 | 7 | 0.52 | 0.29 | lying / none | lying / none | ok |
+| 2068 | 382 | 7 | 0.53 | 0.16 | standing / none | standing / none | ok |
+| 2069 | 382 | 7 | 0.58 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2070 | 382 | 7 | 0.67 | 0.18 | standing / drinking | standing / none | activity |
+| 2071 | 382 | 7 | 0.83 | 0.43 | standing / feeding | standing / none | activity |
+| 2072 | 382 | 7 | 0.95 | 0.34 | lying / none | lying / none | ok |
+| 2073 | 383 | 2 | 0.08 | 0.37 | lying / none | lying / none | ok |
+| 2074 | 383 | 2 | 0.13 | 0.30 | lying / ruminating | lying / none | activity |
+| 2075 | 383 | 2 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2076 | 383 | 2 | 0.24 | 0.31 | standing / none | standing / none | ok |
+| 2077 | 383 | 2 | 0.32 | 0.18 | standing / none | standing / none | ok |
+| 2078 | 383 | 2 | 0.36 | 0.30 | lying / none | lying / none | ok |
+| 2079 | 383 | 2 | 0.44 | 0.23 | lying / ruminating | standing / none | posture + activity |
+| 2080 | 383 | 2 | 0.54 | 0.17 | standing / none | standing / none | ok |
+| 2081 | 383 | 2 | 0.54 | 0.30 | lying / none | lying / none | ok |
+| 2082 | 383 | 2 | 0.83 | 0.42 | standing / feeding | standing / feeding | ok |
+| 2083 | 383 | 2 | 0.89 | 0.30 | lying / none | lying / none | ok |
+| 2084 | 383 | 3 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 2085 | 383 | 3 | 0.14 | 0.31 | lying / ruminating | lying / none | activity |
+| 2086 | 383 | 3 | 0.15 | 0.35 | lying / none | lying / none | ok |
+| 2087 | 383 | 3 | 0.24 | 0.30 | standing / none | standing / none | ok |
+| 2088 | 383 | 3 | 0.32 | 0.19 | standing / none | standing / none | ok |
+| 2089 | 383 | 3 | 0.37 | 0.30 | lying / none | lying / none | ok |
+| 2090 | 383 | 3 | 0.44 | 0.23 | lying / ruminating | lying / none | activity |
+| 2091 | 383 | 3 | 0.53 | 0.18 | standing / none | standing / none | ok |
+| 2092 | 383 | 3 | 0.54 | 0.29 | lying / none | lying / none | ok |
+| 2093 | 383 | 3 | 0.84 | 0.42 | standing / feeding | standing / feeding | ok |
+| 2094 | 383 | 3 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 2095 | 383 | 4 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 2096 | 383 | 4 | 0.14 | 0.29 | lying / ruminating | lying / none | activity |
+| 2097 | 383 | 4 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2098 | 383 | 4 | 0.24 | 0.32 | standing / none | standing / none | ok |
+| 2099 | 383 | 4 | 0.32 | 0.18 | standing / none | standing / none | ok |
+| 2100 | 383 | 4 | 0.36 | 0.31 | lying / none | lying / none | ok |
+| 2101 | 383 | 4 | 0.44 | 0.23 | lying / ruminating | standing / none | posture + activity |
+| 2102 | 383 | 4 | 0.53 | 0.17 | standing / none | standing / none | ok |
+| 2103 | 383 | 4 | 0.54 | 0.30 | lying / none | lying / none | ok |
+| 2104 | 383 | 4 | 0.84 | 0.42 | standing / feeding | standing / feeding | ok |
+| 2105 | 383 | 4 | 0.90 | 0.32 | lying / none | lying / none | ok |
+| 2106 | 383 | 5 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 2107 | 383 | 5 | 0.13 | 0.31 | lying / ruminating | lying / none | activity |
+| 2108 | 383 | 5 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2109 | 383 | 5 | 0.25 | 0.30 | standing / none | standing / none | ok |
+| 2110 | 383 | 5 | 0.32 | 0.20 | standing / none | standing / none | ok |
+| 2111 | 383 | 5 | 0.37 | 0.31 | lying / none | lying / none | ok |
+| 2112 | 383 | 5 | 0.43 | 0.22 | lying / ruminating | lying / none | activity |
+| 2113 | 383 | 5 | 0.53 | 0.17 | standing / none | standing / none | ok |
+| 2114 | 383 | 5 | 0.53 | 0.29 | lying / none | lying / none | ok |
+| 2115 | 383 | 5 | 0.84 | 0.42 | standing / feeding | standing / feeding | ok |
+| 2116 | 383 | 5 | 0.90 | 0.31 | lying / none | lying / none | ok |
+| 2117 | 383 | 6 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 2118 | 383 | 6 | 0.14 | 0.29 | lying / ruminating | lying / none | activity |
+| 2119 | 383 | 6 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2120 | 383 | 6 | 0.24 | 0.30 | standing / none | standing / none | ok |
+| 2121 | 383 | 6 | 0.33 | 0.18 | standing / none | standing / none | ok |
+| 2122 | 383 | 6 | 0.37 | 0.31 | lying / none | lying / none | ok |
+| 2123 | 383 | 6 | 0.44 | 0.22 | lying / ruminating | lying / none | activity |
+| 2124 | 383 | 6 | 0.54 | 0.17 | standing / none | standing / none | ok |
+| 2125 | 383 | 6 | 0.56 | 0.29 | lying / none | lying / none | ok |
+| 2126 | 383 | 6 | 0.83 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2127 | 383 | 6 | 0.89 | 0.29 | lying / none | lying / none | ok |
+| 2128 | 383 | 7 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 2129 | 383 | 7 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2130 | 383 | 7 | 0.23 | 0.31 | standing / none | standing / none | ok |
+| 2131 | 383 | 7 | 0.31 | 0.19 | standing / none | standing / none | ok |
+| 2132 | 383 | 7 | 0.37 | 0.31 | lying / ruminating | lying / none | activity |
+| 2133 | 383 | 7 | 0.43 | 0.23 | lying / ruminating | lying / none | activity |
+| 2134 | 383 | 7 | 0.53 | 0.17 | standing / none | standing / none | ok |
+| 2135 | 383 | 7 | 0.55 | 0.30 | lying / none | lying / none | ok |
+| 2136 | 383 | 7 | 0.84 | 0.42 | standing / feeding | standing / feeding | ok |
+| 2137 | 383 | 7 | 0.89 | 0.30 | lying / none | lying / none | ok |
+| 2138 | 384 | 2 | 0.06 | 0.36 | lying / none | lying / none | ok |
+| 2139 | 384 | 2 | 0.11 | 0.36 | lying / none | lying / none | ok |
+| 2140 | 384 | 2 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2141 | 384 | 2 | 0.24 | 0.34 | standing / none | standing / none | ok |
+| 2142 | 384 | 2 | 0.35 | 0.28 | standing / none | standing / none | ok |
+| 2143 | 384 | 2 | 0.86 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2144 | 384 | 2 | 0.90 | 0.28 | standing / none | standing / none | ok |
+| 2145 | 384 | 3 | 0.06 | 0.36 | lying / none | lying / none | ok |
+| 2146 | 384 | 3 | 0.10 | 0.36 | lying / none | lying / none | ok |
+| 2147 | 384 | 3 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 2148 | 384 | 3 | 0.24 | 0.36 | standing / none | standing / none | ok |
+| 2149 | 384 | 3 | 0.36 | 0.26 | standing / none | standing / none | ok |
+| 2150 | 384 | 3 | 0.85 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2151 | 384 | 3 | 0.91 | 0.30 | standing / none | standing / none | ok |
+| 2152 | 384 | 4 | 0.05 | 0.36 | lying / none | lying / none | ok |
+| 2153 | 384 | 4 | 0.10 | 0.36 | lying / none | lying / none | ok |
+| 2154 | 384 | 4 | 0.15 | 0.34 | lying / none | lying / none | ok |
+| 2155 | 384 | 4 | 0.25 | 0.35 | standing / none | standing / none | ok |
+| 2156 | 384 | 4 | 0.36 | 0.26 | standing / none | standing / none | ok |
+| 2157 | 384 | 4 | 0.86 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2158 | 384 | 4 | 0.90 | 0.30 | standing / none | standing / none | ok |
+| 2159 | 384 | 5 | 0.06 | 0.36 | lying / none | lying / none | ok |
+| 2160 | 384 | 5 | 0.09 | 0.35 | lying / none | lying / none | ok |
+| 2161 | 384 | 5 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 2162 | 384 | 5 | 0.26 | 0.33 | standing / none | standing / none | ok |
+| 2163 | 384 | 5 | 0.34 | 0.27 | standing / none | standing / none | ok |
+| 2164 | 384 | 5 | 0.85 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2165 | 384 | 5 | 0.91 | 0.30 | standing / none | standing / none | ok |
+| 2166 | 384 | 6 | 0.06 | 0.37 | lying / none | lying / none | ok |
+| 2167 | 384 | 6 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 2168 | 384 | 6 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 2169 | 384 | 6 | 0.25 | 0.34 | standing / none | standing / none | ok |
+| 2170 | 384 | 6 | 0.34 | 0.28 | standing / none | standing / none | ok |
+| 2171 | 384 | 6 | 0.86 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2172 | 384 | 6 | 0.91 | 0.30 | standing / none | standing / none | ok |
+| 2173 | 384 | 7 | 0.06 | 0.37 | lying / none | lying / none | ok |
+| 2174 | 384 | 7 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 2175 | 384 | 7 | 0.15 | 0.34 | lying / none | lying / none | ok |
+| 2176 | 384 | 7 | 0.25 | 0.34 | standing / none | standing / none | ok |
+| 2177 | 384 | 7 | 0.35 | 0.27 | standing / none | standing / none | ok |
+| 2178 | 384 | 7 | 0.85 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2179 | 384 | 7 | 0.90 | 0.30 | standing / none | standing / none | ok |
+| 2180 | 385 | 2 | 0.03 | 0.37 | standing / none | standing / none | ok |
+| 2181 | 385 | 2 | 0.09 | 0.36 | lying / none | lying / none | ok |
+| 2182 | 385 | 2 | 0.16 | 0.33 | lying / none | lying / none | ok |
+| 2183 | 385 | 2 | 0.25 | 0.31 | lying / ruminating | lying / none | activity |
+| 2184 | 385 | 2 | 0.31 | 0.25 | lying / ruminating | lying / none | activity |
+| 2185 | 385 | 2 | 0.37 | 0.28 | lying / ruminating | lying / none | activity |
+| 2186 | 385 | 2 | 0.86 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2187 | 385 | 2 | 0.90 | 0.31 | lying / ruminating | lying / none | activity |
+| 2188 | 385 | 3 | 0.04 | 0.38 | standing / none | standing / none | ok |
+| 2189 | 385 | 3 | 0.09 | 0.35 | lying / none | lying / none | ok |
+| 2190 | 385 | 3 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2191 | 385 | 3 | 0.26 | 0.30 | lying / ruminating | lying / none | activity |
+| 2192 | 385 | 3 | 0.31 | 0.24 | lying / ruminating | standing / none | posture + activity |
+| 2193 | 385 | 3 | 0.37 | 0.28 | lying / ruminating | lying / none | activity |
+| 2194 | 385 | 3 | 0.86 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2195 | 385 | 3 | 0.90 | 0.32 | lying / ruminating | lying / none | activity |
+| 2196 | 385 | 4 | 0.04 | 0.37 | standing / none | standing / none | ok |
+| 2197 | 385 | 4 | 0.09 | 0.37 | lying / none | lying / none | ok |
+| 2198 | 385 | 4 | 0.16 | 0.33 | lying / none | lying / none | ok |
+| 2199 | 385 | 4 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 2200 | 385 | 4 | 0.30 | 0.24 | lying / ruminating | standing / none | posture + activity |
+| 2201 | 385 | 4 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 2202 | 385 | 4 | 0.86 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2203 | 385 | 4 | 0.91 | 0.32 | lying / ruminating | lying / none | activity |
+| 2204 | 385 | 5 | 0.04 | 0.38 | standing / none | standing / none | ok |
+| 2205 | 385 | 5 | 0.10 | 0.35 | lying / none | lying / none | ok |
+| 2206 | 385 | 5 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2207 | 385 | 5 | 0.25 | 0.30 | lying / ruminating | lying / none | activity |
+| 2208 | 385 | 5 | 0.31 | 0.25 | lying / ruminating | lying / none | activity |
+| 2209 | 385 | 5 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 2210 | 385 | 5 | 0.85 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2211 | 385 | 5 | 0.91 | 0.31 | lying / ruminating | lying / none | activity |
+| 2212 | 385 | 6 | 0.04 | 0.37 | standing / none | standing / none | ok |
+| 2213 | 385 | 6 | 0.10 | 0.36 | lying / ruminating | lying / none | activity |
+| 2214 | 385 | 6 | 0.16 | 0.33 | lying / none | lying / none | ok |
+| 2215 | 385 | 6 | 0.25 | 0.30 | lying / ruminating | lying / none | activity |
+| 2216 | 385 | 6 | 0.30 | 0.25 | lying / ruminating | lying / none | activity |
+| 2217 | 385 | 6 | 0.38 | 0.29 | lying / ruminating | lying / none | activity |
+| 2218 | 385 | 6 | 0.86 | 0.44 | standing / feeding | standing / feeding | ok |
+| 2219 | 385 | 6 | 0.91 | 0.31 | lying / ruminating | lying / none | activity |
+| 2220 | 385 | 7 | 0.04 | 0.39 | standing / none | standing / none | ok |
+| 2221 | 385 | 7 | 0.10 | 0.37 | lying / none | lying / none | ok |
+| 2222 | 385 | 7 | 0.15 | 0.33 | lying / none | lying / none | ok |
+| 2223 | 385 | 7 | 0.25 | 0.31 | lying / ruminating | lying / none | activity |
+| 2224 | 385 | 7 | 0.30 | 0.24 | lying / ruminating | lying / none | activity |
+| 2225 | 385 | 7 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 2226 | 385 | 7 | 0.86 | 0.44 | standing / feeding | standing / feeding | ok |
+| 2227 | 385 | 7 | 0.91 | 0.31 | lying / ruminating | lying / none | activity |
+| 2228 | 386 | 2 | 0.07 | 0.38 | lying / none | lying / none | ok |
+| 2229 | 386 | 2 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2230 | 386 | 2 | 0.26 | 0.32 | lying / ruminating | lying / none | activity |
+| 2231 | 386 | 2 | 0.30 | 0.24 | lying / ruminating | lying / none | activity |
+| 2232 | 386 | 2 | 0.42 | 0.27 | lying / ruminating | lying / none | activity |
+| 2233 | 386 | 2 | 0.86 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2234 | 386 | 2 | 0.95 | 0.34 | lying / ruminating | lying / none | activity |
+| 2235 | 386 | 3 | 0.07 | 0.38 | lying / none | lying / none | ok |
+| 2236 | 386 | 3 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2237 | 386 | 3 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 2238 | 386 | 3 | 0.31 | 0.24 | lying / ruminating | lying / none | activity |
+| 2239 | 386 | 3 | 0.43 | 0.27 | lying / ruminating | lying / none | activity |
+| 2240 | 386 | 3 | 0.86 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2241 | 386 | 3 | 0.95 | 0.33 | lying / ruminating | lying / none | activity |
+| 2242 | 386 | 4 | 0.07 | 0.38 | lying / none | lying / none | ok |
+| 2243 | 386 | 4 | 0.16 | 0.34 | lying / none | lying / none | ok |
+| 2244 | 386 | 4 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 2245 | 386 | 4 | 0.30 | 0.24 | lying / ruminating | lying / none | activity |
+| 2246 | 386 | 4 | 0.43 | 0.27 | lying / ruminating | lying / none | activity |
+| 2247 | 386 | 4 | 0.86 | 0.42 | standing / feeding | standing / feeding | ok |
+| 2248 | 386 | 4 | 0.95 | 0.32 | lying / ruminating | lying / none | activity |
+| 2249 | 386 | 5 | 0.07 | 0.38 | lying / none | lying / none | ok |
+| 2250 | 386 | 5 | 0.16 | 0.35 | lying / none | lying / none | ok |
+| 2251 | 386 | 5 | 0.26 | 0.32 | lying / ruminating | lying / none | activity |
+| 2252 | 386 | 5 | 0.31 | 0.23 | lying / ruminating | lying / none | activity |
+| 2253 | 386 | 5 | 0.42 | 0.28 | lying / ruminating | lying / none | activity |
+| 2254 | 386 | 5 | 0.87 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2255 | 386 | 5 | 0.95 | 0.33 | lying / none | lying / none | ok |
+| 2256 | 386 | 6 | 0.08 | 0.39 | lying / none | lying / none | ok |
+| 2257 | 386 | 6 | 0.17 | 0.35 | lying / none | lying / none | ok |
+| 2258 | 386 | 6 | 0.26 | 0.32 | lying / ruminating | lying / none | activity |
+| 2259 | 386 | 6 | 0.30 | 0.25 | lying / ruminating | lying / none | activity |
+| 2260 | 386 | 6 | 0.43 | 0.27 | lying / ruminating | lying / none | activity |
+| 2261 | 386 | 6 | 0.87 | 0.44 | standing / feeding | standing / none | activity |
+| 2262 | 386 | 6 | 0.95 | 0.33 | lying / ruminating | lying / none | activity |
+| 2263 | 386 | 7 | 0.07 | 0.37 | lying / none | lying / none | ok |
+| 2264 | 386 | 7 | 0.16 | 0.34 | lying / ruminating | lying / none | activity |
+| 2265 | 386 | 7 | 0.26 | 0.31 | lying / ruminating | lying / none | activity |
+| 2266 | 386 | 7 | 0.31 | 0.24 | lying / ruminating | lying / none | activity |
+| 2267 | 386 | 7 | 0.43 | 0.28 | lying / ruminating | lying / none | activity |
+| 2268 | 386 | 7 | 0.87 | 0.44 | standing / feeding | standing / feeding | ok |
+| 2269 | 386 | 7 | 0.94 | 0.32 | lying / ruminating | lying / none | activity |
+| 2270 | 387 | 2 | 0.10 | 0.35 | lying / ruminating | lying / none | activity |
+| 2271 | 387 | 2 | 0.23 | 0.31 | standing / none | standing / none | ok |
+| 2272 | 387 | 2 | 0.31 | 0.25 | lying / ruminating | lying / none | activity |
+| 2273 | 387 | 2 | 0.42 | 0.30 | lying / none | lying / none | ok |
+| 2274 | 387 | 2 | 0.74 | 0.17 | standing / drinking | standing / drinking | ok |
+| 2275 | 387 | 2 | 0.87 | 0.32 | lying / none | lying / none | ok |
+| 2276 | 387 | 2 | 0.95 | 0.34 | lying / none | lying / none | ok |
+| 2277 | 387 | 3 | 0.10 | 0.35 | lying / ruminating | lying / none | activity |
+| 2278 | 387 | 3 | 0.24 | 0.31 | standing / none | standing / none | ok |
+| 2279 | 387 | 3 | 0.31 | 0.24 | lying / ruminating | lying / none | activity |
+| 2280 | 387 | 3 | 0.42 | 0.29 | lying / none | lying / none | ok |
+| 2281 | 387 | 3 | 0.75 | 0.19 | standing / drinking | standing / drinking | ok |
+| 2282 | 387 | 3 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 2283 | 387 | 3 | 0.96 | 0.33 | lying / none | lying / none | ok |
+| 2284 | 387 | 4 | 0.11 | 0.36 | lying / ruminating | lying / none | activity |
+| 2285 | 387 | 4 | 0.24 | 0.32 | standing / none | standing / none | ok |
+| 2286 | 387 | 4 | 0.31 | 0.26 | lying / none | lying / none | ok |
+| 2287 | 387 | 4 | 0.42 | 0.29 | lying / none | lying / none | ok |
+| 2288 | 387 | 4 | 0.75 | 0.18 | standing / drinking | standing / drinking | ok |
+| 2289 | 387 | 4 | 0.88 | 0.32 | lying / none | lying / none | ok |
+| 2290 | 387 | 4 | 0.95 | 0.34 | lying / none | lying / none | ok |
+| 2291 | 387 | 5 | 0.11 | 0.35 | lying / ruminating | lying / none | activity |
+| 2292 | 387 | 5 | 0.24 | 0.29 | standing / none | standing / none | ok |
+| 2293 | 387 | 5 | 0.31 | 0.24 | lying / ruminating | lying / none | activity |
+| 2294 | 387 | 5 | 0.42 | 0.29 | lying / none | lying / none | ok |
+| 2295 | 387 | 5 | 0.75 | 0.18 | standing / drinking | standing / drinking | ok |
+| 2296 | 387 | 5 | 0.88 | 0.31 | lying / none | lying / none | ok |
+| 2297 | 387 | 5 | 0.95 | 0.34 | lying / none | lying / none | ok |
+| 2298 | 387 | 6 | 0.11 | 0.35 | lying / ruminating | lying / none | activity |
+| 2299 | 387 | 6 | 0.24 | 0.30 | standing / none | standing / none | ok |
+| 2300 | 387 | 6 | 0.31 | 0.24 | lying / ruminating | lying / none | activity |
+| 2301 | 387 | 6 | 0.42 | 0.29 | lying / none | lying / none | ok |
+| 2302 | 387 | 6 | 0.75 | 0.18 | standing / drinking | standing / drinking | ok |
+| 2303 | 387 | 6 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 2304 | 387 | 6 | 0.95 | 0.34 | lying / none | lying / none | ok |
+| 2305 | 387 | 7 | 0.11 | 0.36 | lying / ruminating | lying / none | activity |
+| 2306 | 387 | 7 | 0.24 | 0.29 | standing / none | standing / none | ok |
+| 2307 | 387 | 7 | 0.31 | 0.25 | lying / ruminating | lying / none | activity |
+| 2308 | 387 | 7 | 0.42 | 0.29 | lying / none | lying / none | ok |
+| 2309 | 387 | 7 | 0.75 | 0.19 | standing / drinking | standing / feeding | activity |
+| 2310 | 387 | 7 | 0.89 | 0.33 | lying / none | lying / none | ok |
+| 2311 | 387 | 7 | 0.96 | 0.33 | lying / none | lying / none | ok |
+| 2312 | 388 | 2 | 0.05 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2313 | 388 | 2 | 0.14 | 0.46 | standing / ruminating | standing / feeding | activity |
+| 2314 | 388 | 2 | 0.29 | 0.45 | standing / ruminating | standing / feeding | activity |
+| 2315 | 388 | 2 | 0.49 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2316 | 388 | 2 | 0.79 | 0.44 | standing / feeding | standing / feeding | ok |
+| 2317 | 388 | 2 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 2318 | 388 | 3 | 0.05 | 0.51 | standing / feeding | standing / feeding | ok |
+| 2319 | 388 | 3 | 0.14 | 0.46 | standing / ruminating | standing / feeding | activity |
+| 2320 | 388 | 3 | 0.29 | 0.45 | standing / ruminating | standing / feeding | activity |
+| 2321 | 388 | 3 | 0.51 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2322 | 388 | 3 | 0.80 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2323 | 388 | 3 | 0.89 | 0.31 | lying / none | lying / none | ok |
+| 2324 | 388 | 4 | 0.06 | 0.52 | standing / feeding | standing / feeding | ok |
+| 2325 | 388 | 4 | 0.15 | 0.48 | standing / ruminating | standing / feeding | activity |
+| 2326 | 388 | 4 | 0.28 | 0.45 | standing / ruminating | standing / feeding | activity |
+| 2327 | 388 | 4 | 0.49 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2328 | 388 | 4 | 0.80 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2329 | 388 | 4 | 0.90 | 0.30 | lying / none | lying / none | ok |
+| 2330 | 388 | 5 | 0.04 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2331 | 388 | 5 | 0.14 | 0.46 | standing / ruminating | standing / feeding | activity |
+| 2332 | 388 | 5 | 0.27 | 0.44 | standing / ruminating | standing / feeding | activity |
+| 2333 | 388 | 5 | 0.49 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2334 | 388 | 5 | 0.80 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2335 | 388 | 5 | 0.90 | 0.30 | lying / none | lying / none | ok |
+| 2336 | 388 | 6 | 0.04 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2337 | 388 | 6 | 0.14 | 0.47 | standing / ruminating | standing / feeding | activity |
+| 2338 | 388 | 6 | 0.27 | 0.46 | standing / ruminating | standing / feeding | activity |
+| 2339 | 388 | 6 | 0.49 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2340 | 388 | 6 | 0.81 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2341 | 388 | 6 | 0.91 | 0.32 | lying / none | lying / none | ok |
+| 2342 | 388 | 7 | 0.05 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2343 | 388 | 7 | 0.15 | 0.45 | standing / ruminating | standing / feeding | activity |
+| 2344 | 388 | 7 | 0.29 | 0.47 | standing / ruminating | standing / feeding | activity |
+| 2345 | 388 | 7 | 0.50 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2346 | 388 | 7 | 0.80 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2347 | 388 | 7 | 0.90 | 0.31 | lying / none | lying / none | ok |
+| 2348 | 389 | 2 | 0.12 | 0.45 | standing / none | standing / none | ok |
+| 2349 | 389 | 2 | 0.30 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2350 | 389 | 2 | 0.79 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2351 | 389 | 2 | 0.88 | 0.42 | standing / feeding | standing / none | activity |
+| 2352 | 389 | 2 | 0.95 | 0.41 | standing / none | standing / none | ok |
+| 2353 | 389 | 3 | 0.12 | 0.44 | standing / none | standing / none | ok |
+| 2354 | 389 | 3 | 0.30 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2355 | 389 | 3 | 0.79 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2356 | 389 | 3 | 0.88 | 0.44 | standing / feeding | standing / none | activity |
+| 2357 | 389 | 3 | 0.96 | 0.40 | standing / none | standing / feeding | activity |
+| 2358 | 389 | 4 | 0.11 | 0.45 | standing / none | standing / none | ok |
+| 2359 | 389 | 4 | 0.29 | 0.51 | standing / feeding | standing / feeding | ok |
+| 2360 | 389 | 4 | 0.78 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2361 | 389 | 4 | 0.88 | 0.44 | standing / feeding | standing / none | activity |
+| 2362 | 389 | 4 | 0.95 | 0.39 | standing / none | standing / none | ok |
+| 2363 | 389 | 5 | 0.12 | 0.47 | standing / none | standing / none | ok |
+| 2364 | 389 | 5 | 0.31 | 0.52 | standing / feeding | standing / feeding | ok |
+| 2365 | 389 | 5 | 0.79 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2366 | 389 | 5 | 0.89 | 0.43 | standing / feeding | standing / none | activity |
+| 2367 | 389 | 5 | 0.96 | 0.40 | standing / none | standing / feeding | activity |
+| 2368 | 389 | 6 | 0.13 | 0.44 | standing / none | standing / none | ok |
+| 2369 | 389 | 6 | 0.31 | 0.52 | standing / feeding | standing / feeding | ok |
+| 2370 | 389 | 6 | 0.80 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2371 | 389 | 6 | 0.89 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2372 | 389 | 6 | 0.95 | 0.40 | standing / none | standing / feeding | activity |
+| 2373 | 389 | 7 | 0.10 | 0.48 | standing / none | standing / feeding | activity |
+| 2374 | 389 | 7 | 0.31 | 0.51 | standing / feeding | standing / feeding | ok |
+| 2375 | 389 | 7 | 0.79 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2376 | 389 | 7 | 0.88 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2377 | 389 | 7 | 0.95 | 0.40 | standing / none | standing / none | ok |
+| 2378 | 390 | 2 | 0.39 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2379 | 390 | 2 | 0.58 | 0.51 | standing / feeding | standing / feeding | ok |
+| 2380 | 390 | 3 | 0.40 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2381 | 390 | 3 | 0.57 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2382 | 390 | 4 | 0.40 | 0.41 | standing / feeding | standing / feeding | ok |
+| 2383 | 390 | 4 | 0.57 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2384 | 390 | 5 | 0.40 | 0.42 | standing / feeding | standing / feeding | ok |
+| 2385 | 390 | 5 | 0.57 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2386 | 390 | 6 | 0.40 | 0.40 | standing / feeding | standing / none | activity |
+| 2387 | 390 | 6 | 0.57 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2388 | 390 | 7 | 0.41 | 0.39 | standing / none | standing / feeding | activity |
+| 2389 | 390 | 7 | 0.57 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2390 | 391 | 2 | 0.32 | 0.17 | standing / none | standing / none | ok |
+| 2391 | 391 | 2 | 0.37 | 0.18 | standing / none | standing / none | ok |
+| 2392 | 391 | 2 | 0.45 | 0.18 | standing / none | standing / none | ok |
+| 2393 | 391 | 2 | 0.46 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2394 | 391 | 2 | 0.61 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2395 | 391 | 2 | 0.73 | 0.28 | standing / none | standing / none | ok |
+| 2396 | 391 | 2 | 0.83 | 0.24 | standing / none | standing / none | ok |
+| 2397 | 391 | 2 | 0.83 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2398 | 391 | 2 | 0.95 | 0.40 | standing / none | standing / none | ok |
+| 2399 | 391 | 3 | 0.32 | 0.18 | standing / none | standing / none | ok |
+| 2400 | 391 | 3 | 0.37 | 0.19 | standing / none | standing / none | ok |
+| 2401 | 391 | 3 | 0.47 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2402 | 391 | 3 | 0.62 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2403 | 391 | 3 | 0.72 | 0.27 | standing / drinking | standing / none | activity |
+| 2404 | 391 | 3 | 0.83 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2405 | 391 | 3 | 0.83 | 0.25 | standing / none | standing / none | ok |
+| 2406 | 391 | 3 | 0.93 | 0.39 | standing / none | standing / none | ok |
+| 2407 | 391 | 4 | 0.32 | 0.17 | standing / none | standing / none | ok |
+| 2408 | 391 | 4 | 0.37 | 0.18 | standing / none | standing / none | ok |
+| 2409 | 391 | 4 | 0.45 | 0.16 | standing / none | standing / none | ok |
+| 2410 | 391 | 4 | 0.47 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2411 | 391 | 4 | 0.62 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2412 | 391 | 4 | 0.72 | 0.26 | standing / drinking | standing / none | activity |
+| 2413 | 391 | 4 | 0.72 | 0.18 | standing / none | standing / none | ok |
+| 2414 | 391 | 4 | 0.83 | 0.24 | standing / none | standing / none | ok |
+| 2415 | 391 | 4 | 0.84 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2416 | 391 | 4 | 0.94 | 0.39 | standing / none | standing / none | ok |
+| 2417 | 391 | 5 | 0.32 | 0.18 | standing / none | standing / none | ok |
+| 2418 | 391 | 5 | 0.37 | 0.18 | standing / none | standing / none | ok |
+| 2419 | 391 | 5 | 0.45 | 0.17 | standing / none | standing / none | ok |
+| 2420 | 391 | 5 | 0.47 | 0.45 | standing / feeding | standing / feeding | ok |
+| 2421 | 391 | 5 | 0.64 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2422 | 391 | 5 | 0.72 | 0.27 | standing / drinking | standing / none | activity |
+| 2423 | 391 | 5 | 0.83 | 0.24 | standing / none | standing / feeding | activity |
+| 2424 | 391 | 5 | 0.84 | 0.44 | standing / feeding | standing / feeding | ok |
+| 2425 | 391 | 5 | 0.94 | 0.42 | standing / none | standing / feeding | activity |
+| 2426 | 391 | 6 | 0.32 | 0.19 | standing / none | standing / none | ok |
+| 2427 | 391 | 6 | 0.37 | 0.18 | standing / none | standing / none | ok |
+| 2428 | 391 | 6 | 0.44 | 0.17 | standing / none | standing / none | ok |
+| 2429 | 391 | 6 | 0.48 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2430 | 391 | 6 | 0.61 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2431 | 391 | 6 | 0.72 | 0.28 | standing / drinking | standing / none | activity |
+| 2432 | 391 | 6 | 0.84 | 0.44 | standing / feeding | standing / feeding | ok |
+| 2433 | 391 | 6 | 0.84 | 0.26 | standing / none | standing / feeding | activity |
+| 2434 | 391 | 6 | 0.95 | 0.43 | standing / none | standing / none | ok |
+| 2435 | 391 | 7 | 0.31 | 0.19 | standing / none | standing / feeding | activity |
+| 2436 | 391 | 7 | 0.37 | 0.17 | standing / none | lying / none | posture |
+| 2437 | 391 | 7 | 0.44 | 0.16 | standing / none | standing / none | ok |
+| 2438 | 391 | 7 | 0.48 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2439 | 391 | 7 | 0.62 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2440 | 391 | 7 | 0.73 | 0.26 | standing / drinking | standing / feeding | activity |
+| 2441 | 391 | 7 | 0.83 | 0.23 | standing / none | standing / none | ok |
+| 2442 | 391 | 7 | 0.84 | 0.43 | standing / feeding | standing / feeding | ok |
+| 2443 | 391 | 7 | 0.94 | 0.39 | standing / none | standing / feeding | activity |
+| 2444 | 392 | 2 | 0.05 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2445 | 392 | 2 | 0.11 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2446 | 392 | 2 | 0.20 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2447 | 392 | 2 | 0.32 | 0.49 | standing / feeding | standing / none | activity |
+| 2448 | 392 | 2 | 0.38 | 0.28 | lying / none | lying / none | ok |
+| 2449 | 392 | 2 | 0.38 | 0.18 | standing / none | standing / none | ok |
+| 2450 | 392 | 2 | 0.49 | 0.17 | standing / none | standing / none | ok |
+| 2451 | 392 | 2 | 0.52 | 0.46 | standing / none | standing / feeding | activity |
+| 2452 | 392 | 2 | 0.56 | 0.36 | standing / none | standing / feeding | activity |
+| 2453 | 392 | 2 | 0.56 | 0.21 | lying / none | standing / drinking | posture + activity |
+| 2454 | 392 | 2 | 0.70 | 0.23 | standing / none | standing / none | ok |
+| 2455 | 392 | 2 | 0.80 | 0.48 | standing / none | standing / feeding | activity |
+| 2456 | 392 | 2 | 0.88 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2457 | 392 | 3 | 0.05 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2458 | 392 | 3 | 0.20 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2459 | 392 | 3 | 0.26 | 0.29 | standing / none | lying / none | posture |
+| 2460 | 392 | 3 | 0.35 | 0.52 | standing / feeding | standing / feeding | ok |
+| 2461 | 392 | 3 | 0.37 | 0.27 | lying / none | standing / none | posture |
+| 2462 | 392 | 3 | 0.39 | 0.18 | standing / none | standing / none | ok |
+| 2463 | 392 | 3 | 0.48 | 0.17 | standing / none | standing / none | ok |
+| 2464 | 392 | 3 | 0.53 | 0.43 | standing / none | standing / feeding | activity |
+| 2465 | 392 | 3 | 0.57 | 0.36 | standing / none | standing / feeding | activity |
+| 2466 | 392 | 3 | 0.71 | 0.23 | standing / none | standing / none | ok |
+| 2467 | 392 | 3 | 0.79 | 0.47 | standing / none | standing / feeding | activity |
+| 2468 | 392 | 3 | 0.86 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2469 | 392 | 4 | 0.05 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2470 | 392 | 4 | 0.18 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2471 | 392 | 4 | 0.28 | 0.30 | standing / none | lying / none | posture |
+| 2472 | 392 | 4 | 0.33 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2473 | 392 | 4 | 0.52 | 0.45 | standing / none | standing / feeding | activity |
+| 2474 | 392 | 4 | 0.59 | 0.39 | standing / none | standing / feeding | activity |
+| 2475 | 392 | 4 | 0.70 | 0.22 | standing / none | standing / none | ok |
+| 2476 | 392 | 4 | 0.79 | 0.46 | standing / none | standing / feeding | activity |
+| 2477 | 392 | 4 | 0.86 | 0.47 | standing / feeding | standing / feeding | ok |
+| 2478 | 392 | 5 | 0.05 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2479 | 392 | 5 | 0.18 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2480 | 392 | 5 | 0.32 | 0.28 | standing / none | standing / none | ok |
+| 2481 | 392 | 5 | 0.33 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2482 | 392 | 5 | 0.53 | 0.47 | standing / none | standing / feeding | activity |
+| 2483 | 392 | 5 | 0.58 | 0.37 | standing / none | lying / feeding | posture + activity |
+| 2484 | 392 | 5 | 0.71 | 0.23 | standing / none | standing / none | ok |
+| 2485 | 392 | 5 | 0.79 | 0.43 | standing / none | standing / feeding | activity |
+| 2486 | 392 | 5 | 0.88 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2487 | 392 | 6 | 0.04 | 0.49 | standing / feeding | standing / feeding | ok |
+| 2488 | 392 | 6 | 0.17 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2489 | 392 | 6 | 0.33 | 0.51 | standing / feeding | standing / feeding | ok |
+| 2490 | 392 | 6 | 0.35 | 0.28 | standing / none | standing / none | ok |
+| 2491 | 392 | 6 | 0.52 | 0.45 | standing / none | standing / feeding | activity |
+| 2492 | 392 | 6 | 0.58 | 0.37 | standing / none | lying / none | posture |
+| 2493 | 392 | 6 | 0.70 | 0.21 | standing / none | standing / none | ok |
+| 2494 | 392 | 6 | 0.78 | 0.44 | standing / none | standing / feeding | activity |
+| 2495 | 392 | 6 | 0.83 | 0.25 | standing / none | standing / none | ok |
+| 2496 | 392 | 6 | 0.88 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2497 | 392 | 7 | 0.05 | 0.50 | standing / feeding | standing / feeding | ok |
+| 2498 | 392 | 7 | 0.17 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2499 | 392 | 7 | 0.32 | 0.51 | standing / feeding | standing / feeding | ok |
+| 2500 | 392 | 7 | 0.40 | 0.27 | standing / none | standing / none | ok |
+| 2501 | 392 | 7 | 0.53 | 0.46 | standing / feeding | standing / feeding | ok |
+| 2502 | 392 | 7 | 0.59 | 0.32 | standing / none | standing / none | ok |
+| 2503 | 392 | 7 | 0.71 | 0.21 | standing / none | standing / none | ok |
+| 2504 | 392 | 7 | 0.78 | 0.42 | standing / none | standing / feeding | activity |
+| 2505 | 392 | 7 | 0.83 | 0.25 | standing / none | standing / none | ok |
+| 2506 | 392 | 7 | 0.86 | 0.48 | standing / none | standing / feeding | activity |
+| 2507 | 393 | 2 | 0.08 | 0.36 | lying / none | lying / none | ok |
+| 2508 | 393 | 2 | 0.16 | 0.32 | standing / none | standing / none | ok |
+| 2509 | 393 | 2 | 0.26 | 0.27 | lying / none | standing / none | posture |
+| 2510 | 393 | 2 | 0.34 | 0.26 | lying / none | standing / feeding | posture + activity |
+| 2511 | 393 | 2 | 0.37 | 0.30 | lying / ruminating | lying / none | activity |
+| 2512 | 393 | 2 | 0.54 | 0.23 | lying / ruminating | lying / none | activity |
+| 2513 | 393 | 2 | 0.88 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2514 | 393 | 2 | 0.90 | 0.28 | standing / none | standing / none | ok |
+| 2515 | 393 | 3 | 0.07 | 0.36 | lying / none | standing / none | posture |
+| 2516 | 393 | 3 | 0.15 | 0.33 | standing / none | standing / none | ok |
+| 2517 | 393 | 3 | 0.25 | 0.27 | lying / ruminating | standing / none | posture + activity |
+| 2518 | 393 | 3 | 0.34 | 0.25 | lying / none | standing / none | posture |
+| 2519 | 393 | 3 | 0.38 | 0.30 | lying / ruminating | lying / none | activity |
+| 2520 | 393 | 3 | 0.54 | 0.21 | lying / ruminating | lying / none | activity |
+| 2521 | 393 | 3 | 0.88 | 0.48 | standing / feeding | standing / feeding | ok |
+| 2522 | 393 | 3 | 0.90 | 0.29 | standing / none | standing / none | ok |
+| 2523 | 393 | 4 | 0.07 | 0.36 | lying / none | lying / none | ok |
+| 2524 | 393 | 4 | 0.15 | 0.33 | standing / none | standing / feeding | activity |
+| 2525 | 393 | 4 | 0.26 | 0.26 | lying / ruminating | lying / none | activity |
+| 2526 | 393 | 4 | 0.34 | 0.25 | lying / ruminating | standing / none | posture + activity |
+| 2527 | 393 | 4 | 0.37 | 0.30 | lying / ruminating | lying / none | activity |
+| 2528 | 393 | 4 | 0.55 | 0.23 | lying / ruminating | lying / none | activity |
+| 2529 | 394 | 2 | 0.33 | 0.25 | lying / ruminating | standing / feeding | posture + activity |
+| 2530 | 394 | 3 | 0.33 | 0.25 | lying / ruminating | standing / none | posture + activity |
+| 2531 | 394 | 4 | 0.33 | 0.25 | lying / ruminating | standing / none | posture + activity |
+| 2532 | 394 | 6 | 0.08 | 0.37 | lying / none | lying / none | ok |
+
+## Excluded from scoring
+
+Boxes whose annotation has no single correct answer (contradictory or missing posture label). They are dropped before the model is queried, so they affect neither the count nor the error rate.
+
+- `382_00005_ece9b588` — 2 posture labels, 0 activity labels: stand, lying down
+
