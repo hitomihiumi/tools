@@ -23,6 +23,7 @@ image mode `marked`, 2026-09-25.
 | `2026-09-25_val300_w1920` | the same 300 cows | 1920 | 1 | 24.3% | 6.7% | 21.0% |
 | `2026-09-25_val300_both` | the same 300 cows, marked+crop | 1920 | 1 | 24.7% | 5.3% | 20.7% |
 | `2026-09-25_val300_jaw8` | the same 300 cows, crops only | 1920 | 8 / 1.5s | 32.0% | 5.7% | 29.7% |
+| `2026-09-25_val300_jaw20` | the same 300 cows, crops only | 1920 | 20 / 1.52s = 12.5 fps | 33.7% | 5.0% | 31.7% |
 | `2026-09-25_val-full_w1920_f1` | **all of val, 2532 cows** | 1920 | 1 | **29.3%** / **26.8%** voted | 7.4% / 6.6% | 25.4% / 23.1% |
 
 ## What the runs established
@@ -57,6 +58,28 @@ largest. That is a model that was short of pixels.
 tokens (1448 -> 2943 per request). p=0.071 is suggestive rather than settled;
 re-running all of val at 1920 would resolve it, but no decision depends on the
 exact magnitude.
+
+## Rumination is not visible to this model zero-shot
+
+Tested at three frame rates on the same 42 ruminating cows, crops enlarged to
+768px so the head is large:
+
+| Setup | Said `ruminating` | Correct |
+|---|---|---|
+| 1 frame, 1920 marked | 0 | 0/42 |
+| 8 crops, 4.67 fps | 2 | 1/42 |
+| 20 crops, 12.5 fps | 5 | 2/42 |
+
+12.5 fps is five times the Nyquist rate for a ~1 Hz chew. Paired against
+4.67 fps, where only the frame rate differs: 11 fixed, 16 broken, p = 0.442.
+The model is not ignoring the class - its reasoning on every ruminating cow
+considers it and looks for jaw movement across the frames ("Can we see jaw
+movement? ... the cow's head is relatively still ... hard to tell"), then
+settles on `none`. It looks and does not see.
+
+Note: the `reasoning` field on vLLM 0.30 with the `muse_glimmer` parser starts
+with an echo of the prompt, which itself contains "jaw" and "chewing cud";
+strip everything up to "Answer with JSON only." before searching it.
 
 ## Comparing
 

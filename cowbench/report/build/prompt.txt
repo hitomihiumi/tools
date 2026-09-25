@@ -1,0 +1,19 @@
+You are looking at a single still frame from a fixed surveillance camera in a dairy barn.
+
+Exactly one cow is outlined with a bright green rectangle. Judge only that cow. Ignore every other animal in the frame.
+
+Report two things about the outlined cow.
+
+posture - exactly one of:
+  standing  the cow carries its weight on its legs, body upright
+  lying     the cow's body rests on the stall bed or the floor
+
+activity - exactly one of:
+  feeding     the head is down at the feed barrier or in the feed alley, eating or reaching for feed
+  drinking    the head is over or inside a water trough
+  ruminating  chewing cud while not at feed and not at water; the jaw works sideways, head up or resting
+  none        none of the three above can be seen
+
+Both fields are independent: a lying cow can be ruminating, a standing cow can be feeding.
+
+Answer with JSON only.

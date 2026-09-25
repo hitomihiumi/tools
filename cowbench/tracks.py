@@ -45,8 +45,16 @@ def build(results, threshold: float = 0.5, min_length: int = 3):
     for r in results:
         by_clip[r.get("video_id")][r.get("timestamp")].append(r)
 
+    # results.jsonl is written in completion order, which concurrent requests
+    # shuffle from run to run. Greedy linking is order-sensitive, so without a
+    # fixed order two runs over the same boxes could build different tracks
+    # (it did: 412 against 411) and the vote would depend on scheduling.
+    for by_ts in by_clip.values():
+        for stamp in by_ts:
+            by_ts[stamp].sort(key=lambda r: (r["bbox"], r["id"]))
+
     tracks = []
-    for _clip, by_ts in by_clip.items():
+    for _clip, by_ts in sorted(by_clip.items(), key=lambda kv: str(kv[0])):
         stamps = sorted(by_ts)
         if not stamps:
             continue

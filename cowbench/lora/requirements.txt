@@ -1,0 +1,12 @@
+# Python dependencies of train_lora.py, installed by run_lora.sh into its venv.
+# torch/torchvision are not listed: run_lora.sh installs them itself, from the
+# CUDA build that matches this machine's driver and CUDA toolkit.
+transformers>=5.15
+peft>=0.17
+accelerate>=1.0
+safetensors
+huggingface_hub
+pillow
+requests
+jinja2
+sentencepiece

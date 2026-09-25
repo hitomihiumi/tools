@@ -87,9 +87,18 @@ def render(meta: dict, metrics: dict, results=None) -> str:
     add(f"| Keyframes | {metrics.get('n_keyframes', '?')} |")
     add(f"| Examples (annotated boxes) | **{metrics['n_examples']}** |")
     add(f"| **Exact-match error rate** | **{_pct(metrics['exact_match']['error_rate'])}** |")
-    add(f"| Serving | vLLM {meta.get('vllm_version') or '?'} |")
-    add(f"| Sampling | temperature={meta.get('temperature')}, seed={meta.get('seed')}, "
-        f"max_tokens={meta.get('max_tokens')}, structured output (json_schema) |")
+    if meta.get("engine"):
+        # Runs made off the server, e.g. the LoRA eval in lora/train_lora.py:
+        # no vLLM, no structured output, and reasoning may be switched off.
+        add(f"| Serving | {meta['engine']} |")
+        add(f"| Sampling | temperature={meta.get('temperature')}, seed={meta.get('seed')}, "
+            f"reasoning {meta.get('reasoning', '?')} |")
+        if meta.get("adapter"):
+            add(f"| Adapter | `{meta['adapter']}` |")
+    else:
+        add(f"| Serving | vLLM {meta.get('vllm_version') or '?'} |")
+        add(f"| Sampling | temperature={meta.get('temperature')}, seed={meta.get('seed')}, "
+            f"max_tokens={meta.get('max_tokens')}, structured output (json_schema) |")
     frames = meta.get("frames") or 1
     temporal = ("annotated keyframe only (single still)" if frames <= 1
                 else f"{frames} frames over {meta.get('span')}s from the clip")
