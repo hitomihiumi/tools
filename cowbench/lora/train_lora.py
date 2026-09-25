@@ -453,7 +453,9 @@ def cmd_train(args):
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
         lr_scheduler_type="cosine",
-        warmup_ratio=0.03,
+        # A float below 1 is a fraction of all steps. transformers 5 dropped
+        # the separate warmup_ratio argument.
+        warmup_steps=0.03,
         weight_decay=0.0,
         max_grad_norm=1.0,
         bf16=True,
