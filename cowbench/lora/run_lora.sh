@@ -123,6 +123,7 @@ ensure_system() {
 # ------------------------------------------------------------ watching
 case "${1:-}" in
     attach)
+        if [ -n "${TMUX:-}" ]; then exec tmux switch-client -t "$SESSION"; fi
         exec tmux attach -t "$SESSION" ;;
     log)
         # -F, not -f: keeps following across a restart that re-creates the file.
@@ -145,8 +146,13 @@ case "${1:-}" in
         nvidia-smi --query-gpu=utilization.gpu,memory.used,memory.total,temperature.gpu,power.draw --format=csv
         exit 0 ;;
     stop)
+        # The run ignores SIGHUP (so a lost terminal cannot end it), which
+        # means kill-session alone would leave it running: TERM its process
+        # group - the pane's, shared by the script, python and tee.
+        pane_pid="$(tmux list-panes -t "$SESSION" -F '#{pane_pid}' 2>/dev/null | head -1 || true)"
         tmux send-keys -t "$SESSION" C-c 2>/dev/null || true
         sleep 5
+        [ -n "$pane_pid" ] && kill -TERM -- "-$pane_pid" 2>/dev/null || true
         tmux kill-session -t "$SESSION" 2>/dev/null && echo "stopped" || echo "no session '$SESSION'"
         exit 0 ;;
     "") ;;
@@ -155,10 +161,11 @@ case "${1:-}" in
 esac
 
 # ------------------------------------------------------------ into tmux
-# Started from a plain shell: re-launch this same script inside a detached
+# Started from a shell: re-launch this same script inside a detached
 # tmux session and return at once. The knobs are passed explicitly - a tmux
 # server that is already running would not see this shell's environment.
-if [ -z "${TMUX:-}" ] && [ -z "${LORA_IN_TMUX:-}" ]; then
+# Even from inside another tmux: running in that shell would tie the run to it.
+if [ -z "${LORA_IN_TMUX:-}" ]; then
     ensure_system
     if tmux has-session -t "$SESSION" 2>/dev/null; then
         echo "A run is already going in tmux session '$SESSION'. Watch it with:"
@@ -172,7 +179,8 @@ if [ -z "${TMUX:-}" ] && [ -z "${LORA_IN_TMUX:-}" ]; then
     self="$(printf '%q' "$HERE/$(basename "${BASH_SOURCE[0]}")")"
     # The shell stays open after the script ends, so an attach after a failure
     # still shows the error instead of a vanished session.
-    tmux new-session -d -s "$SESSION" -x 200 -y 50         "env LORA_IN_TMUX=1 $knobs bash $self; echo; echo \"[run_lora.sh exited with code \$?]\"; exec bash"
+    env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
+        "env LORA_IN_TMUX=1 $knobs bash $self; echo; echo \"[run_lora.sh exited with code \$?]\"; exec bash"
     echo "Started in tmux session '$SESSION' (run: $RUN_NAME)."
     echo
     echo "  watch live :  bash $0 attach     (leave with Ctrl-b, then d - the run keeps going)"
@@ -184,12 +192,26 @@ fi
 
 mkdir -p "$WORK/lora" "$OUT"
 ln -sfn "$LOG" "$RUNS/current.log"
+# A hangup (the tmux pane or the terminal going away) must not end the run.
+# Set before anything is started: tee, python and the rest inherit it.
+trap '' HUP
 # Everything below goes to the screen and to the log file. Python is told not
 # to buffer, or the log would lag minutes behind what is actually happening.
-exec > >(tee -a "$LOG") 2>&1
+# --output-error=warn: if the screen goes away, tee keeps writing the log
+# instead of dying and taking the script down with SIGPIPE.
+if tee --output-error=warn /dev/null </dev/null >/dev/null 2>&1; then
+    exec > >(tee --output-error=warn -a "$LOG") 2>&1
+else
+    exec > >(tee -a "$LOG") 2>&1
+fi
 export PYTHONUNBUFFERED=1
 echo "#### run_lora.sh started $(date '+%Y-%m-%d %H:%M:%S')  run=$RUN_NAME"
-trap 'echo "$(date "+%H:%M:%S")  run_lora.sh exited with code $?" >> "$STAGE_FILE"' EXIT
+# set -e stops the script on the first failing command without a word; say
+# which one it was, in the log, where `bash run_lora.sh log` shows it.
+set -E   # ...inside functions too
+trap 'rc=$?; echo "!! line $LINENO failed (exit $rc): $BASH_COMMAND"' ERR
+trap 'rc=$?; msg="$(date "+%H:%M:%S")  run_lora.sh exited with code $rc"
+      echo "$msg" >> "$STAGE_FILE"; echo "#### $msg"' EXIT
 
 step() {
     echo; echo "=============================================================="
@@ -406,13 +428,22 @@ python -c "import torch, transformers, peft; print('torch', torch.__version__, '
 step "4/9  Dataset"
 if [ ! -f "$DATA/annotations/ava_train_v2.1.csv" ] || [ ! -d "$DATA/labelframes" ]; then
     ZIP="$WORK/cbvd-5cow-behavior-video-dataset.zip"
+    [ -f "$ZIP" ] && echo "checking $ZIP (reads all 12 GB, takes a few minutes)"
     if ! unzip -tq "$ZIP" >/dev/null 2>&1; then
         echo "downloading CBVD-5 (~12 GB)"
         curl -L --fail --retry 5 -C - -o "$ZIP" "$DATASET_URL" || curl -L --fail --retry 5 -o "$ZIP" "$DATASET_URL"
     fi
     # Only what training reads: the annotations and the keyframes. The mp4s
     # and the rawframes are two thirds of the archive and are not used.
-    prefix="$(unzip -Z1 "$ZIP" | grep -m1 'annotations/ava_train_v2.1.csv$' | sed 's|annotations/ava_train_v2.1.csv$||')"
+    # awk reads the whole listing. A `grep -m1` here stopped after the first
+    # match, unzip died of SIGPIPE on the rest, and with pipefail + set -e the
+    # script exited silently right after the download.
+    if ! prefix="$(unzip -Z1 "$ZIP" | awk '
+            !found && /annotations\/ava_train_v2\.1\.csv$/ { sub(/annotations\/ava_train_v2\.1\.csv$/, ""); print; found = 1 }
+            END { exit !found }')"; then
+        echo "!! annotations/ava_train_v2.1.csv not found in $ZIP - broken download? Delete it and rerun."
+        exit 1
+    fi
     echo "archive prefix: '${prefix}'"
     mkdir -p "$DATA"
     unzip -q -o "$ZIP" "${prefix}annotations/*" "${prefix}labelframes/*" -d "$DATA/_x"
