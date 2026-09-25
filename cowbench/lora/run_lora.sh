@@ -43,8 +43,9 @@
 #   RUN_NAME=...           default: lora_w<WIDTH>[_n<TRAIN_LIMIT>] - stable, so a rerun resumes it
 #   LOCAL_DATA=~/cbvd5-local  local-disk copy of the keyframes read during training
 #                          and eval, when $WORK is on another (network) volume; "off" to skip
-#   TRIES=3                attempts at training and at each eval before giving up;
-#                          each one resumes where the last stopped
+#   TRIES=6                attempts at the whole run before giving up. Every step
+#                          resumes, so a failed run is restarted after 1, 2, 4, 8,
+#                          15 min; a run that got 20+ min in starts the count over
 
 set -euo pipefail
 
@@ -66,7 +67,7 @@ LR="${LR:-1e-4}"
 RANK="${RANK:-16}"
 EVAL_BASE="${EVAL_BASE:-1}"
 LOCAL_DATA="${LOCAL_DATA:-$HOME/cbvd5-local}"
-TRIES="${TRIES:-3}"
+TRIES="${TRIES:-6}"
 PRECISION="${PRECISION:-auto}"
 # No date in the default name: a run restarted after midnight must find its
 # own checkpoints, not start a fresh directory.
@@ -159,7 +160,8 @@ case "${1:-}" in
         tmux send-keys -t "$SESSION" C-c 2>/dev/null || true
         sleep 5
         [ -n "$pane_pid" ] && kill -TERM -- "-$pane_pid" 2>/dev/null || true
-        tmux kill-session -t "$SESSION" 2>/dev/null && echo "stopped" || echo "no session '$SESSION'"
+        tmux kill-session -t "$SESSION" 2>/dev/null || true
+        if [ -n "$pane_pid" ]; then echo "stopped"; else echo "no session '$SESSION'"; fi
         exit 0 ;;
     "") ;;
     *)
@@ -196,11 +198,42 @@ if [ -z "${LORA_IN_TMUX:-}" ]; then
     exit 0
 fi
 
-mkdir -p "$WORK/lora" "$OUT"
-ln -sfn "$LOG" "$RUNS/current.log"
 # A hangup (the tmux pane or the terminal going away) must not end the run.
 # Set before anything is started: tee, python and the rest inherit it.
 trap '' HUP
+
+# ------------------------------------------------------------ supervisor
+# $WORK on RunPod is a network volume (MooseFS), and any read from it - the
+# venv, the model, a keyframe, a checkpoint - can fail for a minute or two
+# (ENXIO, EIO). Retrying each read would never cover them all; instead the
+# whole script is rerun, which is cheap because every step skips work that
+# is already done and training resumes from its last checkpoint.
+if [ -z "${LORA_ATTEMPT:-}" ]; then
+    say() { echo "$*"; { mkdir -p "$OUT" && echo "$*" >> "$LOG"; } 2>/dev/null || true; }
+    self="$HERE/$(basename "${BASH_SOURCE[0]}")"
+    attempt=1
+    while :; do
+        t0=$SECONDS
+        LORA_ATTEMPT=$attempt bash "$self" && exit 0
+        rc=$?
+        # Stopped on purpose (Ctrl-c, `stop`): not a failure to retry.
+        if [ "$rc" -eq 130 ] || [ "$rc" -eq 143 ]; then exit "$rc"; fi
+        # A run that got well under way failed on something new, not on the
+        # same startup error again: give it the full set of attempts.
+        [ $((SECONDS - t0)) -ge 1200 ] && attempt=1
+        if [ "$attempt" -ge "$TRIES" ]; then
+            say "#### giving up after $attempt failed attempts in a row (TRIES=$TRIES)"
+            exit "$rc"
+        fi
+        delay=$((60 << (attempt - 1))); [ "$delay" -gt 900 ] && delay=900
+        say "#### $(date '+%H:%M:%S')  attempt $attempt of $TRIES failed (exit $rc) - rerunning in $((delay / 60)) min; it resumes where it stopped"
+        sleep "$delay"
+        attempt=$((attempt + 1))
+    done
+fi
+
+mkdir -p "$WORK/lora" "$OUT"
+ln -sfn "$LOG" "$RUNS/current.log"
 # Everything below goes to the screen and to the log file. Python is told not
 # to buffer, or the log would lag minutes behind what is actually happening.
 # --output-error=warn: if the screen goes away, tee keeps writing the log
@@ -211,7 +244,7 @@ else
     exec > >(tee -a "$LOG") 2>&1
 fi
 export PYTHONUNBUFFERED=1
-echo "#### run_lora.sh started $(date '+%Y-%m-%d %H:%M:%S')  run=$RUN_NAME"
+echo "#### run_lora.sh started $(date '+%Y-%m-%d %H:%M:%S')  run=$RUN_NAME  attempt=$LORA_ATTEMPT"
 # set -e stops the script on the first failing command without a word; say
 # which one it was, in the log, where `bash run_lora.sh log` shows it.
 set -E   # ...inside functions too
@@ -517,19 +550,6 @@ fi
 COMMON=(--root "$RUN_DATA" --out "$OUT" --width "$WIDTH" --precision "$PRECISION" "${BASE_ARG[@]}")
 cd "$BENCH"
 
-# Training resumes from its last checkpoint and eval from its results.jsonl,
-# so after a crash - a network hiccup, a worker dying - running it again
-# loses only the steps since the last checkpoint.
-retry() {
-    local n=1
-    until "$@"; do
-        if [ "$n" -ge "$TRIES" ]; then echo "!! failed $n times: $*"; return 1; fi
-        echo "!! attempt $n of $TRIES failed - restarting in 60 s, it resumes where it stopped"
-        n=$((n + 1))
-        sleep 60
-    done
-}
-
 step "6/9  Training data check"
 python lora/train_lora.py data "${COMMON[@]}" --train-limit "$TRAIN_LIMIT"
 
@@ -539,7 +559,7 @@ step "7/9  Control: the untouched model, same width, no reasoning"
 # width and no reasoning - so base-vs-LoRA isolates what the training bought.
 # Not fatal: a failure here should not cost the night's training.
 if [ "$EVAL_BASE" = "1" ]; then
-    retry python lora/train_lora.py eval "${COMMON[@]}" --adapter none \
+    python lora/train_lora.py eval "${COMMON[@]}" --adapter none \
         || echo "!! base-model eval failed; continuing to training"
 fi
 
@@ -547,13 +567,13 @@ step "8/9  Training"
 if [ -f "$OUT/adapter/adapter_config.json" ] && [ -f "$OUT/train_meta.json" ]; then
     echo "adapter already trained: $OUT/adapter"
 else
-    retry python lora/train_lora.py train "${COMMON[@]}" --train-limit "$TRAIN_LIMIT" \
+    python lora/train_lora.py train "${COMMON[@]}" --train-limit "$TRAIN_LIMIT" \
         --epochs "$EPOCHS" --batch "$BATCH" --accum "$ACCUM" --lr "$LR" --rank "$RANK" \
         --alpha "$((RANK * 2))"
 fi
 
 step "9/9  Evaluation on all 2532 val cows"
-retry python lora/train_lora.py eval "${COMMON[@]}" --adapter "$OUT/adapter"
+python lora/train_lora.py eval "${COMMON[@]}" --adapter "$OUT/adapter"
 
 ZS="$BENCH/runs/2026-09-25_val-full_w1920_f1"
 for arm in eval-base eval-lora; do
