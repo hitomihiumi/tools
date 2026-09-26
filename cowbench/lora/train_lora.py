@@ -408,6 +408,24 @@ def cmd_data(args):
     print("samples ->", sample_dir)
 
 
+def cmd_manifest(args):
+    """A manifest of training cows, in the val manifest's format, so `eval`
+    can score an adapter on the data it was trained on. Near train labels
+    there means the training worked and val differs; far from them means the
+    training itself went wrong."""
+    rows, _ = load_train(args.root)
+    rows = subsample(rows, args.sample, args.seed + 1)
+    out = args.manifest_out or os.path.join(args.out, "train-sample", "manifest.jsonl")
+    os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        for r in rows:
+            fh.write(json.dumps(r, ensure_ascii=False) + "\n")
+    print(f"{len(rows)} training cows on {len({(r['video_id'], r['timestamp']) for r in rows})} "
+          f"keyframes from {len({r['video_id'] for r in rows})} clips -> {out}")
+    print("  posture :", dict(collections.Counter(r["gt_posture"] for r in rows)))
+    print("  activity:", dict(collections.Counter(r["gt_activity"] for r in rows)))
+
+
 def cmd_train(args):
     import torch
     from transformers import Trainer, TrainingArguments
@@ -643,7 +661,7 @@ def cmd_eval(args):
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
-    p.add_argument("stage", choices=("data", "train", "eval"))
+    p.add_argument("stage", choices=("data", "train", "eval", "manifest"))
     p.add_argument("--root", required=True, help="unpacked CBVD-5 (with annotations/, labelframes/)")
     p.add_argument("--out", default="lora-out", help="training run directory")
     p.add_argument("--manifest", default=VAL_MANIFEST,
@@ -672,11 +690,16 @@ def main(argv=None):
     p.add_argument("--eval-out", default=None, help="eval: output dir (default <out>/eval-lora|eval-base)")
     p.add_argument("--eval-batch", type=int, default=16)
     p.add_argument("--eval-limit", type=int, default=0)
+    p.add_argument("--sample", type=int, default=800,
+                   help="manifest: training cows to pick (whole keyframes)")
+    p.add_argument("--manifest-out", default=None,
+                   help="manifest: output file (default <out>/train-sample/manifest.jsonl)")
     args = p.parse_args(argv)
     if args.stage == "eval" and not args.eval_out:
         args.eval_out = os.path.join(
             args.out, "eval-base" if args.adapter in (None, "", "none") else "eval-lora")
-    {"data": cmd_data, "train": cmd_train, "eval": cmd_eval}[args.stage](args)
+    {"data": cmd_data, "train": cmd_train, "eval": cmd_eval,
+     "manifest": cmd_manifest}[args.stage](args)
 
 
 if __name__ == "__main__":
