@@ -36,6 +36,7 @@ import math
 import os
 import random
 import re
+import shutil
 import sys
 import time
 
@@ -106,6 +107,60 @@ def subsample(rows, limit, seed):
             break
         out.extend(frames[k])
     return sorted(out, key=lambda r: r["id"])
+
+
+def split_dev(rows, frac, seed):
+    """Hold out whole clips. Frames of one clip share the camera, the cows
+    and often the labels, so a dev set cut by frame would be scored on
+    scenes the adapter was trained on - the first LoRA got 8.7% error on
+    its own training cows and 44% on val."""
+    if frac <= 0:
+        return rows, []
+    clips = sorted({r["video_id"] for r in rows}, key=lambda v: (len(v), v))
+    random.Random(seed).shuffle(clips)
+    dev = set(clips[:max(1, round(len(clips) * frac))])
+    return ([r for r in rows if r["video_id"] not in dev],
+            [r for r in rows if r["video_id"] in dev])
+
+
+def thin_frames(rows, per_clip):
+    """Keep `per_clip` keyframes of each clip, spread over it. The six
+    annotated seconds of a clip are near-duplicates - same cows, same
+    camera - so all six mostly repeat one scene to memorise."""
+    if not per_clip:
+        return rows
+    stamps = collections.defaultdict(set)
+    for r in rows:
+        stamps[r["video_id"]].add(r["timestamp"])
+    keep = set()
+    for vid, ts in stamps.items():
+        ts = sorted(ts)
+        if len(ts) <= per_clip:
+            idx = range(len(ts))
+        elif per_clip == 1:
+            idx = [len(ts) // 2]
+        else:
+            idx = {round(i * (len(ts) - 1) / (per_clip - 1)) for i in range(per_clip)}
+        keep.update((vid, ts[i]) for i in idx)
+    return [r for r in rows if (r["video_id"], r["timestamp"]) in keep]
+
+
+def training_rows(args):
+    """(training rows, dev rows, info): dev clips first, then thinning and
+    the training cap, so the dev set does not move with those knobs."""
+    rows, info = load_train(args.root)
+    rows, dev_all = split_dev(rows, args.holdout, args.seed)
+    rows = thin_frames(rows, args.frames_per_clip)
+    rows = subsample(rows, args.train_limit, args.seed)
+    dev = subsample(dev_all, args.dev_size, args.seed)
+    info.update({
+        "dev_clips": sorted({r["video_id"] for r in dev_all}, key=lambda v: (len(v), v)),
+        "dev_cows_held_out": len(dev_all), "dev_cows_scored": len(dev),
+        "frames_per_clip": args.frames_per_clip,
+        "train_clips": len({r["video_id"] for r in rows}),
+        "train_keyframes": len({(r["video_id"], r["timestamp"]) for r in rows}),
+    })
+    return rows, dev, info
 
 
 def read_jsonl(path):
@@ -378,22 +433,61 @@ def answer_loss(model, batch):
     return (loss * m).sum() / m.sum()
 
 
+def answer_rows(model, processor, chat, rows, args, batch):
+    """Greedy answers, `batch` cows at a time; yields the records per batch.
+    Generation starts where the final answer begins - no reasoning - which
+    is what the adapter is trained to do."""
+    import torch
+    tok = processor.tokenizer
+    prefix = chat.prefix + chat.answer_open
+    stop = [tok.convert_tokens_to_ids(t) for t in re.findall(r"<\|[a-z_]+\|>", chat.answer_close)]
+    with torch.no_grad():
+        for i in range(0, len(rows), batch):
+            chunk = rows[i:i + batch]
+            images = [make_image(args.root, r, args.width, args.jpeg_quality) for r in chunk]
+            enc = encode(processor, [prefix] * len(chunk), images)
+            enc = {k: (v.to(model.device) if hasattr(v, "to") else v) for k, v in enc.items()}
+            out = model.generate(**enc, max_new_tokens=48, do_sample=False, use_cache=True,
+                                 eos_token_id=stop or None, pad_token_id=tok.pad_token_id)
+            texts = tok.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
+            recs = []
+            for r, text in zip(chunk, texts):
+                p, a, err = parse_answer(text)
+                rec = dict(r, posture=p, activity=a, content=text)
+                if err:
+                    rec["parse_error"] = err
+                recs.append(rec)
+            yield recs
+
+
+def error_rates(recs):
+    n = max(len(recs), 1)
+    bad_p = [r["posture"] != r["gt_posture"] for r in recs]
+    bad_a = [r["activity"] != r["gt_activity"] for r in recs]
+    return {"n": len(recs),
+            "exact": sum(p or a for p, a in zip(bad_p, bad_a)) / n,
+            "posture": sum(bad_p) / n, "activity": sum(bad_a) / n,
+            "activity_answers": dict(collections.Counter(r["activity"] for r in recs))}
+
+
 # ------------------------------------------------------------------ stages
 
 def cmd_data(args):
-    rows, info = load_train(args.root)
-    rows = subsample(rows, args.train_limit, args.seed)
+    rows, dev, info = training_rows(args)
     print(json.dumps(info, indent=1))
     print("training on:", len(rows), "examples")
     print("  posture :", dict(collections.Counter(r["gt_posture"] for r in rows)))
     print("  activity:", dict(collections.Counter(r["gt_activity"] for r in rows)))
+    print(f"dev: {len(dev)} cows scored, from {info['dev_cows_held_out']} in "
+          f"{len(info['dev_clips'])} held-out clips")
+    print("  activity:", dict(collections.Counter(r["gt_activity"] for r in dev)))
     val = read_jsonl(args.manifest)
     print("eval manifest:", args.manifest, len(val), "examples")
     overlap = {r["video_id"] for r in rows} & {r["video_id"] for r in val}
     if overlap:
         raise SystemExit(f"train and eval share clips {sorted(overlap)}")
     missing = set()
-    for r in rows + val:
+    for r in rows + dev + val:
         try:
             cbvd.frame_path(args.root, cbvd.Box(r["video_id"], r["timestamp"], *r["bbox"], "1", ()))
         except FileNotFoundError as exc:
@@ -413,7 +507,7 @@ def cmd_manifest(args):
     can score an adapter on the data it was trained on. Near train labels
     there means the training worked and val differs; far from them means the
     training itself went wrong."""
-    rows, _ = load_train(args.root)
+    rows, _, _ = training_rows(args)
     rows = subsample(rows, args.sample, args.seed + 1)
     out = args.manifest_out or os.path.join(args.out, "train-sample", "manifest.jsonl")
     os.makedirs(os.path.dirname(os.path.abspath(out)), exist_ok=True)
@@ -430,8 +524,7 @@ def cmd_train(args):
     import torch
     from transformers import Trainer, TrainingArguments
 
-    rows, info = load_train(args.root)
-    rows = subsample(rows, args.train_limit, args.seed)
+    rows, dev, info = training_rows(args)
     os.makedirs(args.out, exist_ok=True)
 
     model, processor, minfo = load_model(args)
@@ -482,6 +575,43 @@ def cmd_train(args):
         raise SystemExit(f"LoRA matched {n_targets} modules, expected {expected}. "
                          f"Layer 0 modules: {names}")
 
+    # --- dev: held-out training clips, scored while training ------------
+    # The adapter is snapshotted at every dev score and the best one - not
+    # the last - becomes adapter/. Val stays untouched until the end, so it
+    # remains an honest estimate.
+    hist_path = os.path.join(args.out, "dev_history.jsonl")
+    done_steps = {h["step"] for h in read_jsonl(hist_path)}
+
+    def dev_eval(model, step):
+        t = time.time()
+        was_training = model.training
+        model.eval()
+        recs = [r for chunk in answer_rows(model, processor, chat, dev, args, args.dev_batch)
+                for r in chunk]
+        if was_training:
+            model.train()
+        torch.cuda.empty_cache()
+        m = dict(step=step, **error_rates(recs), seconds=round(time.time() - t))
+        if step > 0:
+            model.save_pretrained(os.path.join(args.out, "adapters", f"step-{step:05d}"))
+        with open(hist_path, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(m, ensure_ascii=False) + "\n")
+        done_steps.add(step)
+        print(f"\n[dev] step {step}: exact {m['exact']:.1%}  posture {m['posture']:.1%}  "
+              f"activity {m['activity']:.1%}  answers {m['activity_answers']}  "
+              f"({m['seconds']} s)", flush=True)
+
+    from transformers import TrainerCallback
+
+    class DevCallback(TrainerCallback):
+        def on_step_end(self, _args, state, control, model=None, **kwargs):
+            step = state.global_step
+            if dev and args.dev_every and step % args.dev_every == 0 and step not in done_steps:
+                dev_eval(model, step)
+
+    if dev and 0 not in done_steps:
+        dev_eval(model, 0)   # the adapter starts at zero: this is the base model
+
     class AnswerOnlyTrainer(Trainer):
         def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
             loss = answer_loss(model, inputs)
@@ -512,7 +642,8 @@ def cmd_train(args):
         seed=args.seed,
         optim="adamw_torch_fused",
     )
-    trainer = AnswerOnlyTrainer(model=model, args=targs, train_dataset=rows, data_collator=collate)
+    trainer = AnswerOnlyTrainer(model=model, args=targs, train_dataset=rows, data_collator=collate,
+                                callbacks=[DevCallback()])
     # The loss is already a per-token mean; let Trainer do the plain
     # 1/accumulation scaling rather than look for token counts in `labels`.
     trainer.model_accepts_loss_kwargs = False
@@ -528,7 +659,19 @@ def cmd_train(args):
     hours = (time.time() - t0) / 3600
 
     adapter = os.path.join(args.out, "adapter")
-    model.save_pretrained(adapter)
+    best = None
+    if dev:
+        if trainer.state.global_step not in done_steps:
+            dev_eval(model, trainer.state.global_step)
+        scored = {h["step"]: h for h in read_jsonl(hist_path) if h["step"] > 0}
+        best = min(scored.values(), key=lambda h: (h["exact"], h["step"]))
+        shutil.rmtree(adapter, ignore_errors=True)
+        shutil.copytree(os.path.join(args.out, "adapters", f"step-{best['step']:05d}"), adapter)
+        print(f"[dev] best: step {best['step']} of {trainer.state.global_step}, "
+              f"exact {best['exact']:.1%} (base {read_jsonl(hist_path)[0]['exact']:.1%}) "
+              f"-> {adapter}", flush=True)
+    else:
+        model.save_pretrained(adapter)
     losses = [h["loss"] for h in trainer.state.log_history if "loss" in h]
     meta = {
         "date": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -541,6 +684,7 @@ def cmd_train(args):
         "optim": {"lr": args.lr, "epochs": args.epochs, "batch": args.batch, "accum": args.accum,
                   "effective_batch": args.batch * args.accum, "steps": trainer.state.global_step},
         "zero_shot_answer_loss": zero_shot,
+        "dev": {"best": best, "every": args.dev_every, "history": hist_path},
         "first_loss": losses[0] if losses else None,
         "last_loss": sum(losses[-10:]) / len(losses[-10:]) if losses else None,
         "hours_this_session": round(hours, 2),
@@ -574,8 +718,6 @@ def parse_answer(text):
 
 
 def cmd_eval(args):
-    import torch
-
     manifest = read_jsonl(args.manifest)
     if args.eval_limit:
         manifest = manifest[:args.eval_limit]
@@ -600,10 +742,6 @@ def cmd_eval(args):
     # begins. For the adapter that is what it was trained to do; for the base
     # model it makes the base arm a like-for-like control - same width, same
     # no-thinking setup - so the difference between the two is the training.
-    prefix = chat.prefix + chat.answer_open
-    tok = processor.tokenizer
-    stop = [tok.convert_tokens_to_ids(t) for t in re.findall(r"<\|[a-z_]+\|>", chat.answer_close)]
-
     meta_src = os.path.join(os.path.dirname(os.path.abspath(args.manifest)), "run_meta.json")
     excluded = []
     if os.path.exists(meta_src):
@@ -633,23 +771,13 @@ def cmd_eval(args):
         json.dump(meta, fh, indent=2, ensure_ascii=False)
 
     t0 = time.time()
-    with open(results_path, "a", encoding="utf-8") as fh, torch.no_grad():
-        for i in range(0, len(todo), args.eval_batch):
-            chunk = todo[i:i + args.eval_batch]
-            images = [make_image(args.root, r, args.width, args.jpeg_quality) for r in chunk]
-            enc = encode(processor, [prefix] * len(chunk), images)
-            enc = {k: (v.to(model.device) if hasattr(v, "to") else v) for k, v in enc.items()}
-            out = model.generate(**enc, max_new_tokens=48, do_sample=False,
-                                 eos_token_id=stop or None, pad_token_id=tok.pad_token_id)
-            texts = tok.batch_decode(out[:, enc["input_ids"].shape[1]:], skip_special_tokens=True)
-            for r, text in zip(chunk, texts):
-                p, a, err = parse_answer(text)
-                rec = dict(r, posture=p, activity=a, content=text)
-                if err:
-                    rec["parse_error"] = err
+    with open(results_path, "a", encoding="utf-8") as fh:
+        n = 0
+        for recs in answer_rows(model, processor, chat, todo, args, args.eval_batch):
+            for rec in recs:
                 fh.write(json.dumps(rec, ensure_ascii=False) + "\n")
             fh.flush()
-            n = i + len(chunk)
+            n += len(recs)
             rate = n / (time.time() - t0)
             print(f"\r  {n}/{len(todo)}  {rate:.1f}/s  eta {(len(todo) - n) / rate / 60:.0f} min",
                   end="", flush=True)
@@ -676,10 +804,10 @@ def main(argv=None):
     p.add_argument("--train-limit", type=int, default=0,
                    help="cap on training cows (whole keyframes); 0 = all")
     p.add_argument("--seed", type=int, default=0)
-    p.add_argument("--rank", type=int, default=16)
-    p.add_argument("--alpha", type=int, default=32)
+    p.add_argument("--rank", type=int, default=8)
+    p.add_argument("--alpha", type=int, default=16)
     p.add_argument("--dropout", type=float, default=0.05)
-    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--lr", type=float, default=5e-5)
     p.add_argument("--epochs", type=float, default=1.0)
     p.add_argument("--batch", type=int, default=4)
     p.add_argument("--accum", type=int, default=4)
@@ -690,6 +818,13 @@ def main(argv=None):
     p.add_argument("--eval-out", default=None, help="eval: output dir (default <out>/eval-lora|eval-base)")
     p.add_argument("--eval-batch", type=int, default=16)
     p.add_argument("--eval-limit", type=int, default=0)
+    p.add_argument("--holdout", type=float, default=0.1,
+                   help="share of training clips held out as dev (0: none, last adapter wins)")
+    p.add_argument("--dev-size", type=int, default=300, help="dev cows scored (whole keyframes)")
+    p.add_argument("--dev-every", type=int, default=100, help="score dev every N optimizer steps")
+    p.add_argument("--dev-batch", type=int, default=8)
+    p.add_argument("--frames-per-clip", type=int, default=3,
+                   help="training keyframes kept per clip, spread over it; 0 = all six")
     p.add_argument("--sample", type=int, default=800,
                    help="manifest: training cows to pick (whole keyframes)")
     p.add_argument("--manifest-out", default=None,

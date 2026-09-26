@@ -31,16 +31,21 @@
 #   WORK=/workspace        where the venv, model cache, dataset and runs go
 #                          (default /workspace if writable, else ~/lora-work)
 #   WIDTH=896              frame width fed to the model (train and eval)
-#   EPOCHS=1               passes over the training cows
-#   TRAIN_LIMIT=0          cap on training cows, 0 = all 22 478 (e.g. 6000 for a quick proof)
+#   EPOCHS=2               passes over the training cows
+#   TRAIN_LIMIT=0          cap on training cows, 0 = all (e.g. 6000 for a quick proof)
 #   BATCH=4 ACCUM=4        per-step batch and gradient accumulation (effective 16)
-#   LR=1e-4 RANK=16        LoRA learning rate and rank
+#   LR=5e-5 RANK=8         LoRA learning rate and rank
+#   HOLDOUT=0.1            share of training clips held out as dev; the adapter is
+#                          scored on 300 of their cows every DEV_EVERY=100 steps, and
+#                          the best snapshot - not the last - becomes adapter/
+#   FRAMES_PER_CLIP=3      training keyframes per clip (of 6 near-duplicates); 0 = all
 #   EVAL_BASE=1            also score the untouched model the same way, as the control
+#                          (once per WIDTH, in lora-runs/base_w<WIDTH>, shared by runs)
 #   PRECISION=auto         bf16 on an 80 GB card, qlora on a 40 GB one
 #   HF_TOKEN=...           only for qlora: the BF16 repo may be gated
 #   CUDA_WANT=12.8         newest CUDA toolkit to install, or "skip"
 #   TORCH_BACKEND=cu128    force a torch build instead of matching CUDA
-#   RUN_NAME=...           default: lora_w<WIDTH>[_n<TRAIN_LIMIT>] - stable, so a rerun resumes it
+#   RUN_NAME=...           default: lora2_w<WIDTH>[_n<TRAIN_LIMIT>] - stable, so a rerun resumes it
 #   LOCAL_DATA=~/cbvd5-local  local-disk copy of the keyframes read during training
 #                          and eval, when $WORK is on another (network) volume; "off" to skip
 #   TRIES=6                attempts at the whole run before giving up. Every step
@@ -59,20 +64,24 @@ if [ -z "${WORK:-}" ]; then
     else WORK="$HOME/lora-work"; fi
 fi
 WIDTH="${WIDTH:-896}"
-EPOCHS="${EPOCHS:-1}"
+EPOCHS="${EPOCHS:-2}"
 TRAIN_LIMIT="${TRAIN_LIMIT:-0}"
 BATCH="${BATCH:-4}"
 ACCUM="${ACCUM:-4}"
-LR="${LR:-1e-4}"
-RANK="${RANK:-16}"
+LR="${LR:-5e-5}"
+RANK="${RANK:-8}"
+HOLDOUT="${HOLDOUT:-0.1}"
+DEV_EVERY="${DEV_EVERY:-100}"
+FRAMES_PER_CLIP="${FRAMES_PER_CLIP:-3}"
 EVAL_BASE="${EVAL_BASE:-1}"
 LOCAL_DATA="${LOCAL_DATA:-$HOME/cbvd5-local}"
 TRIES="${TRIES:-6}"
 PRECISION="${PRECISION:-auto}"
 # No date in the default name: a run restarted after midnight must find its
-# own checkpoints, not start a fresh directory.
-if [ "$TRAIN_LIMIT" != "0" ]; then RUN_NAME="${RUN_NAME:-lora_w${WIDTH}_n${TRAIN_LIMIT}}"; fi
-RUN_NAME="${RUN_NAME:-lora_w${WIDTH}}"
+# own checkpoints, not start a fresh directory. "lora2": held-out dev clips
+# and best-snapshot selection; lora_w896 was the first run, without them.
+if [ "$TRAIN_LIMIT" != "0" ]; then RUN_NAME="${RUN_NAME:-lora2_w${WIDTH}_n${TRAIN_LIMIT}}"; fi
+RUN_NAME="${RUN_NAME:-lora2_w${WIDTH}}"
 
 MODEL="RedHatAI/Muse-Glimmer-30B-FP8-block"
 MODEL_BF16="meta-models/Muse-Glimmer-30B"
@@ -146,6 +155,8 @@ case "${1:-}" in
             [ -n "$bar" ] && echo "bar   : $bar"
             loss="$(tr '\r' '\n' < "$RUNS/current.log" | grep -oE "\{'loss'[^}]*\}" | tail -1 || true)"
             [ -n "$loss" ] && echo "loss  : $loss"
+            dev="$(grep -a '^\[dev\] step' "$RUNS/current.log" | tail -1 || true)"
+            [ -n "$dev" ] && echo "dev   : ${dev#\[dev\] }"
             echo "--- last lines ---"
             printf '%s\n' "$recent" | grep -v '^[[:space:]]*$' | tail -8
         fi
@@ -181,7 +192,7 @@ if [ -z "${LORA_IN_TMUX:-}" ]; then
         exit 1
     fi
     knobs=""
-    for v in WORK WIDTH EPOCHS TRAIN_LIMIT BATCH ACCUM LR RANK EVAL_BASE PRECISION RUN_NAME KEEP_ZIP HF_TOKEN CUDA_WANT TORCH_BACKEND LOCAL_DATA TRIES; do
+    for v in WORK WIDTH EPOCHS TRAIN_LIMIT BATCH ACCUM LR RANK EVAL_BASE PRECISION RUN_NAME KEEP_ZIP HF_TOKEN CUDA_WANT TORCH_BACKEND LOCAL_DATA TRIES HOLDOUT DEV_EVERY FRAMES_PER_CLIP; do
         [ -n "${!v:-}" ] && knobs+="$v=$(printf '%q' "${!v}") "
     done
     self="$(printf '%q' "$HERE/$(basename "${BASH_SOURCE[0]}")")"
@@ -646,10 +657,20 @@ else
 fi
 
 COMMON=(--root "$RUN_DATA" --out "$OUT" --width "$WIDTH" --precision "$PRECISION" "${BASE_ARG[@]}")
+# What picks the training and dev cows: the data check must see the same.
+SPLIT=(--train-limit "$TRAIN_LIMIT" --holdout "$HOLDOUT" --frames-per-clip "$FRAMES_PER_CLIP")
+# The base model at a given width scores the same in every run: done once,
+# kept beside the runs. The first run kept its copy inside its own folder.
+BASE_OUT="$RUNS/base_w${WIDTH}"
+if [ ! -s "$BASE_OUT/results.jsonl" ] && [ -s "$RUNS/lora_w${WIDTH}/eval-base/results.jsonl" ]; then
+    mkdir -p "$BASE_OUT"
+    cp -r "$RUNS/lora_w${WIDTH}/eval-base/." "$BASE_OUT/"
+    echo "base-model eval taken from $RUNS/lora_w${WIDTH}/eval-base"
+fi
 cd "$BENCH"
 
 step "6/9  Training data check"
-python lora/train_lora.py data "${COMMON[@]}" --train-limit "$TRAIN_LIMIT"
+python lora/train_lora.py data "${COMMON[@]}" "${SPLIT[@]}"
 
 step "7/9  Control: the untouched model, same width, no reasoning"
 # The zero-shot runs in runs/ were made with reasoning on and at 1280/1920 px.
@@ -657,7 +678,7 @@ step "7/9  Control: the untouched model, same width, no reasoning"
 # width and no reasoning - so base-vs-LoRA isolates what the training bought.
 # Not fatal: a failure here should not cost the night's training.
 if [ "$EVAL_BASE" = "1" ]; then
-    python lora/train_lora.py eval "${COMMON[@]}" --adapter none \
+    python lora/train_lora.py eval "${COMMON[@]}" --adapter none --eval-out "$BASE_OUT" \
         || echo "!! base-model eval failed; continuing to training"
 fi
 
@@ -665,7 +686,7 @@ step "8/9  Training"
 if [ -f "$OUT/adapter/adapter_config.json" ] && [ -f "$OUT/train_meta.json" ]; then
     echo "adapter already trained: $OUT/adapter"
 else
-    python lora/train_lora.py train "${COMMON[@]}" --train-limit "$TRAIN_LIMIT" \
+    python lora/train_lora.py train "${COMMON[@]}" "${SPLIT[@]}" --dev-every "$DEV_EVERY" \
         --epochs "$EPOCHS" --batch "$BATCH" --accum "$ACCUM" --lr "$LR" --rank "$RANK" \
         --alpha "$((RANK * 2))"
 fi
@@ -674,25 +695,26 @@ step "9/9  Evaluation on all 2532 val cows"
 python lora/train_lora.py eval "${COMMON[@]}" --adapter "$OUT/adapter"
 
 ZS="$BENCH/runs/2026-09-25_val-full_w1920_f1"
-for arm in eval-base eval-lora; do
-    [ -s "$OUT/$arm/results.jsonl" ] || continue
-    python cowbench.py --out "$OUT/$arm" score
-    python cowbench.py --out "$OUT/$arm" score --vote
-    python cowbench.py --out "$OUT/$arm" report
+for arm in "$BASE_OUT" "$OUT/eval-lora"; do
+    [ -s "$arm/results.jsonl" ] || continue
+    python cowbench.py --out "$arm" score
+    python cowbench.py --out "$arm" score --vote
+    python cowbench.py --out "$arm" report
 done
 python cowbench.py compare --a "$ZS" --b "$OUT/eval-lora" \
     --label-a "zero-shot 1920px, reasoning" --label-b "LoRA ${WIDTH}px" \
     --output "$OUT/eval-lora/compare_vs_zeroshot1920.md"
-if [ -s "$OUT/eval-base/results.jsonl" ]; then
-    python cowbench.py compare --a "$OUT/eval-base" --b "$OUT/eval-lora" \
+if [ -s "$BASE_OUT/results.jsonl" ]; then
+    python cowbench.py compare --a "$BASE_OUT" --b "$OUT/eval-lora" \
         --label-a "base ${WIDTH}px, no reasoning" --label-b "LoRA ${WIDTH}px" \
         --output "$OUT/eval-lora/compare_vs_base.md"
 fi
 
 echo
 echo "Done. Everything is in $OUT:"
-echo "  adapter/                      the LoRA weights (~0.4 GB)"
-echo "  train_meta.json               what was trained, how long, loss before and after"
+echo "  adapter/                      the LoRA weights: the best dev snapshot"
+echo "  dev_history.jsonl             dev error every $DEV_EVERY steps; adapters/ has each snapshot"
+echo "  train_meta.json               what was trained, how long, loss, the best dev step"
 echo "  eval-lora/report.md           the bench report for the fine-tuned model"
 echo "  eval-lora/compare_*.md        paired comparisons against the zero-shot runs"
 echo "Copy it back into cowbench/runs/ to keep it with the rest."
