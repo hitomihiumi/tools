@@ -309,15 +309,38 @@ def cmd_train(args):
 
 # --------------------------------------------------------------------- live
 
+def calibrate_box(box, calib):
+    """A detector box reshaped by a box calibration: per size of box (log area), the
+    median ratio of the annotation's box to the detector's (sx, sy) and the shift
+    of its centre (dx, dy, in box widths / heights), interpolated between sizes."""
+    if not calib:
+        return box
+    import numpy as np
+    x1, y1, x2, y2 = box
+    w, h = max(x2 - x1, 1e-6), max(y2 - y1, 1e-6)
+    la = float(np.log(w * h))
+    b = calib["buckets"]
+    at = [r["log_area"] for r in b]
+    sx, sy, dx, dy = (float(np.interp(la, at, [r[k] for r in b])) for k in ("sx", "sy", "dx", "dy"))
+    cx, cy = (x1 + x2) / 2 + dx * w, (y1 + y2) / 2 + dy * h
+    w, h = w * sx, h * sy
+    return [round(max(0.0, cx - w / 2), 4), round(max(0.0, cy - h / 2), 4),
+            round(min(1.0, cx + w / 2), 4), round(min(1.0, cy + h / 2), 4)]
+
+
 class Live:
     """The trained detector, in process, one image per call: what stress.py
     runs on every camera frame next to the vLLM server. Calls from many
     camera threads take turns on the one model; a frame is ~10-30 ms on a GPU."""
 
-    def __init__(self, best_dir, threshold=None, tiles=None):
+    def __init__(self, best_dir, threshold=None, tiles=None, calib=True):
         import threading
         with open(os.path.join(best_dir, "det_train_meta.json"), encoding="utf-8") as fh:
             meta = json.load(fh)
+        # box calibration (herd/calib_boxes.py): the detector's boxes reshaped to the
+        # annotation's habit (it draws them with a margin), when best/box_calib.json exists
+        cpath = os.path.join(best_dir, "box_calib.json")
+        self.calib = json.load(open(cpath, encoding="utf-8")) if (calib and os.path.exists(cpath)) else None
         self._predict = None                   # images, keep -> [[x1, y1, x2, y2, score], ...] per image
         if meta.get("kind") == "rfdetr":       # RF-DETR (rfdetr_det.py): same boxes, same thresholds
             import rfdetr_det
@@ -366,7 +389,8 @@ class Live:
             else:
                 res = (predict_tiled if self.tiles else predict)(self.model, self.processor, list(imgs),
                                                                   keep=self.threshold)
-        return [[{"bbox": b[:4], "det_score": b[4]} for b in boxes if b[4] >= self.threshold] for boxes in res]
+        return [[{"bbox": calibrate_box(b[:4], self.calib), "det_score": b[4]} for b in boxes if b[4] >= self.threshold]
+                for boxes in res]
 
 
 # ------------------------------------------------------------------- detect

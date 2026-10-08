@@ -38,6 +38,8 @@
 #   QUALITY=1         frame quality taught directly: stretches of every burst spoilt
 #                     (degrade.py: another cow in front, mud, blur, dark) and encoded (step 6,
 #                     GPU), the quality head learns to weigh them down; 0: without
+#   CALIB=1           step 7 first calibrates the detector's boxes to the annotation's habit
+#                     (herd.py calibrate -> <detector>/box_calib.json, used everywhere after)
 #   DET_KEYS=1        the frame heads also learn on the detector's boxes (+ jittered annotated
 #                     boxes), so they answer as well on what the barn gives them (step 6)
 #   POS=0             1: the heads also get where the cow is in the frame (fixed cameras: the
@@ -171,7 +173,7 @@ if [ -z "${HERD_IN_TMUX:-}" ]; then
     if tmux has-session -t "=$SESSION" 2>/dev/null; then echo "already running: bash $0 log"; exit 1; fi
     mkdir -p "$WORK/herd"
     knobs=""
-    for v in WORK RUN EPOCHS ENCODER GRID MAX_ERROR MARGIN POS MOTION DET DET_KEYS QUALITY; do knobs+="$v=$(printf '%q' "${!v:-}") "; done
+    for v in WORK RUN EPOCHS ENCODER GRID MAX_ERROR MARGIN POS MOTION DET DET_KEYS QUALITY CALIB; do knobs+="$v=$(printf '%q' "${!v:-}") "; done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
         "env HERD_IN_TMUX=1 $knobs bash $(printf '%q' "$HERE/run_pod.sh"); echo; echo '[run_pod.sh finished]'; exec bash"
     echo "Started in tmux session '$SESSION'.  log: bash $0 log   ($LOG)"
@@ -246,6 +248,9 @@ USE_KEYS=0
 if [ "$DET_KEYS" = "1" ]; then
     if D6="$(find_det)"; then
         echo "detector: $D6"
+        if [ "${CALIB:-1}" = "1" ]; then     # its boxes reshaped to the annotation's habit (box_calib.json)
+            "$PY" herd.py calibrate --detector "$D6" --root "$DATA"
+        fi
         "$PY" herd.py keys --root "$DATA" --out "$FEAT" --split train --detector "$D6"
         USE_KEYS=1
     else

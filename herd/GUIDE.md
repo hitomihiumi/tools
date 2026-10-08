@@ -164,6 +164,16 @@ frame encoder below: the detector's features are tuned to find boxes at frame
 resolution, where a far cow is a few patches, while the encoder sees each cow at
 224x224.
 
+**Box calibration.** CBVD-5's annotators drew boxes with a margin, the detector draws
+them tight: for a small far cow the margin alone pushes the overlap under 0.5, so a
+cow the detector found counts as missed, and the frame heads (trained on annotated
+crops) get tighter crops than they learnt on. `herd.py calibrate --detector D`
+measures, on the detector's own held-out train clips (never val), the median ratio of
+the annotation's box to the detector's and the shift of its centre, per size of box,
+and writes `<detector>/box_calib.json`; `detector.Live` applies it to every box from
+then on (pipeline, keys, eval-det, show_zone). `run_pod.sh` does it in step 7
+(`CALIB=1`); `eval-det --calib 0` scores the raw boxes for comparison.
+
 ### 4.2 Frame encoder — DINOv2-S (`model.FrameEncoder`)
 
 Frozen. Turns a 224x224 crop into a vector: CLS + the patch tokens pooled over a
@@ -267,6 +277,7 @@ Knobs (`NAME=value bash herd/run_pod.sh`):
 | `MOTION` | 1 | motion rhythm for rumination |
 | `QUALITY` | 1 | frame quality taught directly on spoilt frames |
 | `DET_KEYS` | 1 | frame heads also learn on the detector's boxes |
+| `CALIB` | 1 | calibrate the detector's boxes to the annotation's habit first (section 4.1) |
 | `GRID` | 2 | DINOv2 patch grid (4: finer, features 3.4x larger) |
 | `MARGIN` | 0.1 | context around the box in the crop (0.5 was worse: neighbouring cows) |
 | `MAX_ERROR` | 0.01 | error budget for NaN |
@@ -295,6 +306,7 @@ bash herd/run_pod.sh stop
 | `train --features F --out R [--pos 1 --motion 1 --quality 1 --det-keys 1] [--extra-train ...]` | training (runs eval at the end) |
 | `eval --features F --out R [--extra-val ...]` | evaluate again |
 | `abstain --features F --run R` | NaN model |
+| `calibrate --detector D` | the detector's boxes reshaped to the annotation's habit (`box_calib.json`) |
 | `eval-det --run R [--tiles 1] [--threshold t] [--min-box-pct p] [--min-box-side-px n]` | the whole path on the detector's boxes, threshold sweep, size sweeps for the working zone |
 | `stress --model M --detector D` | load test |
 | `run --config barn.toml` | run in the barn |

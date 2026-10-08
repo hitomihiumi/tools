@@ -113,6 +113,8 @@ def main(argv=None):
     p.add_argument("--exclude-above", type=float, default=None,
                    help="working zone: box centres above this height (0-1) are the far zone - greyed out "
                         "before the detector and not tried (CBVD-5's far row is the top of the frame)")
+    p.add_argument("--calib", type=int, default=1,
+                   help="0: the detector's raw boxes, without its box_calib.json (herd.py calibrate)")
     p.add_argument("--target-recall", type=float, default=0.9,
                    help="the size sweep suggests the smallest cut at which the detector finds this share")
     args = p.parse_args(argv)
@@ -133,13 +135,14 @@ def main(argv=None):
     threshold = meta["threshold"] if args.threshold is None else args.threshold
     sweep = sorted({round(t, 2) for t in np.arange(args.sweep_from, 0.651, 0.05)} | {round(threshold, 2)})
     # one pass at the lowest cut-off of the sweep: every box classified once, then cut per threshold
-    det = det_mod.Live(args.detector, min(sweep), tiles=args.tiles)
+    det = det_mod.Live(args.detector, min(sweep), tiles=args.tiles, calib=bool(args.calib))
     out_dir = args.out or os.path.join(args.run, "eval-val-det")
     os.makedirs(out_dir, exist_ok=True)
 
     frames = val_keyframes(args.root)
     print(f"[eval-det] {len(frames)} val keyframes, {sum(len(v) for v in frames.values())} annotated cows; "
-          f"detector {det.name} on {det.device}, threshold {threshold}{', tiles' if det.tiles else ''}", flush=True)
+          f"detector {det.name} on {det.device}, threshold {threshold}{', tiles' if det.tiles else ''}"
+          f"{', boxes calibrated' if det.calib else ''}", flush=True)
     seen, det_ms, sizes = {}, [], {}                     # (clip, ts) -> [(box, score, posture, activity)]
     for n, (clip, ts) in enumerate(frames, 1):
         img = cbvd_frame(args.root, clip, ts)
@@ -273,6 +276,7 @@ def main(argv=None):
     pct_sweep, pct_suggest = sweep("pct")
     px_sweep, px_suggest = sweep("px")
     res = {"detector": os.path.abspath(args.detector), "threshold": threshold, "tiles": det.tiles, "iou": args.iou,
+           "calibrated": bool(det.calib),
            "detector_quality": quality, "on_detector_boxes": errors(records), "on_annotated_boxes": on_anno,
            "threshold_sweep": table, "best_threshold": best["threshold"],
            "zone": {"min_box_pct": args.min_box_area * 100, "min_box_side_px": args.min_box_side_px,
