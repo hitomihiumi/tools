@@ -75,7 +75,7 @@ export HF_HOME="$WORK/hf-cache"
 # whose job has finished does not block a new start - it is closed here.
 busy() {
     tmux has-session -t "=$1" 2>/dev/null || return 1
-    if tmux capture-pane -p -t "=$1" -S -200 | grep -q "\[$2 finished\]"; then
+    if tmux capture-pane -p -t "=$1:" -S -200 | grep -q "\[$2 finished\]"; then
         tmux kill-session -t "=$1"; return 1
     fi
     return 0
