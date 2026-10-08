@@ -14,8 +14,13 @@
 #   bash herd/run_pod.sh detector a new RT-DETRv2 for Full HD and far cows (tmux "herd-det", hours):
 #                                 input DET_SIZE=1088 (a 1080x1080 tile at ~native size), zoom
 #                                 crops in training, whole frame + tiles, epoch and threshold by F2
-#                                 (a missed cow costs more than an extra box) -> WORK/herd/detector_fhd;
+#                                 (a missed cow costs more than an extra box) -> WORK/herd/detector_<DET_TAG>;
 #                                 then eval-det of the newest run with it. DET_EPOCHS=24 DET_BATCH=8
+#                                 DET_MODEL=PekingU/rtdetr_v2_r101vd (default; ~76M parameters, the
+#                                 deepest backbone) - PekingU/rtdetr_v2_r50vd is the one the LoRA runs and
+#                                 the first herd runs used (~42M); DET_TAG=fhd_r101 (fhd_r50 for r50vd).
+#                                 The first detector's own settings, only the backbone swapped:
+#                                 DET_SIZE=960 DET_ZOOM=0 DET_TILES=0 DET_SELECT=f1 DET_TAG=r101_960
 #
 # Every step resumes: features are written clip by clip, so a rerun after a
 # crash continues where it stopped. Knobs:
@@ -27,10 +32,9 @@
 #                     barrier); another MARGIN extracts into its own features_m<MARGIN>
 #   MOTION=1          the rhythm of each burst (chewing, motion.py) to the rumination and activity
 #                     heads; computed once from the videos on the CPU (step 5), 0: without
-#   QUALITY=1         good burst / bad burst taught directly: stretches of every burst spoilt
+#   QUALITY=1         frame quality taught directly: stretches of every burst spoilt
 #                     (degrade.py: another cow in front, mud, blur, dark) and encoded (step 6,
-#                     GPU), the quality head learns to weigh them down and a burst-quality head
-#                     whether the burst will identify the cow; 0: without
+#                     GPU), the quality head learns to weigh them down; 0: without
 #   DET_KEYS=1        the frame heads also learn on the detector's boxes (+ jittered annotated
 #                     boxes), so they answer as well on what the barn gives them (step 6)
 #   POS=0             1: the heads also get where the cow is in the frame (fixed cameras: the
@@ -86,7 +90,7 @@ case "${1:-}" in
           [ -n "$LOG" ] || { echo "no log yet in $WORK/herd"; exit 1; }
           echo "following $LOG"
           exec tail -n 100 -F "$LOG" ;;
-    stop) tmux kill-session -t "$SESSION" 2>/dev/null && echo stopped || echo "not running"; exit 0 ;;
+    stop) tmux kill-session -t "=$SESSION" 2>/dev/null && echo stopped || echo "not running"; exit 0 ;;
     stress)
         [ -n "${RUN_SET:-}" ] || RUN="$(basename "$(dirname "$(ls -t "$WORK"/herd/*/model.pt 2>/dev/null | head -1)")")"
         MODEL="$WORK/herd/$RUN/model.pt"
@@ -99,30 +103,32 @@ case "${1:-}" in
         mkdir -p "$SOUT"
         cmd="$(printf '%q ' "$VENV/bin/python" "$HERE/herd.py" stress --model "$MODEL" --detector "$DET" \
                --root "$DATA" --cameras "${CAMERAS:-5}" --duration "${DURATION:-300}" --out "$SOUT")"
-        tmux has-session -t herd-stress 2>/dev/null && { echo "already running: tmux attach -t herd-stress"; exit 1; }
+        tmux has-session -t =herd-stress 2>/dev/null && { echo "already running: tmux attach -t herd-stress"; exit 1; }
         env -u TMUX tmux new-session -d -s herd-stress -x 200 -y 50 \
             "export HF_HOME=$(printf '%q' "$HF_HOME"); $cmd 2>&1 | tee $(printf '%q' "$SOUT/log.txt"); echo '[stress finished]'; exec bash"
         echo "Started in tmux session 'herd-stress' (model $MODEL).  log: tail -F $SOUT/log.txt"
         echo "result: $SOUT/stress_herd_${CAMERAS:-5}cam.md"
         exit 0 ;;
     detector)
-        DOUT="$WORK/herd/detector_${DET_TAG:-fhd}"
+        DET_MODEL="${DET_MODEL:-PekingU/rtdetr_v2_r101vd}"
+        DET_TAG="${DET_TAG:-fhd_$(echo "$DET_MODEL" | sed -n 's/.*_\(r[0-9]*\)vd$/\1/p')}"
+        DOUT="$WORK/herd/detector_${DET_TAG}"
         mkdir -p "$DOUT"
         LAST="$(basename "$(dirname "$(ls -t "$WORK"/herd/*/model.pt 2>/dev/null | head -1)")" 2>/dev/null || true)"
         q() { printf '%q ' "$@"; }
         train="$(q "$VENV/bin/python" "$REPO/cowbench/detector.py" train --root "$DATA" --out "$DOUT" \
-                   --size "${DET_SIZE:-1088}" --zoom "${DET_ZOOM:-0.5}" --tiles 1 --select f2 \
+                   --model "$DET_MODEL" --size "${DET_SIZE:-1088}" --zoom "${DET_ZOOM:-0.5}" --tiles "${DET_TILES:-1}" --select "${DET_SELECT:-f2}" \
                    --epochs "${DET_EPOCHS:-24}" --batch "${DET_BATCH:-8}")"
         evald=""
         if [ -n "$LAST" ] && [ -f "$WORK/herd/$LAST/model.pt" ]; then
             evald="&& $(q "$VENV/bin/python" "$HERE/herd.py" eval-det --run "$WORK/herd/$LAST" --detector "$DOUT/best" \
-                       --root "$DATA" --out "$WORK/herd/$LAST/eval-val-det-${DET_TAG:-fhd}")"
+                       --root "$DATA" --out "$WORK/herd/$LAST/eval-val-det-${DET_TAG}")"
         fi
-        tmux has-session -t herd-det 2>/dev/null && { echo "already running: tmux attach -t herd-det"; exit 1; }
+        tmux has-session -t =herd-det 2>/dev/null && { echo "already running: tmux attach -t herd-det"; exit 1; }
         env -u TMUX tmux new-session -d -s herd-det -x 200 -y 50 \
             "export HF_HOME=$(printf '%q' "$HF_HOME"); ( $train $evald ) 2>&1 | tee -a $(printf '%q' "$DOUT/log.txt"); echo '[detector finished]'; exec bash"
         echo "Started in tmux session 'herd-det' -> $DOUT/best.  log: tail -F $DOUT/log.txt"
-        [ -n "$evald" ] && echo "then eval-det of $LAST with it -> $WORK/herd/$LAST/eval-val-det-${DET_TAG:-fhd}/eval_det.json"
+        [ -n "$evald" ] && echo "then eval-det of $LAST with it -> $WORK/herd/$LAST/eval-val-det-${DET_TAG}/eval_det.json"
         exit 0 ;;
     "") ;;
     *) echo "usage: $0 [log|stop|stress|detector]"; exit 2 ;;
@@ -130,10 +136,10 @@ esac
 
 if [ -z "${HERD_IN_TMUX:-}" ]; then
     command -v tmux >/dev/null || { apt-get update -qq && apt-get install -y -qq tmux; }
-    if tmux has-session -t "$SESSION" 2>/dev/null; then echo "already running: bash $0 log"; exit 1; fi
+    if tmux has-session -t "=$SESSION" 2>/dev/null; then echo "already running: bash $0 log"; exit 1; fi
     mkdir -p "$WORK/herd"
     knobs=""
-    for v in WORK RUN EPOCHS ENCODER GRID MAX_ERROR MARGIN POS MOTION DET DET_KEYS QUALITY; do knobs+="$v=$(printf '%q' "${!v}") "; done
+    for v in WORK RUN EPOCHS ENCODER GRID MAX_ERROR MARGIN POS MOTION DET DET_KEYS QUALITY; do knobs+="$v=$(printf '%q' "${!v:-}") "; done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
         "env HERD_IN_TMUX=1 $knobs bash $(printf '%q' "$HERE/run_pod.sh"); echo; echo '[run_pod.sh finished]'; exec bash"
     echo "Started in tmux session '$SESSION'.  log: bash $0 log   ($LOG)"
@@ -243,7 +249,7 @@ fi
 echo
 echo "Done. In $OUT:"
 echo "  model.pt            the temporal transformer + heads (and the frame heads)"
-echo "  eval_val.json       also: frame_quality_auc, reid_spoilt_weighted vs _uniform, burst_quality_auc"
+echo "  eval_val.json       also: frame_quality_auc, reid_spoilt_weighted vs _uniform"
 echo "  eval_val.json       val: re-ID top-1, posture / activity errors, rumination recall"
 echo "  eval-val/report.md  the same keyframes as the LoRA runs, cowbench format"
 echo "  abstain.json        when to answer NaN, and how often it does"
