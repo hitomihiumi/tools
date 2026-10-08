@@ -265,7 +265,10 @@ def main(argv=None):
                          "exact_error_found_cows": e["exact_error_found_cows"],
                          "exact_error_annotated_boxes": ea["exact_error"] if ea else None})
         ok = [r for r in rows if r["recall"] >= args.target_recall]
-        return rows, (ok[0] if ok else max(rows, key=lambda r: r["recall"]))
+        if ok:
+            return rows, dict(ok[0], reached=True)
+        # no cut gets the detector there: dropping cows does not pay - keep the cut with the lowest error
+        return rows, dict(min(rows, key=lambda r: (r["exact_error"], r["cut"])), reached=False)
 
     pct_sweep, pct_suggest = sweep("pct")
     px_sweep, px_suggest = sweep("px")
@@ -304,9 +307,13 @@ def main(argv=None):
         for r in rows:
             print(f"   {r['cut']:>8}  {r['cows_kept_share']:9.0%}  {r['recall']:6.1%}  {r['precision']:9.1%}  "
                   f"{r['exact_error']:11.1%}  {r['exact_error_found_cows'] or 0:8.1%}  "
-                  f"{pct(r['exact_error_annotated_boxes']):>18}" + ("   <- suggested" if r is sug else ""))
-        print(f"   suggested: [zone] {unit} = {sug['cut']}  (the smallest cut with detector recall >= "
-              f"{args.target_recall:.0%}; keeps {sug['cows_kept_share']:.0%} of the cows)")
+                  f"{pct(r['exact_error_annotated_boxes']):>18}" + ("   <- suggested" if r["cut"] == sug["cut"] else ""))
+        if sug["reached"]:
+            print(f"   suggested: [zone] {unit} = {sug['cut']}  (the smallest cut with detector recall >= "
+                  f"{args.target_recall:.0%}; keeps {sug['cows_kept_share']:.0%} of the cows)")
+        else:
+            print(f"   no cut gets the detector's recall to {args.target_recall:.0%}: the misses are not only the "
+                  f"small cows. Suggested: [zone] {unit} = {sug['cut']} (the lowest error)")
     print(f"[eval-det] cowbench format: python cowbench/cowbench.py --out {out_dir} score")
     return 0
 
