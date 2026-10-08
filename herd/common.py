@@ -53,7 +53,7 @@ DEFAULTS = {
     # they are not tried: boxes under these sizes are dropped, and a camera's
     # `exclude` polygons (the far zone) are greyed out before the detector sees the
     # frame. Per camera the same keys override these. herd.py eval-det suggests values.
-    "zone": {"min_box_area": 0.0, "min_box_side_px": 0, "blank_excluded": True},
+    "zone": {"min_box_pct": 0.0, "min_box_side_px": 0, "blank_excluded": True},
     "cameras": [],
 }
 
@@ -128,13 +128,19 @@ def big_enough(box, w, h, min_area=0.0, min_side_px=0):
     return bw * bh >= min_area and min(bw * w, bh * h) >= min_side_px
 
 
+def zone_min_area(cam):
+    """The size cut as a share of the frame: min_box_pct (percent) or the older min_box_area."""
+    pct = cam.get("min_box_pct") or 0.0
+    return pct / 100.0 if pct else (cam.get("min_box_area") or 0.0)
+
+
 def in_zone(box, cam, w, h):
     """The camera's working zone: its mask (box centre), outside its exclude
     polygons (box centre), and big enough. A cow outside it is not tried at all."""
     cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
     if any(in_polygon(cx, cy, p) for p in _polys(cam.get("exclude"))):
         return False
-    return in_mask(box, cam.get("mask")) and big_enough(box, w, h, cam.get("min_box_area", 0.0),
+    return in_mask(box, cam.get("mask")) and big_enough(box, w, h, zone_min_area(cam),
                                                           cam.get("min_box_side_px", 0))
 
 
