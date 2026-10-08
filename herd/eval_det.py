@@ -32,7 +32,7 @@ import time
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from common import ACTIVITIES, POSTURES, crop, device, write_json  # noqa: E402
+from common import ACTIVITIES, POSTURES, big_enough, crop, device, write_json  # noqa: E402
 
 import cbvd  # noqa: E402  (cowbench)
 import detect as detect_mod  # noqa: E402  (cowbench: greedy IoU matching)
@@ -106,6 +106,14 @@ def main(argv=None):
     p.add_argument("--tiles", type=int, default=None,
                    help="1: whole frame + square tiles (far cows ~1.8x wider); default: as the detector was trained")
     p.add_argument("--sweep-from", type=float, default=0.15, help="lowest threshold of the sweep")
+    p.add_argument("--min-box-area", type=float, default=0.0,
+                   help="working zone: cows (and boxes) smaller than this share of the frame are not tried")
+    p.add_argument("--min-box-side-px", type=int, default=0, help="working zone: short side in pixels")
+    p.add_argument("--exclude-above", type=float, default=None,
+                   help="working zone: box centres above this height (0-1) are the far zone - greyed out "
+                        "before the detector and not tried (CBVD-5's far row is the top of the frame)")
+    p.add_argument("--target-recall", type=float, default=0.9,
+                   help="the size sweep suggests the smallest cut at which the detector finds this share")
     args = p.parse_args(argv)
 
     import torch
@@ -130,11 +138,19 @@ def main(argv=None):
     frames = val_keyframes(args.root)
     print(f"[eval-det] {len(frames)} val keyframes, {sum(len(v) for v in frames.values())} annotated cows; "
           f"detector {det.name} on {det.device}, threshold {threshold}{', tiles' if det.tiles else ''}", flush=True)
-    seen, det_ms = {}, []                                # (clip, ts) -> [(box, score, posture, activity)]
+    seen, det_ms, sizes = {}, [], {}                     # (clip, ts) -> [(box, score, posture, activity)]
     for n, (clip, ts) in enumerate(frames, 1):
         img = cbvd_frame(args.root, clip, ts)
+        sizes[(clip, ts)] = img.size
         t = time.perf_counter()
-        dets = det(img)
+        if args.exclude_above is not None:              # the far zone greyed out, as the barn does
+            from PIL import Image
+            from common import blank_excluded
+            img_det = Image.fromarray(blank_excluded(np.asarray(img), [[0, 0], [1, 0], [1, args.exclude_above],
+                                                                       [0, args.exclude_above]]))
+        else:
+            img_det = img
+        dets = det(img_det)
         det_ms.append((time.perf_counter() - t) * 1000)
         boxes = [c["bbox"] for c in dets]
         answers = []
@@ -151,15 +167,31 @@ def main(argv=None):
         print(f"\r  {n}/{len(frames)} frames", end="", flush=True)
     print(flush=True)
 
-    def at(thr):
-        """records (one per annotated cow) and found boxes at a score cut-off"""
-        records, found = [], {}
+    def zone_ok(key, box, min_area, min_side):
+        w, h = sizes[key]
+        far = args.exclude_above is not None and (box[1] + box[3]) / 2 < args.exclude_above
+        return not far and big_enough(box, w, h, min_area, min_side)
+
+    BORDER = 1.25    # a cow is scored only if clearly in the zone: area >= 1.25 x the cut (side 1.12 x)
+
+    def at(thr, min_area=args.min_box_area, min_side=args.min_box_side_px):
+        """records (one per annotated cow in the working zone) and found boxes at a score
+        cut-off. Boxes are cut as the barn cuts them (the detector's box against the
+        zone); a cow is scored only if her annotated box is clearly inside the zone, so
+        a cow just over the line whose detected box is a little smaller is not counted
+        as missed, and the boxes on such border cows are not counted as extra."""
+        records, found, zone_frames = [], {}, {}
         for key, gts in frames.items():
-            mine = [d for d in seen[key] if d[1] >= thr]
-            found[key] = [d[0] for d in mine]
-            pairs = detect_mod.match(found[key], [g["bbox"] for g in gts], args.iou)
+            core = [zone_ok(key, g["bbox"], min_area * BORDER, min_side * 1.12) for g in gts]
+            mine = [d for d in seen[key] if d[1] >= thr and zone_ok(key, d[0], min_area, min_side)]
+            pairs = detect_mod.match([d[0] for d in mine], [g["bbox"] for g in gts], args.iou)
             by_gt = {j: (i, v) for i, j, v in pairs}
+            on_border = {i for i, j, _ in pairs if not core[j]}
+            found[key] = [d[0] for i, d in enumerate(mine) if i not in on_border]
+            zone_frames[key] = [g for g, c in zip(gts, core) if c]
             for j, g in enumerate(gts):
+                if not core[j]:
+                    continue
                 if j in by_gt:
                     i, v = by_gt[j]
                     records.append(dict(g, posture=mine[i][2], activity=mine[i][3], det_bbox=mine[i][0],
@@ -167,16 +199,18 @@ def main(argv=None):
                 else:
                     records.append(dict(g, posture=None, activity=None, missed_by_detector=True,
                                         parse_error="not found by the detector"))
-        return records, found
+        return records, found, zone_frames
 
     table = []
     for thr in sweep:
-        recs, fnd = at(thr)
-        q = detector_quality(frames, fnd)["iou0.5"]
+        recs, fnd, zf = at(thr)
+        q = detector_quality(zf, fnd)["iou0.5"]
         table.append({"threshold": thr, **errors(recs), "recall": q["recall"], "precision": q["precision"],
                       "extra": q["extra"]})
     best = min(table, key=lambda r: (r["exact_error"], -r["threshold"]))
-    records, found = at(threshold)
+    records, found, zone_frames = at(threshold)
+    n_all = sum(len(v) for v in frames.values())
+    n_zone = sum(len(v) for v in zone_frames.values())
 
     with open(os.path.join(out_dir, "results.jsonl"), "w", encoding="utf-8") as fh:
         for r in records:
@@ -190,16 +224,42 @@ def main(argv=None):
                   "threshold": threshold, "tiles": det.tiles, "detector": det.name, "match_iou": args.iou,
                   "detector_ms_per_frame": round(float(np.median(det_ms)), 1) if det_ms else None},
         "prompt_sha": "herd", "videos": "", "excluded": []})
-    quality = detector_quality(frames, found)
+    quality = detector_quality(zone_frames, found)
     quality["ms_per_frame_p50"] = round(float(np.median(det_ms)), 1) if det_ms else None
     anno_path = os.path.join(args.run, "eval-val", "results.jsonl")
-    on_anno = None
+    anno = []
     if os.path.exists(anno_path):
         with open(anno_path, encoding="utf-8") as fh:
-            on_anno = errors([json.loads(line) for line in fh if line.strip()])
+            anno = [json.loads(line) for line in fh if line.strip()]
+    anno_in = lambda min_area, min_side: [r for r in anno if (str(r["video_id"]), r["timestamp"]) in sizes
+                                          and zone_ok((str(r["video_id"]), r["timestamp"]), r["bbox"],
+                                                      min_area * BORDER, min_side * 1.12)]
+    on_anno = errors(anno_in(args.min_box_area, args.min_box_side_px)) if anno else None
+
+    # How far out to stop trying: drop the smallest cows step by step (quantiles of the
+    # annotated box areas) and see what is left - share of cows still covered, the
+    # detector's recall on them, the error of the whole path.
+    areas = sorted((g["bbox"][2] - g["bbox"][0]) * (g["bbox"][3] - g["bbox"][1]) for v in frames.values() for g in v)
+    size_sweep = []
+    cuts = sorted({round(float(np.quantile(areas, qt)) / BORDER, 5) if qt else 0.0
+                   for qt in (0.0, 0.1, 0.2, 0.25, 0.3, 0.4, 0.5)})
+    for cut in cuts:
+        recs, fnd, zf = at(threshold, cut, args.min_box_side_px)
+        dq = detector_quality(zf, fnd)["iou0.5"]
+        e = errors(recs)
+        ea = errors(anno_in(cut, args.min_box_side_px)) if anno else None
+        size_sweep.append({"min_box_area": round(cut, 5), "cows_kept": e["n"], "cows_kept_share": e["n"] / max(1, n_all),
+                           "recall": dq["recall"], "precision": dq["precision"], "exact_error": e["exact_error"],
+                           "exact_error_found_cows": e["exact_error_found_cows"],
+                           "exact_error_annotated_boxes": ea["exact_error"] if ea else None})
+    ok = [r for r in size_sweep if r["recall"] >= args.target_recall]
+    suggest = ok[0] if ok else max(size_sweep, key=lambda r: r["recall"])
     res = {"detector": os.path.abspath(args.detector), "threshold": threshold, "tiles": det.tiles, "iou": args.iou,
            "detector_quality": quality, "on_detector_boxes": errors(records), "on_annotated_boxes": on_anno,
-           "threshold_sweep": table, "best_threshold": best["threshold"]}
+           "threshold_sweep": table, "best_threshold": best["threshold"],
+           "zone": {"min_box_area": args.min_box_area, "min_box_side_px": args.min_box_side_px,
+                    "exclude_above": args.exclude_above, "cows_in_zone": n_zone, "cows_all": n_all},
+           "size_sweep": size_sweep, "suggested_min_box_area": suggest["min_box_area"]}
     write_json(os.path.join(out_dir, "eval_det.json"), res)
     if args.out is None:                       # the run's own detector figures, next to eval_val.json
         write_json(os.path.join(args.run, "eval_det.json"), res)
@@ -218,6 +278,17 @@ def main(argv=None):
         print(f"   {r['threshold']:9.2f}  {r['exact_error']:11.1%}  {r['exact_error_found_cows'] or 0:8.1%}  "
               f"{r['recall']:6.1%}  {r['precision']:9.1%}  {r['extra']:11d}"
               + ("   <- lowest error" if r is best else "") + ("   <- in use" if r["threshold"] == round(threshold, 2) else ""))
+    if n_zone < n_all:
+        print(f"[eval-det] working zone: {n_zone} of {n_all} annotated cows ({n_zone / n_all:.0%}); the rest are "
+              "outside it and not tried (neither missed nor wrong)")
+    print(f"[eval-det] how far out to stop trying (threshold {threshold}): the smallest cows dropped step by step")
+    print("   min box area  cows kept  recall  precision  exact error  on found  on annotated boxes")
+    for r in size_sweep:
+        print(f"   {r['min_box_area']:12.4f}  {r['cows_kept_share']:9.0%}  {r['recall']:6.1%}  {r['precision']:9.1%}  "
+              f"{r['exact_error']:11.1%}  {r['exact_error_found_cows'] or 0:8.1%}  "
+              f"{pct(r['exact_error_annotated_boxes']):>18}" + ("   <- suggested" if r is suggest else ""))
+    print(f"[eval-det] suggested: [zone] min_box_area = {suggest['min_box_area']} (the smallest cut with detector "
+          f"recall >= {args.target_recall:.0%}); in the barn draw the far zone as `exclude` instead where you can")
     print(f"[eval-det] cowbench format: python cowbench/cowbench.py --out {out_dir} score")
     return 0
 

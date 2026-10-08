@@ -38,6 +38,7 @@ scaffold that switches on with the barn's footage (section 8).
 |---|---|---|
 | Find the cows in a frame | RT-DETRv2 detector (`cowbench/detector.py`, class `Live`) | works; on CBVD-5 finds 74% of cows (51% of the far ones), see section 6 |
 | Cameras overlap | a mask per camera in the config: a cow counts where her box centre is (`common.in_mask`) | works |
+| Far cows are not tried at all | working zone (`common.in_zone`): the camera's `exclude` polygons are greyed out before the detector, boxes under `[zone] min_box_area` / `min_box_side_px` are dropped before tracking | works; `eval-det` suggests the size cut (section 4.0) |
 | Follow a cow between frames | `pipeline.Tracker` (box overlap, once a second) | works |
 | Posture and activity every second | `model.FrameHeads` on the DINOv2 vector of the crop (`pipeline.Camera.second`) | works; error 2.4–2.6% posture, 17–19% activity (on annotated boxes) |
 | A 7 s, 25 fps burst a minute, cameras in turn | `pipeline.Camera.burst`, `step_burst` | works, tested with 5 cameras (section 6) |
@@ -102,6 +103,35 @@ Why it is built this way:
 ---
 
 ## 4. The models one by one
+
+### 4.0 Working zone — far cows are not tried
+
+A bigger detector did not fix far cows: in a side view they are a few dozen pixels,
+too small to find reliably, read a posture from or identify. So the system does not
+try. Every camera has a working zone, applied before anything else:
+
+- `exclude` polygons (per camera) — the far part of the view. They are greyed out in
+  the frame the detector gets, so a cow there never becomes a box, a track, a posture
+  or a NaN. Crops are still cut from the untouched frame. With cameras looking down
+  and overlapping, a camera's far floor is a neighbour's near floor: draw `exclude`
+  over it, and the neighbour's `mask` covers it.
+- `[zone] min_box_area` / `min_box_side_px` (global, or per camera) — boxes smaller
+  than this are dropped before tracking, wherever they are.
+- the camera `mask` (box centre) as before: which camera owns which floor.
+
+Dropped boxes are counted (`boxes_outside_zone` in the camera stats). Reports show
+observed minutes, so time a cow spent outside every camera's zone is "not observed",
+not NaN.
+
+How to choose the cut: `herd.py eval-det` prints a size sweep — drop the smallest
+cows step by step and see the share still covered, the detector's recall on them and
+the error of the whole path — and suggests the smallest cut at which the detector
+finds `--target-recall` (90%) of the cows left. To check a zone like the barn's,
+`--exclude-above 0.25` greys out the top quarter of the CBVD-5 frames (their far
+row) and `--min-box-area` applies a cut; cows outside the zone are then neither
+missed nor wrong. A cow is scored only if clearly inside the zone (1.25 x the cut),
+so one just over the line whose detected box is a little smaller is not counted as
+missed.
 
 ### 4.1 Detector (`cowbench/detector.py`)
 
@@ -250,7 +280,7 @@ bash herd/run_pod.sh stop
 | `train --features F --out R [--pos 1 --motion 1 --quality 1 --det-keys 1] [--extra-train ...]` | training (runs eval at the end) |
 | `eval --features F --out R [--extra-val ...]` | evaluate again |
 | `abstain --features F --run R` | NaN model |
-| `eval-det --run R [--tiles 1] [--threshold t]` | the whole path on the detector's boxes, threshold sweep |
+| `eval-det --run R [--tiles 1] [--threshold t] [--min-box-area a] [--exclude-above y]` | the whole path on the detector's boxes, threshold sweep, size sweep for the working zone |
 | `stress --model M --detector D` | load test |
 | `run --config barn.toml` | run in the barn |
 | `report --config barn.toml csv\|alerts\|verdict\|alert-stats\|daily` | reports |
@@ -316,6 +346,8 @@ be checked on the barn's data.
      this camera alone (0–1 coordinates). Every patch of floor must be in exactly one
      mask;
    - `[model] checkpoint`, `[detector] weights` (and `threshold` from `eval-det`);
+   - the working zone: per camera `exclude` (the far part of its view) and
+     `[zone] min_box_area` (from `eval-det`'s size sweep), section 4.0;
    - `[store] path` — where the SQLite file, the gallery and the cache go.
 2. Run: `python herd/herd.py run --config barn.toml`. For recorded files instead of
    RTSP: `--start 2026-10-07T06:00` and `url` = the file's path.
