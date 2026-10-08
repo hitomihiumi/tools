@@ -123,6 +123,12 @@ Dropped boxes are counted (`boxes_outside_zone` in the camera stats). Reports sh
 observed minutes, so time a cow spent outside every camera's zone is "not observed",
 not NaN.
 
+To see it: `python herd/show_zone.py --root /workspace/cbvd5 --clip 371 --ts 5
+--exclude-above 0.25 --min-box-area 0.008 [--detector D]` draws a frame with every cow
+kept (green), dropped as too small (orange) or in the far zone (red), above the frame
+the detector actually gets; `--config barn.toml --camera cam1 --image cam1.jpg` shows a
+barn camera's own zone.
+
 How to choose the cut: `herd.py eval-det` prints a size sweep — drop the smallest
 cows step by step and see the share still covered, the detector's recall on them and
 the error of the whole path — and suggests the smallest cut at which the detector
@@ -509,6 +515,7 @@ model sees fine detail: coat pattern, the jaw.
 | `stress.py` | load test |
 | `barn_dataset.py` | the barn cache, the track sheet, building the identity training set |
 | `show_crops.py` | a picture of what the model sees (boxes, crops, a burst) |
+| `show_zone.py` | a picture of the working zone: which cows are kept, which are not tried |
 | `run_pod.sh` | everything on a GPU pod with one command |
 | `config.example.toml` | example barn config |
 | `tests/` | `python herd/tests/run_all.py` |
