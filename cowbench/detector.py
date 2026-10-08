@@ -108,7 +108,7 @@ def nms(boxes, iou=0.5):
     return out
 
 
-def predict_tiled(model, processor, images, keep=KEEP_SCORE, overlap=0.2, batch=12):
+def predict_tiled(model, processor, images, keep=KEEP_SCORE, overlap=0.2, batch=12, predict_fn=None):
     """predict() on each whole frame plus its square tiles, boxes mapped back to
     the frame and merged by NMS. A tile box touching a cut inside the frame is
     dropped (half a cow; the neighbouring tile or the whole frame has her)."""
@@ -120,7 +120,8 @@ def predict_tiled(model, processor, images, keep=KEEP_SCORE, overlap=0.2, batch=
     found = [[] for _ in images]
     for i in range(0, len(jobs), batch):
         chunk = jobs[i:i + batch]
-        for (k, t, _), boxes in zip(chunk, predict(model, processor, [j[2] for j in chunk], keep)):
+        run = predict_fn or (lambda ims, kp: predict(model, processor, ims, kp))
+        for (k, t, _), boxes in zip(chunk, run([j[2] for j in chunk], keep)):
             if t is None:
                 found[k] += boxes
                 continue
@@ -315,10 +316,26 @@ class Live:
 
     def __init__(self, best_dir, threshold=None, tiles=None):
         import threading
-        from transformers import RTDetrV2ForObjectDetection
         with open(os.path.join(best_dir, "det_train_meta.json"), encoding="utf-8") as fh:
             meta = json.load(fh)
+        self._predict = None                   # images, keep -> [[x1, y1, x2, y2, score], ...] per image
+        if meta.get("kind") == "rfdetr":       # RF-DETR (rfdetr_det.py): same boxes, same thresholds
+            import rfdetr_det
+            self.model, self._predict, dev = rfdetr_det.load(best_dir, meta)
+        else:
+            self._load_rtdetr(best_dir, meta)
+            dev = self.model.device
+        self.threshold = meta["threshold"] if threshold is None else threshold
+        # tiles: the whole frame plus square tiles (predict_tiled) - ~3x the work,
+        # far cows ~1.8x wider; by default as the detector was chosen with
+        self.tiles = bool(meta.get("tiles", False)) if tiles is None else bool(tiles)
+        self.name = meta["base_model"]
+        self.device = str(dev)
+        self._lock = threading.Lock()
+
+    def _load_rtdetr(self, best_dir, meta):
         import torch
+        from transformers import RTDetrV2ForObjectDetection
         self.processor = processor_for(best_dir, meta["size"])
         model = RTDetrV2ForObjectDetection.from_pretrained(best_dir)
         dev = device()
@@ -332,16 +349,8 @@ class Live:
             print(f"!! no GPU memory left for the detector ({e.__class__.__name__}) - running it on the CPU",
                   flush=True)
             torch.cuda.empty_cache()
-            dev = torch.device("cpu")
-            model = model.to(dev)
+            model = model.to(torch.device("cpu"))
         self.model = model.eval()
-        self.threshold = meta["threshold"] if threshold is None else threshold
-        # tiles: the whole frame plus square tiles (predict_tiled) - ~3x the work,
-        # far cows ~1.8x wider; by default as the detector was chosen with
-        self.tiles = bool(meta.get("tiles", False)) if tiles is None else bool(tiles)
-        self.name = meta["base_model"]
-        self.device = str(dev)
-        self._lock = threading.Lock()
 
     def __call__(self, img):
         """PIL image -> [{"bbox": [x1, y1, x2, y2] (0-1), "det_score"}], above the threshold."""
@@ -351,8 +360,12 @@ class Live:
         """Several PIL images in one pass (herd's bursts): a list per image."""
         with self._lock:
             # keep=threshold: nothing below it is used, and NMS over tiles stays small
-            res = (predict_tiled if self.tiles else predict)(self.model, self.processor, list(imgs),
-                                                              keep=self.threshold)
+            if self._predict is not None:
+                res = (predict_tiled(None, None, list(imgs), keep=self.threshold, predict_fn=self._predict)
+                       if self.tiles else self._predict(list(imgs), self.threshold))
+            else:
+                res = (predict_tiled if self.tiles else predict)(self.model, self.processor, list(imgs),
+                                                                  keep=self.threshold)
         return [[{"bbox": b[:4], "det_score": b[4]} for b in boxes if b[4] >= self.threshold] for boxes in res]
 
 

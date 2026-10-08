@@ -155,6 +155,15 @@ cow boxes with a score. Settings that matter:
   parameters, Apache-2.0, never tried before); `DET_MODEL=PekingU/rtdetr_v2_r50vd`
   trains the R50 (~42M) used so far, for a like-for-like comparison.
 
+RF-DETR (Roboflow; sizes N/S/M/L are Apache-2.0, XL/2XL are not) can replace
+RT-DETRv2: `DET_ARCH=rfdetr bash herd/run_pod.sh detector` (`cowbench/rfdetr_det.py`)
+trains it on the same CBVD-5 boxes and held-out clips and writes a `best/` folder the
+rest of the system loads like any detector (`detector.Live` reads `"kind": "rfdetr"`
+from `det_train_meta.json`). Its backbone is DINOv2 too, but it does not replace the
+frame encoder below: the detector's features are tuned to find boxes at frame
+resolution, where a far cow is a few patches, while the encoder sees each cow at
+224x224.
+
 ### 4.2 Frame encoder — DINOv2-S (`model.FrameEncoder`)
 
 Frozen. Turns a 224x224 crop into a vector: CLS + the patch tokens pooled over a

@@ -21,6 +21,9 @@
 #                                 the first herd runs used (~42M); DET_TAG=fhd_r101 (fhd_r50 for r50vd).
 #                                 The first detector's own settings, only the backbone swapped:
 #                                 DET_SIZE=960 DET_ZOOM=0 DET_TILES=0 DET_SELECT=f1 DET_TAG=r101_960
+#                                 DET_ARCH=rfdetr: RF-DETR instead (DINOv2 backbone; cowbench/rfdetr_det.py),
+#                                 RF_SIZE=large|medium|small|nano, DET_RES (input side), DET_EPOCHS=30
+#                                 -> WORK/herd/detector_rfdetr_<size>; installs rfdetr[train] if missing
 #
 # Every step resumes: features are written clip by clip, so a rerun after a
 # crash continues where it stopped. Knobs:
@@ -110,15 +113,31 @@ case "${1:-}" in
         echo "result: $SOUT/stress_herd_${CAMERAS:-5}cam.md"
         exit 0 ;;
     detector)
-        DET_MODEL="${DET_MODEL:-PekingU/rtdetr_v2_r101vd}"
-        DET_TAG="${DET_TAG:-fhd_$(echo "$DET_MODEL" | sed -n 's/.*_\(r[0-9]*\)vd$/\1/p')}"
-        DOUT="$WORK/herd/detector_${DET_TAG}"
+        [ -x "$VENV/bin/python" ] && [ -f "$DATA/annotations/ava_train_v2.1.csv" ] || {
+            echo "no environment or CBVD-5 yet: run 'bash $0' once first (steps 1-2 set them up)"; exit 1; }
+        q() { printf '%q ' "$@"; }
+        if [ "${DET_ARCH:-rtdetr}" = "rfdetr" ]; then
+            # RF-DETR (DINOv2 backbone, Apache-2.0 sizes): cowbench/rfdetr_det.py
+            RF_SIZE="${RF_SIZE:-large}"
+            DET_TAG="${DET_TAG:-rfdetr_$RF_SIZE}"
+            DOUT="$WORK/herd/detector_${DET_TAG}"
+            export PATH="$HOME/.local/bin:$PATH"
+            "$VENV/bin/python" -c "import rfdetr, pytorch_lightning" 2>/dev/null || \
+                uv pip install --python "$VENV/bin/python" "rfdetr[train]"
+            train="$(q "$VENV/bin/python" "$REPO/cowbench/rfdetr_det.py" train --root "$DATA" --out "$DOUT" \
+                       --size "$RF_SIZE" --epochs "${DET_EPOCHS:-30}" --batch "${DET_BATCH:-8}" \
+                       --tiles "${DET_TILES:-0}" --select "${DET_SELECT:-f1}" \
+                       ${DET_RES:+--resolution "$DET_RES"})"
+        else
+            DET_MODEL="${DET_MODEL:-PekingU/rtdetr_v2_r101vd}"
+            DET_TAG="${DET_TAG:-fhd_$(echo "$DET_MODEL" | sed -n 's/.*_\(r[0-9]*\)vd$/\1/p')}"
+            DOUT="$WORK/herd/detector_${DET_TAG}"
+            train="$(q "$VENV/bin/python" "$REPO/cowbench/detector.py" train --root "$DATA" --out "$DOUT" \
+                       --model "$DET_MODEL" --size "${DET_SIZE:-1088}" --zoom "${DET_ZOOM:-0.5}" --tiles "${DET_TILES:-1}" --select "${DET_SELECT:-f2}" \
+                       --epochs "${DET_EPOCHS:-24}" --batch "${DET_BATCH:-8}")"
+        fi
         mkdir -p "$DOUT"
         LAST="$(basename "$(dirname "$(ls -t "$WORK"/herd/*/model.pt 2>/dev/null | head -1)")" 2>/dev/null || true)"
-        q() { printf '%q ' "$@"; }
-        train="$(q "$VENV/bin/python" "$REPO/cowbench/detector.py" train --root "$DATA" --out "$DOUT" \
-                   --model "$DET_MODEL" --size "${DET_SIZE:-1088}" --zoom "${DET_ZOOM:-0.5}" --tiles "${DET_TILES:-1}" --select "${DET_SELECT:-f2}" \
-                   --epochs "${DET_EPOCHS:-24}" --batch "${DET_BATCH:-8}")"
         evald=""
         if [ -n "$LAST" ] && [ -f "$WORK/herd/$LAST/model.pt" ]; then
             evald="&& $(q "$VENV/bin/python" "$HERE/herd.py" eval-det --run "$WORK/herd/$LAST" --detector "$DOUT/best" \
