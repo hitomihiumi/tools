@@ -7,6 +7,14 @@ next to the frame the detector actually gets (the far zone greyed out).
     python herd/show_zone.py --root /workspace/cbvd5 --clip 371 --ts 5 --detector /workspace/lora-runs/detector/best ...
     python herd/show_zone.py --image barn.jpg --boxes "0.1,0.2,0.3,0.5;..." --exclude "0,0 1,0 1,0.2 0,0.2" ...
     python herd/show_zone.py --config barn.toml --camera cam1 --image cam1.jpg --detector D   # a barn camera's own zone
+    python herd/show_zone.py --root /workspace/cbvd5 --clip 371 --ts 5 --detector D --compare  # detector vs annotation
+
+--compare (CBVD-5 frames with a detector): the annotation's boxes and the
+detector's on one picture - what eval-det counts as found, missed and extra:
+green  the detector's box on an annotated cow (IoU >= 0.5)
+yellow found, but the boxes disagree (IoU 0.3-0.5): counted missed AND extra at 0.5
+red    an annotated cow the detector has no box for (thin blue: the annotation)
+magenta a detector box on no annotated cow (a cow the annotation left out, or a false box)
 
 Colours: green - kept (tracked, identified); orange - dropped, too small
 (min_box_pct: % of the frame / min_box_side_px: short side in pixels); red - dropped, centre in the excluded far zone.
@@ -69,6 +77,51 @@ def draw(img, boxes, cam, show_dropped=True, shade=True):
     return pil, counts
 
 
+def compare(img, gts, args, name):
+    import detect as detect_mod
+    import detector as det_mod
+    det = det_mod.Live(args.detector, args.threshold)
+    found = det(Image.fromarray(img))
+    dets = [c["bbox"] for c in found]
+    good = detect_mod.match(dets, gts, 0.5)
+    used_d, used_g = {i for i, _, _ in good}, {j for _, j, _ in good}
+    rest_d = [i for i in range(len(dets)) if i not in used_d]
+    rest_g = [j for j in range(len(gts)) if j not in used_g]
+    loose = [(rest_d[i], rest_g[j], v) for i, j, v in
+             detect_mod.match([dets[i] for i in rest_d], [gts[j] for j in rest_g], 0.3)]
+    loose_d, loose_g = {i for i, _, _ in loose}, {j for _, j, _ in loose}
+    h, w = img.shape[:2]
+    pil = Image.fromarray(img).convert("RGB")
+    d = ImageDraw.Draw(pil)
+    lw, f = max(2, w // 450), font(max(14, w // 75))
+    px = lambda b: [b[0] * w, b[1] * h, b[2] * w, b[3] * h]
+    BLUE, YELLOW, MAGENTA = (60, 140, 255), (255, 220, 0), (230, 40, 230)
+    for j, g in enumerate(gts):                                   # the annotation, thin blue
+        d.rectangle(px(g), outline=RED if (j not in used_g and j not in loose_g) else BLUE, width=max(1, lw - 1))
+    for i, gj, v in good:
+        d.rectangle(px(dets[i]), outline=GREEN, width=lw)
+    for i, gj, v in loose:
+        d.rectangle(px(dets[i]), outline=YELLOW, width=lw)
+        b = px(dets[i])
+        d.text((b[0] + 3, b[1] + 3), f"IoU {v:.2f}", fill=YELLOW, font=f)
+    for i in range(len(dets)):
+        if i not in used_d and i not in loose_d:
+            d.rectangle(px(dets[i]), outline=MAGENTA, width=lw)
+    for j in range(len(gts)):
+        if j not in used_g and j not in loose_g:
+            b = px(gts[j])
+            d.line([b[0], b[1], b[2], b[3]], fill=RED, width=lw)
+            d.line([b[0], b[3], b[2], b[1]], fill=RED, width=lw)
+    n_miss = len(gts) - len(good) - len(loose)
+    n_extra = len(dets) - len(good) - len(loose)
+    out = label(pil.resize((args.width, int(h * args.width / w))),
+                f"{name}, threshold {det.threshold}: {len(gts)} annotated, {len(dets)} detected - found {len(good)} "
+                f"(green), boxes disagree {len(loose)} (yellow), missed {n_miss} (red X), extra {n_extra} (magenta)", 15)
+    out.save(args.out)
+    print(f"{args.out}: annotated {len(gts)}, detected {len(dets)}, found {len(good)}, loose {len(loose)}, "
+          f"missed {n_miss}, extra {n_extra}")
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--root", default="/workspace/cbvd5")
@@ -86,6 +139,8 @@ def main(argv=None):
     p.add_argument("--min-box-side-px", type=int, default=None)
     p.add_argument("--width", type=int, default=1280, help="width of each panel")
     p.add_argument("--out", default="zone.png")
+    p.add_argument("--compare", action="store_true", help="annotation vs detector on one picture (needs --detector)")
+    p.add_argument("--threshold", type=float, default=None, help="detector score cut-off (default: its own)")
     args = p.parse_args(argv)
 
     cam = {}
@@ -115,9 +170,13 @@ def main(argv=None):
         boxes = [list(b.xyxy) for b in found]
         name = f"clip {args.clip} at {args.ts} s"
     src = "annotation"
+    if args.compare:
+        if not args.detector or args.image:
+            sys.exit("--compare needs a CBVD-5 frame (--clip, --ts) and --detector")
+        return compare(img, boxes, args, name)
     if args.detector:
         import detector as det_mod
-        det = det_mod.Live(args.detector)
+        det = det_mod.Live(args.detector, args.threshold)
         boxes = [c["bbox"] for c in det(Image.fromarray(img))]           # all it finds, before the zone
         src = f"detector, threshold {det.threshold}"
 
