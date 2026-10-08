@@ -87,10 +87,16 @@ def load(best_dir, meta):
     """best/ -> (model, predict(images, keep) -> [[x1, y1, x2, y2, score] 0-1 ...] per image, device)."""
     from rfdetr import RFDETR
     model = RFDETR.from_checkpoint(os.path.join(best_dir, meta["checkpoint"]), trust_checkpoint=True)
+    # Inference mode: fp16 on a GPU, no compile (the batch size varies: tiles, bursts).
+    # rfdetr >= 1.11 calls it inference(); older versions optimize_for_inference().
+    import torch
     try:
-        model.optimize_for_inference()
-    except Exception as e:                    # an older rfdetr, or no room: plain inference still works
-        print(f"[rfdetr] running without optimize_for_inference ({e.__class__.__name__})", flush=True)
+        if hasattr(model, "inference"):
+            model.inference(compile=False, dtype=torch.float16 if torch.cuda.is_available() else torch.float32)
+        else:
+            model.optimize_for_inference()
+    except Exception as e:                    # plain inference still works, only slower
+        print(f"[rfdetr] running without the inference optimisation ({e.__class__.__name__}: {e})", flush=True)
     resolution = meta.get("size")
 
     def predict(images, keep=0.05):
