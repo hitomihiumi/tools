@@ -29,6 +29,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from common import load_config  # noqa: E402
 
+# the decoder's complaints while checking (a frame read without its reference after a jump) are not news
+os.environ.setdefault("OPENCV_FFMPEG_LOGLEVEL", "-8")
+
 
 def command(url, seconds, path):
     """The stream copied as it is into path (.mkv): over TCP, time stamps made where the camera's are
@@ -45,8 +48,25 @@ def to_mp4(src, dst):
     return r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0
 
 
-def check(path):
-    """How long the file is, how many frames it holds, and whether its last seconds read -> (text, ok)."""
+def decoded_share(path):
+    """Every frame read in order, as the tools read a recording: the share that decodes (a stream that lost
+    packets on the way has frames without their slices or references)."""
+    import cv2
+    cap = cv2.VideoCapture(path)
+    good = bad = run = 0
+    while run < 200:
+        if cap.read()[0]:
+            good, run = good + 1, 0
+        else:
+            bad, run = bad + 1, run + 1
+    cap.release()
+    bad -= run                                       # the reads past the end
+    return good, max(0, bad)
+
+
+def check(path, full=False):
+    """How long the file is, how many frames it holds, and whether its last seconds read -> (text, ok).
+    full: every frame decoded in order too (minutes for an hour of HEVC)."""
     import cv2
     info = {}
     try:
@@ -69,14 +89,30 @@ def check(path):
     secs = info.get("seconds") or 0
     ok_end = False
     if ok_start and secs > 3:
-        cap.set(cv2.CAP_PROP_POS_MSEC, (secs - 2) * 1000)
-        ok_end = any(cap.read()[0] for _ in range(50))
+        # the last 20 s read in order: a camera's key frames may be seconds apart, and frames read right
+        # after a jump have nothing to decode from - so not a jump to the last second
+        cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, secs - 20) * 1000)
+        last, fails = 0.0, 0
+        while fails < 200:
+            if cap.read()[0]:
+                fails = 0
+                last = max(last, cap.get(cv2.CAP_PROP_POS_MSEC) / 1000)
+            else:
+                fails += 1
+        ok_end = last >= secs - 3
     cap.release()
     fps = info.get("frames", 0) / secs if secs else 0
     ok = ok_start and (ok_end or secs <= 3) and info.get("frames", 0) > 0
     text = (f"{secs / 60:.1f} min, {info.get('frames', 0)} frames ({fps:.1f} a second), {info.get('codec', '?')}; "
             + ("reads to the end" if ok else "!! " + ("does not read at all" if not ok_start else
                                                     "its end does not read")))
+    if full and ok_start:
+        good, bad = decoded_share(path)
+        share = good / max(1, good + bad)
+        text += f"; {good} frames decode in order ({share:.0%})"
+        if share < 0.95:
+            text += " !! damaged frames"
+            ok = False
     return text, ok
 
 
@@ -96,7 +132,7 @@ def main(argv=None):
         files = sorted(f for f in os.listdir(args.check) if f.lower().endswith(VIDEO_EXT))
         bad = 0
         for f in files:
-            text, ok = check(os.path.join(args.check, f))
+            text, ok = check(os.path.join(args.check, f), full=True)
             bad += not ok
             print(f"[record] {f}: {text}", flush=True)
         if bad:
