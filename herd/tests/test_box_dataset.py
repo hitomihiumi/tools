@@ -244,6 +244,15 @@ def test_record_names_files_as_the_tools_read_them():
         assert record.main(["--config", cfg, "--out", out, "--minutes", "0.05", "--cameras", "cam2"]) == 0
         recs, bad = common.recordings(out, ["cam1", "cam2"], 2)
         assert [c for c, _, _ in recs] == ["cam2"] and not bad
+        # the streams named on the command line: those cameras, a camera the config lacks too
+        out2 = os.path.join(d, "rec2")
+        assert record.main(["--config", cfg, "--out", out2, "--minutes", "0.05", "--url", f"cam1={src}",
+                            f"cam9={src}"]) == 0
+        recs, bad = common.recordings(out2, ["cam1", "cam2", "cam9"], 2)
+        assert sorted(c for c, _, _ in recs) == ["cam1", "cam9"] and not bad
+        import cv2
+        cap = cv2.VideoCapture(recs[0][1])                     # the fragmented mp4 reads back
+        assert cap.read()[0]
 
 
 def test_zones_page_and_apply():
