@@ -238,7 +238,7 @@ def test_record_names_files_as_the_tools_read_them():
                              f'[[cameras]]\nid = "cam2"\nurl = "{src}"\n')
         import shutil
         if not shutil.which("ffmpeg"):
-            assert record.command("rtsp://x", 60, "o.mp4")[5:7] == ["-rtsp_transport", "tcp"]
+            assert record.command("rtsp://x", 60, "o.mkv")[5:7] == ["-rtsp_transport", "tcp"]
             return
         out = os.path.join(d, "rec")
         assert record.main(["--config", cfg, "--out", out, "--minutes", "0.05", "--cameras", "cam2"]) == 0
@@ -250,9 +250,8 @@ def test_record_names_files_as_the_tools_read_them():
                             f"cam9={src}"]) == 0
         recs, bad = common.recordings(out2, ["cam1", "cam2", "cam9"], 2)
         assert sorted(c for c, _, _ in recs) == ["cam1", "cam9"] and not bad
-        import cv2
-        cap = cv2.VideoCapture(recs[0][1])                     # the fragmented mp4 reads back
-        assert cap.read()[0]
+        assert all(p.endswith(".mp4") for _, p, _ in recs) and not any(f.endswith(".mkv") for f in os.listdir(out2))
+        assert record.main(["--config", cfg, "--out", out2, "--check", out2]) == 0     # every file reads to its end
 
 
 def test_zones_page_and_apply():

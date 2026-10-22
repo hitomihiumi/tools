@@ -7,8 +7,10 @@ at once, for --minutes, into OUT/<camera>_<local start time>.mp4 (ffmpeg, the st
     python herd/herd.py record --config barn.toml --out /srv/herd/rec --minutes 60 \
         --url cam1=rtsp://user:pass@10.0.0.11:554/stream1 cam2=rtsp://...     (the config's urls left as they are)
 
-The files are written so that one cut short (Ctrl+C, the computer asleep, the network gone) is still
-readable up to where it stopped.
+Each camera is written to a Matroska file first (.mkv: one cut short - Ctrl+C, the computer asleep, the
+network gone - still reads up to where it stopped), then copied into a plain .mp4 that every player plays
+(the .mkv is kept when that fails, or with --keep-mkv). Every file is checked at the end: how many seconds
+and frames it holds, and that its last seconds read. --check DIR checks recordings already made.
 
 Then: herd.py barn video / herd.py boxes frames --videos OUT (SETUP.md sections 11-12).
 """
@@ -29,10 +31,53 @@ from common import load_config  # noqa: E402
 
 
 def command(url, seconds, path):
+    """The stream copied as it is into path (.mkv): over TCP, time stamps made where the camera's are
+    missing, damaged packets dropped (a camera's stream has them; HEVC 'too short RTP packet')."""
     rtsp = ["-rtsp_transport", "tcp"] if url.startswith("rtsp") else []
-    # fragmented mp4: readable however the recording ends (a plain mp4 is unreadable without its end)
-    return ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", *rtsp, "-i", url, "-t", str(seconds),
-            "-c", "copy", "-an", "-movflags", "+frag_keyframe+empty_moov+default_base_moof", path]
+    return ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", *rtsp, "-fflags", "+genpts+discardcorrupt",
+            "-i", url, "-t", str(seconds), "-map", "0:v:0", "-c", "copy", "-an", path]
+
+
+def to_mp4(src, dst):
+    """The finished .mkv copied into a plain .mp4 (index at the front: every player plays it)."""
+    r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src, "-map", "0:v:0", "-c", "copy",
+                        "-movflags", "+faststart", dst])
+    return r.returncode == 0 and os.path.exists(dst) and os.path.getsize(dst) > 0
+
+
+def check(path):
+    """How long the file is, how many frames it holds, and whether its last seconds read -> (text, ok)."""
+    import cv2
+    info = {}
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries",
+                              "stream=codec_name,nb_read_packets,r_frame_rate:format=duration", "-of", "json", path],
+                             capture_output=True, text=True, timeout=600).stdout
+        import json
+        j = json.loads(out or "{}")
+        st = (j.get("streams") or [{}])[0]
+        info = {"codec": st.get("codec_name", "?"), "frames": int(st.get("nb_read_packets") or 0),
+                "seconds": float((j.get("format") or {}).get("duration") or 0)}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    cap = cv2.VideoCapture(path)
+    if not info.get("frames"):                       # no ffprobe: what OpenCV says
+        n, rate = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0, cap.get(cv2.CAP_PROP_FPS) or 0
+        if n > 0 and 1 <= rate <= 120:
+            info = {"codec": info.get("codec", "?"), "frames": int(n), "seconds": n / rate}
+    ok_start = cap.read()[0]
+    secs = info.get("seconds") or 0
+    ok_end = False
+    if ok_start and secs > 3:
+        cap.set(cv2.CAP_PROP_POS_MSEC, (secs - 2) * 1000)
+        ok_end = any(cap.read()[0] for _ in range(50))
+    cap.release()
+    fps = info.get("frames", 0) / secs if secs else 0
+    ok = ok_start and (ok_end or secs <= 3) and info.get("frames", 0) > 0
+    text = (f"{secs / 60:.1f} min, {info.get('frames', 0)} frames ({fps:.1f} a second), {info.get('codec', '?')}; "
+            + ("reads to the end" if ok else "!! " + ("does not read at all" if not ok_start else
+                                                    "its end does not read")))
+    return text, ok
 
 
 def main(argv=None):
@@ -43,7 +88,20 @@ def main(argv=None):
     p.add_argument("--cameras", nargs="*", default=None, help="only these camera ids")
     p.add_argument("--url", nargs="*", default=[], metavar="CAM=URL",
                    help="the stream of a camera, in place of the config's url (and a camera the config lacks)")
+    p.add_argument("--keep-mkv", action="store_true", help="keep the .mkv beside the .mp4")
+    p.add_argument("--check", default=None, metavar="DIR", help="only check the recordings in DIR")
     args = p.parse_args(argv)
+    if args.check:
+        from common import VIDEO_EXT
+        files = sorted(f for f in os.listdir(args.check) if f.lower().endswith(VIDEO_EXT))
+        bad = 0
+        for f in files:
+            text, ok = check(os.path.join(args.check, f))
+            bad += not ok
+            print(f"[record] {f}: {text}", flush=True)
+        if bad:
+            print("[record] the ones marked !! : herd.py fix-videos makes them readable", flush=True)
+        return 1 if bad else 0
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg is not installed (the Docker image has it; on a server: apt install ffmpeg)")
     cfg = load_config(args.config)
@@ -70,19 +128,34 @@ def main(argv=None):
     seconds = int(args.minutes * 60)
     procs = []
     for c in cams:
-        path = os.path.join(args.out, f"{c['id']}_{start:%Y-%m-%d_%H-%M-%S}.mp4")
+        path = os.path.join(args.out, f"{c['id']}_{start:%Y-%m-%d_%H-%M-%S}.mkv")
         procs.append((c["id"], path, subprocess.Popen(command(c["url"], seconds, path))))
     print(f"[record] {len(procs)} cameras for {args.minutes:g} min from {start:%Y-%m-%d %H:%M:%S} -> {args.out}",
           flush=True)
     t0 = time.time()
     bad = 0
+    try:
+        for _, _, pr in procs:
+            pr.wait()
+    except KeyboardInterrupt:                        # stopped early: what is recorded is kept (the .mkv reads)
+        print("[record] stopped - keeping what was recorded", flush=True)
+        for _, _, pr in procs:
+            pr.wait()
     for cam, path, pr in procs:
-        code = pr.wait()
         size = os.path.getsize(path) / 2 ** 20 if os.path.exists(path) else 0
-        ok = code == 0 and size > 0
+        if not size:
+            bad += 1
+            print(f"[record] {cam}: nothing recorded  !! ffmpeg exit {pr.returncode} - check its url", flush=True)
+            continue
+        final = path
+        mp4 = path[:-4] + ".mp4"
+        if to_mp4(path, mp4):
+            final = mp4
+            if not args.keep_mkv:
+                os.remove(path)
+        text, ok = check(final)
         bad += not ok
-        print(f"[record] {cam}: {path} {size:.0f} MB" + ("" if ok else f"  !! ffmpeg exit {code} - check its url"),
-              flush=True)
+        print(f"[record] {cam}: {final} {os.path.getsize(final) / 2 ** 20:.0f} MB, {text}", flush=True)
     print(f"[record] done in {(time.time() - t0) / 60:.1f} min")
     return 1 if bad else 0
 
