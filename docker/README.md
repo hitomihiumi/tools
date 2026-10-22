@@ -340,7 +340,8 @@ track_fps = 4
 
 the detector and the tracker also look at 3 frames between the seconds; what is written (posture,
 identity, a row a second) stays once a second. The detector's work on the seconds is 4 times as much:
-the rehearsal takes longer, and live the GPU must keep up (`run` prints how far behind it is).
+the rehearsal takes longer, and live the GPU must keep up - when it does not, seconds are missed
+(`seconds_missed` in the camera's counts).
 
 **One cow, one track across cameras.** A cow's tracks on two cameras are joined only when both see her
 at once - so the masks (where a camera counts) share no floor, and at least one camera of each pair has
