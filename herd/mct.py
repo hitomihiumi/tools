@@ -40,7 +40,7 @@ import time
 
 import numpy as np
 
-from common import floor_mapper, in_polygon, iou, same_place
+from common import floor_mapper, in_mask, in_polygon, iou, same_place
 
 NEG = -1e9
 
@@ -695,6 +695,52 @@ class TrackletLinker:
         self.store, self.apart = store, apart
         self.stats = collections.Counter()
         self.lock = threading.Lock()
+        # neighbours with no floor mapping between them (a narrow strip along a fence gives none): a cow one
+        # camera sees beyond its own mask (its tracking_mask) is a cow the other counts - joined by look,
+        # her frame ids over look_min_s seconds clearly nearest (look_margin) to one of the other's cows
+        self.masks = {c["id"]: c.get("mask") or [] for c in cfg["cameras"]}
+        self.by_look = sorted({tuple(sorted(p)) for p in m.get("neighbours", [])
+                               if self.floor.get(p[0]) is None or self.floor.get(p[1]) is None})
+        self.look = {}                                         # (visitor, owner) -> (sum of cos, seconds)
+        self.look_min_s = m.get("look_min_s", 10)
+        self.look_min_sim = m.get("look_min_sim", m.get("handover_min_sim", 0.5))
+        self.look_margin = m.get("look_margin", 0.05)
+
+    def _by_look(self, ts, per_cam, ids):
+        """Neighbours without a floor mapping: a cow camera x sees beyond its mask against the cows camera y
+        counts (in its mask) at the same second; joined when, over look_min_s seconds, one of them is
+        clearly the nearest by look, and she has no rival visitor as near."""
+        mean = lambda k: self.look[k][0] / self.look[k][1]
+        for a, b in self.by_look:
+            for x, y in ((a, b), (b, a)):
+                if x not in per_cam or y not in per_cam or not self.masks[x]:
+                    continue
+                vis = [(self.root(g), np.asarray(d["emb"], np.float32)) for g, d in zip(ids[x], per_cam[x])
+                       if d.get("emb") is not None and not in_mask(d["box"], self.masks[x])]
+                own = [(self.root(g), np.asarray(d["emb"], np.float32)) for g, d in zip(ids[y], per_cam[y])
+                       if d.get("emb") is not None and in_mask(d["box"], self.masks[y])]
+                for v, ev in vis:
+                    for o, eo in own:
+                        if v != o:
+                            sm, n = self.look.get((v, o), (0.0, 0))
+                            self.look[(v, o)] = (sm + float(np.dot(ev, eo)), n + 1)
+                for v, _ in vis:
+                    cand = sorted(((mean((v, o)), self.look[(v, o)][1], o) for o, _ in own
+                                   if v != o and (v, o) in self.look), reverse=True)
+                    if not cand or cand[0][1] < self.look_min_s or cand[0][0] < self.look_min_sim:
+                        continue
+                    best, _, o = cand[0]
+                    if len(cand) > 1 and best - cand[1][0] < self.look_margin:
+                        self.stats["look_ambiguous"] += 1
+                        continue
+                    rivals = [mean((v2, o)) for v2, _ in vis if v2 != v and (v2, o) in self.look]
+                    if rivals and best - max(rivals) < self.look_margin:
+                        self.stats["look_ambiguous"] += 1
+                        continue
+                    if self.root(v) != self.root(o):
+                        before = self.stats["linked"]
+                        self._union(v, o, ts)
+                        self.stats["joined_by_look"] += self.stats["linked"] - before
 
     def root(self, t):
         while self.parent.get(t, t) != t:
@@ -761,6 +807,8 @@ class TrackletLinker:
                     c, first, _ = self.life.get(g, (cam, ts, ts))
                     self.life[g] = (cam, first, ts)
                     self.members.setdefault(g, set())
+            if self.by_look:
+                self._by_look(ts, per_cam, ids)
             if self.disjoint and self.apart is not None:       # cameras with no floor in common: two cows
                 apart = [(self.root(a), self.root(b)) for ca, cb in itertools.combinations(sorted(ids), 2)
                          if frozenset((ca, cb)) in self.disjoint for a in ids[ca] for b in ids[cb]]

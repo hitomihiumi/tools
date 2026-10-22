@@ -796,3 +796,34 @@ def test_tracks_counted_by_two_cameras_at_once_are_two_cows():
         assert not g.apart("c", "e")
         g.save()
         assert ("a", "b") in set(st.cannot_link_pairs())
+
+
+def test_neighbours_without_floor_joined_by_look_in_their_strip():
+    """cam4 sees, beyond its mask (its tracking_mask), the strip along the fence that cam3 counts. No floor
+    mapping between them. A cow there - cam3's, seen by cam4 too - becomes one track: her frame ids
+    clearly nearest to one of cam3's cows over look_min_s seconds; two look-alikes are left apart."""
+    import mct
+    rng = np.random.default_rng(4)
+    A, B, C = (_unit(rng.normal(size=64)) for _ in range(3))
+    near = lambda v: _unit(v + 0.1 * rng.normal(size=64))           # one frame: cos ~0.6 to her own
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": "cam3", "mask": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+                      {"id": "cam4", "mask": [[0.3, 0], [1, 0], [1, 1], [0.3, 1]],
+                       "tracking_mask": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
+    cfg["mct"].update(neighbours=[["cam3", "cam4"]], look_min_s=10)
+    lk = mct.TrackletLinker(cfg)
+    box = lambda x, y=0.5: [x - 0.05, y - 0.05, x + 0.05, y + 0.05]
+    for k in range(15):
+        out = lk.update_all(float(k), {
+            "cam3": [{"box": box(0.2), "emb": near(A)}, {"box": box(0.6), "emb": near(B)}],
+            "cam4": [{"box": box(0.1), "emb": near(A)},              # in cam4's strip: cam3's cow A
+                     {"box": box(0.7), "emb": near(C)}]})            # cam4's own cow
+    assert out["cam4"][0] == out["cam3"][0] and out["cam4"][1] not in out["cam3"]
+    assert lk.stats["joined_by_look"] == 1
+
+    # two of cam3's cows alike: the one in the strip is not given to either
+    lk = mct.TrackletLinker(cfg)
+    for k in range(15):
+        out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}, {"box": box(0.6), "emb": near(A)}],
+                                       "cam4": [{"box": box(0.1), "emb": near(A)}]})
+    assert out["cam4"][0] not in out["cam3"] and lk.stats["joined_by_look"] == 0

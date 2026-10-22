@@ -75,7 +75,20 @@ def summary(store_path, cfg, gallery_folder):
                     "activity": dict(collections.Counter(a for _, _, a in rows)), "bursts": states}
     meta = os.path.join(gallery_folder, "gallery.json")
     cows = len(json.load(open(meta)).get("cows", {})) if os.path.exists(meta) else 0
-    return out, cows, impossible(store, tm, cfg)
+    return out, cows, impossible(store, tm, cfg), joined(store)
+
+
+def joined(store):
+    """Tracks of one camera joined to another camera's ([mct]: by the floor, or by look in a strip they
+    share) -> {"cam1-cam2": tracks joined}."""
+    roots = store.track_roots() if hasattr(store, "track_roots") else {}
+    cam_of = dict(store.query("SELECT track, MIN(cam) FROM seconds GROUP BY track"))
+    out = collections.Counter()
+    for track, root in roots.items():
+        a, b = cam_of.get(track), cam_of.get(root)
+        if a and b and a != b:
+            out["-".join(sorted((a, b)))] += 1
+    return dict(out)
 
 
 def impossible(store, tm, cfg):
@@ -460,8 +473,9 @@ def main(argv=None):
             shown[cam] = os.path.join(dest, "index.html")
         except SystemExit as e:
             print(f"[trial] {cam}: nothing drawn ({e})", flush=True)
-    per_cam, cows, odd = summary(store2, cfg, os.path.join(out, "pass2", "gallery"))
+    per_cam, cows, odd, links = summary(store2, cfg, os.path.join(out, "pass2", "gallery"))
     report = {"cows_enrolled": res["enrolled"], "cows_in_gallery": cows, "cameras": per_cam, "impossible": odd,
+              "joined_across_cameras": links,
               "held_back_herd_full": res.get("held_back_herd_full", 0), "show": shown}
     with open(os.path.join(out, "trial.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
@@ -477,6 +491,9 @@ def main(argv=None):
           f"cameras that share no floor at once {odd['one_cow_on_cameras_apart']} s, counted by two cameras at once "
           f"{odd['one_cow_counted_by_two_cameras']} s ({bad / n:.1%} of the named cow-seconds) - two cows given one "
           f"id (or masks that overlap); {len(odd['cows_seen_where_they_cannot_be'])} cows so")
+    if cfg["mct"].get("enabled"):
+        print("  tracks joined across cameras (one cow, one track): " +
+              (", ".join(f"{k} {v}" for k, v in sorted(links.items())) or "none"))
     if res.get("held_back_herd_full"):
         print(f"  !! [identity] max_cows = {cfg['identity'].get('max_cows')}: the gallery was full, "
               f"{res['held_back_herd_full']} more cows got no id - set it to the cows these cameras see (0: no "

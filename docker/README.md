@@ -330,6 +330,14 @@ numbered alike) - it shows whether the recording had enough cows walking. If no 
 an hour or more (the feeding time is best) and run `autocalib` on that. A few minutes of cows lying
 is not enough: their boxes only twitch, and a twitch is no evidence of where a cow stands.
 
+**One cow, one track across cameras.** A cow's tracks on two cameras are joined only when both see her
+at once - so the masks (where a camera counts) share no floor, and at least one camera of each pair has
+a `tracking_mask` reaching into the other's floor (where it follows cows it does not count; zones page,
+the tracking layer). Calibrated pairs (cam1-cam2) are joined by where the cow stands; a pair that shares
+only a strip along a fence (cam3-cam4: no floor mapping) by look - a cow one camera sees beyond its mask
+is one of the other's counted cows, the one her frame ids are clearly nearest to over 10 s. `trial` says
+how many tracks were joined per camera pair.
+
 **No cows walking: click the same spots on both pictures.** Nothing is measured; you only show
 which spot of one picture is which spot of the other:
 

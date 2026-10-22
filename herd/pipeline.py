@@ -850,6 +850,12 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
     if cfg["mct"]["enabled"]:
         from mct import FloorTracker, FusedSeconds, GlobalTracker, TrackletLinker
         mode = cfg["mct"].get("mode")
+        by_id = {c["id"]: c for c in cfg["cameras"]}
+        for a, b in cfg["mct"].get("neighbours", []):
+            if a in by_id and b in by_id and not any(by_id[x].get("tracking_mask") for x in (a, b)):
+                print(f"[run] [mct] {a}-{b}: neither tracks beyond its mask (tracking_mask) - the masks share no "
+                      "floor, so no cow is seen by both at once and their tracks are never joined; give one of "
+                      "them a tracking_mask reaching into the other's floor (herd.py zones page)", flush=True)
         if mode in ("fused", "link"):               # all cameras at once, a second at a time
             t = (FloorTracker if mode == "fused" else TrackletLinker)(cfg, store, shared.separate)
             glob = FusedSeconds(t, [c["id"] for c in cfg["cameras"]])
