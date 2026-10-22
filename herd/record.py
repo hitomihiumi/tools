@@ -187,6 +187,7 @@ def check(path, full=False):
         n, rate = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0, cap.get(cv2.CAP_PROP_FPS) or 0
         if n > 0 and 1 <= rate <= 120:
             info = {"codec": info.get("codec", "?"), "frames": int(n), "seconds": n / rate}
+    size = f"{int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))}x{int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))}"
     ok_start = cap.read()[0]
     secs = info.get("seconds") or 0
     ok_end = False
@@ -205,7 +206,8 @@ def check(path, full=False):
     cap.release()
     fps = info.get("frames", 0) / secs if secs else 0
     ok = ok_start and (ok_end or secs <= 3) and info.get("frames", 0) > 0
-    text = (f"{secs / 60:.1f} min, {info.get('frames', 0)} frames ({fps:.1f} a second), {info.get('codec', '?')}; "
+    text = (f"{secs / 60:.1f} min, {size}, {info.get('frames', 0)} frames ({fps:.1f} a second), "
+            f"{info.get('codec', '?')}; "
             + ("reads to the end" if ok else "!! " + ("does not read at all" if not ok_start else
                                                     "its end does not read")))
     if full and ok_start:
