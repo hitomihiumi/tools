@@ -10,8 +10,12 @@ at once, for --minutes, into OUT/<camera>_<local start time>.mp4 (ffmpeg, the st
 Each camera is written to a Matroska file first (.mkv: one cut short - Ctrl+C, the computer asleep, the
 network gone - still reads up to where it stopped), then made a plain .mp4 that every player plays (the
 .mkv is kept when that fails, or with --keep-mkv). An HEVC (H.265) stream is re-encoded to H.264 on the
-way (fix_videos): the FFmpeg inside OpenCV, which the tools read with, decodes some cameras' HEVC poorly
-(the barn's: 496 of 926 frames, where ffmpeg itself decodes them all); --no-h264 copies it as it is. Every file is checked at the end: how many seconds
+way: the FFmpeg inside OpenCV, which the tools read with, decodes some cameras' HEVC poorly (the barn's:
+496 of 926 frames, where ffmpeg itself decodes them all); --no-h264 copies it as it is. The rate written
+is the one the camera really sends (frames over seconds: the barn's say 25 and send ~15 - at 25, 43% of the
+frames were copies), steady, as the tools expect. The check says where the picture stands still: a stretch
+of repeated frames is a gap in the camera's stream (frames lost on the way, or that could not be decoded
+until its next key frame) - the recording cannot have what the camera did not send. Every file is checked at the end: how many seconds
 and frames it holds, and that its last seconds read. --check DIR checks recordings already made.
 
 Then: herd.py barn video / herd.py boxes frames --videos OUT (SETUP.md sections 11-12).
@@ -60,6 +64,30 @@ def codec(path):
     return "hevc" if four in ("hev1", "hvc1", "hevc", "h265") else four
 
 
+def real_rate(path):
+    """The frames a second the camera really sent: frames over seconds (its stated rate may be another)."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries",
+                              "stream=nb_read_packets:format=duration", "-of", "json", path],
+                             capture_output=True, text=True, timeout=600).stdout
+        import json
+        j = json.loads(out or "{}")
+        n = int(((j.get("streams") or [{}])[0]).get("nb_read_packets") or 0)
+        secs = float((j.get("format") or {}).get("duration") or 0)
+        if n and secs > 1 and 1 <= n / secs <= 60:
+            return float(max(1, round(n / secs)))
+    except (OSError, ValueError, subprocess.SubprocessError):
+        pass
+    import fix_videos
+    return fix_videos.stated_fps(path) or 25.0
+
+
+def to_h264(src, dst, crf=20):
+    """The recording re-encoded to H.264 at the rate the camera really sent, steady (what the tools expect)."""
+    import fix_videos
+    return fix_videos.command(src, dst, real_rate(src), crf=crf)
+
+
 def to_mp4(src, dst):
     """The finished .mkv copied into a plain .mp4 (index at the front: every player plays it)."""
     r = subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-y", "-i", src, "-map", "0:v:0", "-c", "copy",
@@ -68,19 +96,36 @@ def to_mp4(src, dst):
 
 
 def decoded_share(path):
-    """Every frame read in order, as the tools read a recording: the share that decodes (a stream that lost
-    packets on the way has frames without their slices or references)."""
+    """Every frame read in order, as the tools read a recording -> (frames that decode, reads that failed,
+    the picture's stalls in s, repeated frames). A stream that lost packets on the way has frames without
+    their slices or references; a stretch where the picture stands still - frames between their times, or
+    repeated frames filling a steady rate - is a gap in what the camera sent."""
     import cv2
+    import numpy as np
     cap = cv2.VideoCapture(path)
-    good = bad = run = 0
+    good = bad = run = same = 0
+    last_t, prev, stalls, still_from = None, None, [], None
     while run < 200:
-        if cap.read()[0]:
-            good, run = good + 1, 0
-        else:
+        ok, f = cap.read()
+        if not ok:
             bad, run = bad + 1, run + 1
+            continue
+        good, run = good + 1, 0
+        t = cap.get(cv2.CAP_PROP_POS_MSEC) / 1000
+        small = cv2.resize(f, (160, 90), interpolation=cv2.INTER_AREA).astype(np.int16)
+        repeat = prev is not None and float(np.abs(small - prev).mean()) < 0.08     # a copy, not a still scene
+        if repeat:
+            same += 1
+            still_from = last_t if still_from is None else still_from
+        else:
+            start = still_from if still_from is not None else last_t
+            if start is not None and t > start:
+                stalls.append(t - start)                 # how long the picture stood (one frame's time if not)
+            still_from = None
+        last_t, prev = t, small
     cap.release()
     bad -= run                                       # the reads past the end
-    return good, max(0, bad)
+    return good, max(0, bad), stalls, same
 
 
 def check(path, full=False):
@@ -126,13 +171,18 @@ def check(path, full=False):
             + ("reads to the end" if ok else "!! " + ("does not read at all" if not ok_start else
                                                     "its end does not read")))
     if full and ok_start:
-        good, bad = decoded_share(path)
+        good, bad, stalls, same = decoded_share(path)
         # the frames the file holds, not the reads: OpenCV skips a frame it cannot decode without saying so
         share = good / max(1, info.get("frames", 0), good + bad)
-        text += f"; {good} of them decode ({share:.0%})"
+        new = good - same
+        text += f"; {good} of them decode ({share:.0%}), {new} different ({new / max(1, secs):.1f} a second)"
+        if stalls:
+            g = sorted(stalls)
+            long_ = [x for x in g if x >= 0.5]
+            text += (f"; the picture stands still {len(long_)} times for 0.5 s or more "
+                     f"({sum(long_):.0f} s in all, the longest {g[-1]:.1f} s) - gaps in what the camera sent")
         if share < 0.95:
-            text += (" !! the stream loses frames on the way (the camera: H.264 instead of H.265, no 'smart codec',"
-                     " a key frame every second; a cable)")
+            text += " !! frames that do not decode"
             ok = False
     return text, ok
 
@@ -209,10 +259,8 @@ def main(argv=None):
         final = path
         mp4 = path[:-4] + ".mp4"
         if not args.no_h264 and codec(path) == "hevc":
-            import fix_videos
             print(f"[record] {cam}: HEVC -> H.264 (what the tools read well) ...", flush=True)
-            rate = fix_videos.stated_fps(path) or 25.0
-            made = subprocess.run(fix_videos.command(path, mp4, rate, crf=args.crf), capture_output=True).returncode == 0 \
+            made = subprocess.run(to_h264(path, mp4, args.crf), capture_output=True).returncode == 0 \
                 and os.path.exists(mp4) and os.path.getsize(mp4) > 0
         else:
             made = to_mp4(path, mp4)
