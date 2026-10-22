@@ -12,10 +12,10 @@ network gone - still reads up to where it stopped), then made a plain .mp4 that 
 .mkv is kept when that fails, or with --keep-mkv). An HEVC (H.265) stream is re-encoded to H.264 on the
 way: the FFmpeg inside OpenCV, which the tools read with, decodes some cameras' HEVC poorly (the barn's:
 496 of 926 frames, where ffmpeg itself decodes them all); --no-h264 copies it as it is. The rate written
-is the one the camera really sends (frames over seconds: the barn's say 25 and send ~15 - at 25, 43% of the
-frames were copies), steady, as the tools expect. The check says where the picture stands still: a stretch
-of repeated frames is a gap in the camera's stream (frames lost on the way, or that could not be decoded
-until its next key frame) - the recording cannot have what the camera did not send. Every file is checked at the end: how many seconds
+is the camera's own (the spacing of its time stamps), steady, as the tools expect: every frame that arrived
+keeps its place, a frame that did not is the one before held. The barn's cameras stamp 25 a second and
+~60% arrive when all four record at once: the camera drops the rest when the connection cannot carry them
+(said after the recording: what share arrived, the gaps). --check says where the picture stands still. Every file is checked at the end: how many seconds
 and frames it holds, and that its last seconds read. --check DIR checks recordings already made.
 
 Then: herd.py barn video / herd.py boxes frames --videos OUT (SETUP.md sections 11-12).
@@ -64,8 +64,46 @@ def codec(path):
     return "hevc" if four in ("hev1", "hvc1", "hevc", "h265") else four
 
 
+def delivered(path):
+    """What the camera's own clock says of the stream as it came (the recording before any re-encoding):
+    -> (its frames a second, the share of them that arrived, the gaps of 0.5 s or more, the longest gap)
+    or None. Inside the stream a camera stamps frames 1/rate apart; a jump in the stamps is frames that
+    never arrived (a connection too slow for it - the camera drops them)."""
+    try:
+        out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", "-i", path, "-map", "0:v:0", "-c", "copy",
+                              "-f", "framecrc", "-"], capture_output=True, text=True, timeout=600).stdout
+    except (OSError, subprocess.SubprocessError):
+        return None
+    tb, pts = None, []
+    for line in out.splitlines():
+        if line.startswith("#tb"):
+            tb = line.split(":", 1)[1].strip()
+        elif line and not line.startswith("#"):
+            parts = [x.strip() for x in line.split(",")]
+            if len(parts) > 2:
+                pts.append(int(parts[2]))
+    if not tb or len(pts) < 10:
+        return None
+    num, den = (int(x) for x in tb.split("/"))
+    import numpy as np
+    t = np.sort(np.array(pts, float) * num / den)
+    d = np.diff(t)
+    d = d[d > 0]
+    if not len(d):
+        return None
+    step = float(np.median(d))                       # the camera's own frame time
+    span = t[-1] - t[0] + step
+    rate = 1 / step
+    return rate, min(1.0, len(t) / (span * rate)), int((d >= 0.5).sum()), float(d.max())
+
+
 def real_rate(path):
-    """The frames a second the camera really sent: frames over seconds (its stated rate may be another)."""
+    """The camera's own frame rate (the spacing of its time stamps): every frame that arrived keeps its
+    place, the ones that did not are the previous frame held - the gaps as they were. Without stamps:
+    frames over seconds."""
+    got = delivered(path)
+    if got:
+        return float(max(1, round(got[0])))
     try:
         out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-count_packets", "-show_entries",
                               "stream=nb_read_packets:format=duration", "-of", "json", path],
@@ -205,6 +243,12 @@ def main(argv=None):
         files = sorted(f for f in os.listdir(args.check) if f.lower().endswith(VIDEO_EXT))
         bad = 0
         for f in files:
+            if f.lower().endswith(".mkv"):                     # as it came from the camera
+                got = delivered(os.path.join(args.check, f))
+                if got:
+                    print(f"[record] {f}: the camera sends {got[0]:.0f} frames a second; {got[1]:.0%} of them "
+                          f"arrived ({got[2]} gaps of 0.5 s or more, the longest {got[3]:.1f} s)", flush=True)
+                continue
             text, ok = check(os.path.join(args.check, f), full=True)
             bad += not ok
             print(f"[record] {f}: {text}", flush=True)
@@ -256,6 +300,14 @@ def main(argv=None):
             bad += 1
             print(f"[record] {cam}: nothing recorded  !! ffmpeg exit {pr.returncode} - check its url", flush=True)
             continue
+        got = delivered(path)
+        if got:
+            rate, share, gaps, longest = got
+            print(f"[record] {cam}: the camera sends {rate:.0f} frames a second; {share:.0%} of them arrived "
+                  f"({gaps} gaps of 0.5 s or more, the longest {longest:.1f} s)"
+                  + ("  !! frames lost on the way: the connection to the cameras is too slow for them all - "
+                     "try one camera alone (--cameras cam1), a cable, or the cameras' second (lower) stream"
+                     if share < 0.9 else ""), flush=True)
         final = path
         mp4 = path[:-4] + ".mp4"
         if not args.no_h264 and codec(path) == "hevc":
