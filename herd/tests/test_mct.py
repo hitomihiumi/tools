@@ -2,6 +2,7 @@
 import _paths  # noqa: F401
 import collections
 import copy
+import itertools
 import json
 import os
 import tempfile
@@ -835,3 +836,51 @@ def test_neighbours_without_floor_joined_by_look_in_their_strip():
         out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}],
                                        "cam4": [{"box": box(x), "emb": near(A)}]})
     assert out["cam4"][0] != out["cam3"][0] and lk.stats["joined_by_look"] == 0
+
+
+class _WalkModels:
+    """The detector reads the cow's place off the frame (its first pixel); posture and activity fixed."""
+    crop_size, margin = 16, 0.1
+
+    def detect(self, img, **kw):
+        x = img[0, 0, 0] / 255.0
+        return [[x - 0.05, 0.4, x + 0.05, 0.6]]
+
+    def encode(self, crops, **kw):
+        return None
+
+    def frame_heads(self, feats, boxes, with_id=False, **kw):
+        n = len(boxes)
+        pp, pa = np.tile([0.1, 0.9], (n, 1)), np.tile([0.1, 0.1, 0.8], (n, 1))
+        return (pp, pa, [None] * n) if with_id else (pp, pa)
+
+
+def test_walking_cow_keeps_her_track_with_track_fps():
+    """A cow walking 1.5 box widths a second: tracked once a second her boxes never overlap - a new track
+    every second; with track_fps 4 the frames between keep her on one track (still one row a second)."""
+    import mct
+    import pipeline
+    from store import Store
+    tracks = {}
+    for link, fps in itertools.product((False, True), (1.0, 4.0)):
+        cfg = _cfg()
+        cfg["sampling"]["track_fps"] = fps
+        cfg["cameras"] = [{"id": "cam1", "mask": []}]
+        cfg["mct"].update(enabled=link, mode="link")
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(os.path.join(d, "s.sqlite"))
+            shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+            cam = pipeline.Camera(cfg["cameras"][0], 0, 1, cfg, _WalkModels(), shared, store, 0.0)
+            if link:                                              # [mct] link: the per-second rendezvous
+                cam.glob = mct.FusedSeconds(mct.TrackletLinker(cfg, store, shared.separate), ["cam1"])
+            for i in range(41):                                   # 8 frames a second, 5 s
+                t = i / 8
+                img = np.zeros((64, 64, 3), np.uint8)
+                img[0, 0, 0] = int(round((0.1 + 0.15 * t) * 255))
+                cam.push(t, img)
+                cam.step_seconds(t)
+            rows = store.query("SELECT track, ts FROM seconds ORDER BY ts")
+            assert [r[1] for r in rows] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]       # one row a second either way
+            tracks[(link, fps)] = len({r[0] for r in rows})
+            assert cam.stats["track_frames"] == (0 if fps == 1.0 else 15)
+    assert tracks == {(False, 1.0): 6, (False, 4.0): 1, (True, 1.0): 6, (True, 4.0): 1}, tracks

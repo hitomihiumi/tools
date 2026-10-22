@@ -330,6 +330,18 @@ numbered alike) - it shows whether the recording had enough cows walking. If no 
 an hour or more (the feeding time is best) and run `autocalib` on that. A few minutes of cows lying
 is not enough: their boxes only twitch, and a twitch is no evidence of where a cow stands.
 
+**Cows that walk keep their track: `track_fps`.** Once a second a walking cow moves more than her own
+box and her track breaks (a new one, often a new name). With
+
+```toml
+[sampling]
+track_fps = 4
+```
+
+the detector and the tracker also look at 3 frames between the seconds; what is written (posture,
+identity, a row a second) stays once a second. The detector's work on the seconds is 4 times as much:
+the rehearsal takes longer, and live the GPU must keep up (`run` prints how far behind it is).
+
 **One cow, one track across cameras.** A cow's tracks on two cameras are joined only when both see her
 at once - so the masks (where a camera counts) share no floor, and at least one camera of each pair has
 a `tracking_mask` reaching into the other's floor (where it follows cows it does not count; zones page,

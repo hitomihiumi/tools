@@ -365,6 +365,12 @@ class Camera:
                                tk.get("still_contain", 0.8), tk.get("still_for_s", 30.0), tk.get("still_moved", 0.3),
                                tk.get("still_long_s", 0.0))
         self.next_second = start_ts
+        # track_fps above fps: the detector and the tracker also on frames between the seconds (a cow that
+        # walks moves more than her box in a second at 1 fps, and her track breaks); only the seconds
+        # are written, posture and identity once a second as before
+        tf = s.get("track_fps") or self.fps_out
+        self.track_dt = 1.0 / tf if tf > self.fps_out else None
+        self.next_track = start_ts + (self.track_dt or 0.0)
         # Cameras burst in turn, not all at once: one GPU, an even load.
         self.next_burst = start_ts + self.burst_every * index / max(1, n_cams)
         self.stats = collections.Counter()
@@ -408,9 +414,22 @@ class Camera:
         self.step_burst(now)
 
     def step_seconds(self, now):
-        while now >= self.next_second:
+        while True:
+            if self.track_dt and self.next_track < self.next_second - 1e-6:    # a frame between the seconds
+                if now < self.next_track:
+                    return
+                t = self.next_track
+                self.next_track += self.track_dt
+                frame = min(self.frames(), key=lambda x: abs(x[0] - t), default=None)
+                if frame and abs(frame[0] - t) <= self.track_dt / 2:
+                    self.track_only(t, frame[1])
+                continue
+            if now < self.next_second:
+                return
             t = self.next_second
             self.next_second += 1.0 / self.fps_out
+            if self.track_dt and abs(self.next_track - t) < 1e-6:             # the second does this step
+                self.next_track += self.track_dt
             frame = min(self.frames(), key=lambda x: abs(x[0] - t), default=None)
             if frame and abs(frame[0] - t) <= 0.5:
                 self.second(t, frame[1])
@@ -429,6 +448,19 @@ class Camera:
         else:
             self.stats["bursts_missed"] += 1
             self._time("burst", t0, missed=True, frames=len(frames))
+
+    def track_only(self, ts, img):
+        """A frame between the seconds: boxes for the tracker, nothing written."""
+        start = time.time()
+        boxes = self.zone(self.models.detect(self.blank(img), urgent=True, kind="track_detect"), img)
+        if self.glob is not None:
+            if hasattr(self.glob, "track_only"):
+                self.glob.track_only(self.id, ts, [{"box": b, "emb": None} for b in boxes])
+        else:
+            with self.trk_lock:
+                self.tracker.update(ts, boxes)
+        self.stats["track_frames"] += 1
+        self._time("track", ts, start=start, end=time.time(), cows=len(boxes))
 
     # one frame a second
     def second(self, ts, img):

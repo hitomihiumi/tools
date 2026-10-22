@@ -183,6 +183,10 @@ class GlobalTracker:
             self.apart(links, ts)
         return out
 
+    def track_only(self, cam, ts, dets):
+        """A frame between the seconds (track_fps): the camera's boxes kept on their tracks."""
+        self.update(cam, ts, dets)
+
     def _cos(self, t, d):
         if t.emb is None or d.get("emb") is None:
             return None
@@ -649,6 +653,11 @@ class FusedSeconds:
     def track_at(self, cam, ts, box):
         return self.ft.track_at(cam, ts, box)
 
+    def track_only(self, cam, ts, dets):
+        """Frames between the seconds go to the camera's own tracker, not through the second's rendezvous."""
+        if hasattr(self.ft, "track_only"):
+            self.ft.track_only(cam, ts, dets)
+
     @property
     def stats(self):
         return self.ft.stats
@@ -851,3 +860,8 @@ class TrackletLinker:
     def track_at(self, cam, ts, box):
         t = self.cam_tracker.track_at(cam, ts, box)
         return None if t is None else self.root(t)
+
+    def track_only(self, cam, ts, dets):
+        """A frame between the seconds: the camera's own tracker only (no joining - that is per second)."""
+        with self.lock:
+            self.cam_tracker.update(cam, ts, dets)
