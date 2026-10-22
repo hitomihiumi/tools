@@ -8,8 +8,10 @@ at once, for --minutes, into OUT/<camera>_<local start time>.mp4 (ffmpeg, the st
         --url cam1=rtsp://user:pass@10.0.0.11:554/stream1 cam2=rtsp://...     (the config's urls left as they are)
 
 Each camera is written to a Matroska file first (.mkv: one cut short - Ctrl+C, the computer asleep, the
-network gone - still reads up to where it stopped), then copied into a plain .mp4 that every player plays
-(the .mkv is kept when that fails, or with --keep-mkv). Every file is checked at the end: how many seconds
+network gone - still reads up to where it stopped), then made a plain .mp4 that every player plays (the
+.mkv is kept when that fails, or with --keep-mkv). An HEVC (H.265) stream is re-encoded to H.264 on the
+way (fix_videos): the FFmpeg inside OpenCV, which the tools read with, decodes some cameras' HEVC poorly
+(the barn's: 496 of 926 frames, where ffmpeg itself decodes them all); --no-h264 copies it as it is. Every file is checked at the end: how many seconds
 and frames it holds, and that its last seconds read. --check DIR checks recordings already made.
 
 Then: herd.py barn video / herd.py boxes frames --videos OUT (SETUP.md sections 11-12).
@@ -39,6 +41,23 @@ def command(url, seconds, path):
     rtsp = ["-rtsp_transport", "tcp"] if url.startswith("rtsp") else []
     return ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", *rtsp, "-fflags", "+genpts+discardcorrupt",
             "-i", url, "-t", str(seconds), "-map", "0:v:0", "-c", "copy", "-an", path]
+
+
+def codec(path):
+    """The video stream's codec name (ffprobe), or what OpenCV's fourcc says."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=codec_name",
+                              "-of", "csv=p=0", path], capture_output=True, text=True, timeout=60).stdout.strip()
+        if out:
+            return out.splitlines()[0]
+    except (OSError, subprocess.SubprocessError):
+        pass
+    import cv2
+    cap = cv2.VideoCapture(path)
+    cc = int(cap.get(cv2.CAP_PROP_FOURCC) or 0)
+    cap.release()
+    four = "".join(chr((cc >> 8 * i) & 0xFF) for i in range(4)).lower()
+    return "hevc" if four in ("hev1", "hvc1", "hevc", "h265") else four
 
 
 def to_mp4(src, dst):
@@ -127,6 +146,8 @@ def main(argv=None):
     p.add_argument("--url", nargs="*", default=[], metavar="CAM=URL",
                    help="the stream of a camera, in place of the config's url (and a camera the config lacks)")
     p.add_argument("--keep-mkv", action="store_true", help="keep the .mkv beside the .mp4")
+    p.add_argument("--no-h264", action="store_true", help="an HEVC stream copied as it is (no re-encoding)")
+    p.add_argument("--crf", type=int, default=20, help="H.264 quality when re-encoding (lower = better, bigger)")
     p.add_argument("--check", default=None, metavar="DIR", help="only check the recordings in DIR")
     args = p.parse_args(argv)
     if args.check:
@@ -187,7 +208,15 @@ def main(argv=None):
             continue
         final = path
         mp4 = path[:-4] + ".mp4"
-        if to_mp4(path, mp4):
+        if not args.no_h264 and codec(path) == "hevc":
+            import fix_videos
+            print(f"[record] {cam}: HEVC -> H.264 (what the tools read well) ...", flush=True)
+            rate = fix_videos.stated_fps(path) or 25.0
+            made = subprocess.run(fix_videos.command(path, mp4, rate, crf=args.crf), capture_output=True).returncode == 0 \
+                and os.path.exists(mp4) and os.path.getsize(mp4) > 0
+        else:
+            made = to_mp4(path, mp4)
+        if made:
             final = mp4
             if not args.keep_mkv:
                 os.remove(path)

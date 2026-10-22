@@ -33,7 +33,7 @@ def stated_fps(path):
                               "stream=avg_frame_rate,r_frame_rate", "-of", "json", path],
                              capture_output=True, text=True, timeout=60).stdout
         s = json.loads(out)["streams"][0]
-    except (subprocess.SubprocessError, ValueError, KeyError, IndexError):
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError, IndexError):
         return None
     for key in ("avg_frame_rate", "r_frame_rate"):
         num, _, den = s.get(key, "0/0").partition("/")
