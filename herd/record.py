@@ -108,10 +108,12 @@ def check(path, full=False):
                                                     "its end does not read")))
     if full and ok_start:
         good, bad = decoded_share(path)
-        share = good / max(1, good + bad)
-        text += f"; {good} frames decode in order ({share:.0%})"
+        # the frames the file holds, not the reads: OpenCV skips a frame it cannot decode without saying so
+        share = good / max(1, info.get("frames", 0), good + bad)
+        text += f"; {good} of them decode ({share:.0%})"
         if share < 0.95:
-            text += " !! damaged frames"
+            text += (" !! the stream loses frames on the way (the camera: H.264 instead of H.265, no 'smart codec',"
+                     " a key frame every second; a cable)")
             ok = False
     return text, ok
 
