@@ -830,8 +830,8 @@ def test_neighbours_without_floor_joined_by_look_in_their_strip():
 
     # cam4's own cow (once inside its mask) that walks into the strip is not a visitor: never joined
     lk = mct.TrackletLinker(cfg)
-    for k in range(30):
-        x = 0.5 if k < 10 else 0.1
+    for k in range(70):
+        x = max(0.1, 0.5 - 0.02 * max(0, k - 10))              # walks from cam4's floor into the strip
         out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}],
                                        "cam4": [{"box": box(x), "emb": near(A)}]})
     assert out["cam4"][0] != out["cam3"][0] and lk.stats["joined_by_look"] == 0
