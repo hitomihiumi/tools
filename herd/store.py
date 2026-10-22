@@ -115,6 +115,14 @@ class Store:
             self.db.execute("INSERT OR REPLACE INTO track_links VALUES (?,?,?)", (ts, track, joined_to))
             self.db.commit()
 
+    def unlink_track(self, track, new_root):
+        """track was not the same cow after all: out of its group; the tracks joined to it go to new_root."""
+        with self.lock:
+            self.db.execute("DELETE FROM track_links WHERE track = ?", (track,))
+            self.db.execute("UPDATE track_links SET joined_to = ? WHERE joined_to = ?", (new_root, track))
+            self.db.execute("DELETE FROM track_links WHERE track = joined_to")
+            self.db.commit()
+
     def track_roots(self):
         """track -> the track it was finally joined to (links followed to the end)."""
         links = dict(self.query("SELECT track, joined_to FROM track_links"))

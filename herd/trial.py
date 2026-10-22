@@ -437,6 +437,11 @@ def main(argv=None):
     for d in ("pass1", "pass2"):
         shutil.rmtree(os.path.join(out, d), ignore_errors=True)
         os.makedirs(os.path.join(out, d))
+    if cfg["sampling"]["fps"] != 1.0:
+        print(f"[trial] !! [sampling] fps = {cfg['sampling']['fps']:g}: every camera writes that many rows a "
+              f"second (posture, identity, the gallery - {cfg['sampling']['fps']:g}x the work, the counts in "
+              "cow-seconds no more seconds). To follow walking cows more often set track_fps instead "
+              "(the tracker only) and keep fps = 1", flush=True)
     cfg["training_cache"]["enabled"] = False
     cfg["identity"]["new_cow_min_bursts"] = args.min_bursts
     first = copy.deepcopy(cfg)

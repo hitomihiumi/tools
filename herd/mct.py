@@ -715,6 +715,11 @@ class TrackletLinker:
         self.look_min_sim = m.get("look_min_sim", 0.6)
         self.look_margin = m.get("look_margin", 0.1)
         self.counted_here = set()                              # tracks ever inside their own camera's mask
+        # a joined cow counted by two cameras at the same second (each in its own mask - masks share no floor)
+        # for unlink_s seconds is two cows: the track joined later is taken out again, never to rejoin them
+        self.unlink_s = m.get("unlink_s", 10)
+        self.both_counted = collections.Counter()              # (root, track a, track b) -> seconds
+        self.never = set()                                     # track pairs that are two cows
 
     def _by_look(self, ts, per_cam, ids):
         """Neighbours without a floor mapping: a cow camera x sees beyond its mask against the cows camera y
@@ -770,12 +775,14 @@ class TrackletLinker:
 
     def _mergeable(self, ra, rb):
         """Never two tracks of one camera that lived at the same time; with link_contra, never two tracks of
-        other cameras that were seen together long enough and mostly apart."""
+        other cameras that were seen together long enough and mostly apart; never a pair found two cows."""
         for a in self.members[ra] or {ra}:
             ca, fa, la = self.life[a]
             for b in self.members[rb] or {rb}:
                 cb, fb, lb = self.life[b]
                 if ca == cb and fa <= lb and fb <= la:
+                    return False
+                if self._key(a, b) in self.never:
                     return False
                 if self.contra and ca != cb:
                     k = self._key(a, b)
@@ -797,6 +804,52 @@ class TrackletLinker:
         self.stats["linked"] += 1
         if self.store is not None:
             self.store.link_tracks(ts, gone, keep)
+
+    def _unlink(self, track, ts):
+        """track out of its group (it was another cow): the others keep a root of their own group."""
+        root = self.root(track)
+        group = (self.members.get(root) or {root}) | {root}
+        rest = sorted(group - {track}, key=lambda t: self.life.get(t, ("", 0, 0))[1])
+        if not rest:
+            return
+        new_root = rest[0]
+        for t in rest:
+            self.parent[t] = new_root
+        self.parent[track] = track
+        self.members.pop(root, None)
+        self.members[new_root] = set(rest)
+        self.members[track] = set()
+        self.never |= {self._key(track, t) for t in rest}
+        self.stats["unlinked"] += 1
+        if self.store is not None and hasattr(self.store, "unlink_track"):
+            self.store.unlink_track(track, new_root)
+            for t in rest:
+                if t != new_root:
+                    self.store.link_tracks(ts, t, new_root)
+
+    def _counted_twice(self, ts, per_cam, ids):
+        """A joined cow counted by two cameras at once (each in its own mask) for unlink_s seconds: two cows."""
+        if not self.unlink_s:
+            return
+        counted = collections.defaultdict(list)                # root -> [(cam, track)]
+        for cam, gs in ids.items():
+            mask = self.masks.get(cam)
+            for g, d in zip(gs, per_cam[cam]):
+                if in_mask(d["box"], mask):
+                    counted[self.root(g)].append((cam, g))
+        for root, seen in counted.items():
+            cams = {}
+            for cam, g in seen:
+                cams.setdefault(cam, g)
+            if len(cams) < 2:
+                continue
+            for (ca, ga), (cb, gb) in itertools.combinations(sorted(cams.items()), 2):
+                k = (root,) + self._key(ga, gb)
+                self.both_counted[k] += 1
+                if self.both_counted[k] >= self.unlink_s:
+                    later = max((ga, gb), key=lambda t: self.life.get(t, ("", 0, 0))[1])
+                    self._unlink(later, ts)
+                    del self.both_counted[k]
 
     def _points(self, cam, ds):
         f = self.floor.get(cam)
@@ -823,6 +876,7 @@ class TrackletLinker:
                     c, first, _ = self.life.get(g, (cam, ts, ts))
                     self.life[g] = (cam, first, ts)
                     self.members.setdefault(g, set())
+            self._counted_twice(ts, per_cam, ids)
             if self.by_look:
                 self._by_look(ts, per_cam, ids)
             if self.disjoint and self.apart is not None:       # cameras with no floor in common: two cows

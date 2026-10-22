@@ -884,3 +884,33 @@ def test_walking_cow_keeps_her_track_with_track_fps():
             tracks[(link, fps)] = len({r[0] for r in rows})
             assert cam.stats["track_frames"] == (0 if fps == 1.0 else 15)
     assert tracks == {(False, 1.0): 6, (False, 4.0): 1, (True, 1.0): 6, (True, 4.0): 1}, tracks
+
+
+def test_join_undone_when_both_cameras_count_the_cow():
+    """A join by look, then cam4's track goes on to one of cam4's own cows (inside its mask) while cam3 still
+    counts its cow: counted by both cameras at once for unlink_s seconds - two cows: undone, and the
+    store's link too; they are never joined again."""
+    import mct
+    from store import Store
+    rng = np.random.default_rng(4)
+    A, B = (_unit(rng.normal(size=64)) for _ in range(2))
+    near = lambda v: _unit(v + 0.1 * rng.normal(size=64))
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": "cam3", "mask": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+                      {"id": "cam4", "mask": [[0.3, 0], [1, 0], [1, 1], [0.3, 1]],
+                       "tracking_mask": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
+    cfg["mct"].update(neighbours=[["cam3", "cam4"]], look_min_s=10, look_min_sim=0.5, look_margin=0.05, unlink_s=10)
+    box = lambda x, y=0.5: [x - 0.05, y - 0.05, x + 0.05, y + 0.05]
+    with tempfile.TemporaryDirectory() as d:
+        st = Store(os.path.join(d, "s.sqlite"))
+        lk = mct.TrackletLinker(cfg, st)
+        for k in range(15):                                   # cam3's cow A seen by cam4 in its strip
+            out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}],
+                                           "cam4": [{"box": box(0.1), "emb": near(A)}]})
+        assert out["cam4"][0] == out["cam3"][0] and st.track_roots()
+        for k in range(15, 60):                               # cam4's track walks into its own floor
+            x = min(0.6, 0.1 + 0.02 * (k - 14))
+            out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}],
+                                           "cam4": [{"box": box(x), "emb": near(B)}]})
+        assert out["cam4"][0] != out["cam3"][0] and lk.stats["unlinked"] == 1
+        assert not st.track_roots()                                          # the link gone from the store

@@ -116,6 +116,10 @@ DEFAULTS = {
             # ids over look_min_s s at least look_min_sim, look_margin above the next cow
             # (barn, 8 min: 0.5 / 0.05 / 10 s joined two different cows - the identity model alone is weak)
             "look_min_s": 30, "look_min_sim": 0.6, "look_margin": 0.1,
+            # a joined cow counted by two cameras at once (each in its own mask) for unlink_s s: two cows -
+            # the later track is taken out of the join (barn: a join by look whose cam4 track went on to
+            # another cow, counted on both cameras 372 s)
+            "unlink_s": 10,
             # strict joining (off at 0): the next cow link_margin further; no join of two groups holding
             # tracks seen together link_contra_s seconds but near in less than link_contra of them
             # MmCows: link_margin 50 halved the wrong joins (2330 -> 1309) at the same IDF1 (0.498);
