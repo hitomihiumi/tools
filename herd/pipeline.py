@@ -621,6 +621,7 @@ class SharedGallery:
         self.co_seen = CoSeen(cfg["identity"].get("cannot_link_min_s", 5), cfg["identity"].get("cannot_link_max_iou", 0.3))
         self.claims = {}                         # cow -> (track, ts, p or sim)
         self._counted, self._counted_n, self._counted_pruned = {}, {}, start_ts   # counted(): second -> cam -> tracks
+        self._masked = {c["id"] for c in cfg.get("cameras", []) if c.get("mask")}
 
     def _next_hour(self, ts, hour):
         tz = dt.timezone(dt.timedelta(hours=self.cfg["farm"]["timezone_offset_hours"]))
@@ -653,8 +654,8 @@ class SharedGallery:
         same second for counted_apart_s seconds are two cows (cannot_link), the night never makes one of them.
         (Seconds, not one: a cow on the line between two masks may be counted by both a moment.)"""
         need = self.cfg["identity"].get("counted_apart_s", 10)
-        if not need or not tracks:
-            return
+        if not need or not tracks or cam not in self._masked:   # no mask: it counts the whole picture,
+            return                                              # floor it shares with whoever sees it
         sec = int(ts)
         with self.lock:
             at = self._counted.setdefault(sec, {})

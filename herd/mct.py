@@ -834,6 +834,8 @@ class TrackletLinker:
         counted = collections.defaultdict(list)                # root -> [(cam, track)]
         for cam, gs in ids.items():
             mask = self.masks.get(cam)
+            if not mask:                                       # no mask: it counts the whole picture, and
+                continue                                       # shares floor with whoever sees it too
             for g, d in zip(gs, per_cam[cam]):
                 if in_mask(d["box"], mask):
                     counted[self.root(g)].append((cam, g))

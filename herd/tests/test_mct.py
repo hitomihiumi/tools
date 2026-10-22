@@ -784,6 +784,7 @@ def test_tracks_counted_by_two_cameras_at_once_are_two_cows():
     with tempfile.TemporaryDirectory() as d:
         st = Store(os.path.join(d, "s.sqlite"))
         cfg = _cfg(counted_apart_s=10)
+        cfg["cameras"] = [{"id": "cam1", "mask": [[0, 0], [1, 0], [1, 1]]}, {"id": "cam2", "mask": [[0, 0], [1, 0], [1, 1]]}]
         g = pipeline.SharedGallery(type("G", (), {"save": lambda self: None, "migration_due": lambda self, ts: False})(),
                                    st, cfg, 0.0)
         g.next_nightly = 1e12
