@@ -810,7 +810,7 @@ def test_neighbours_without_floor_joined_by_look_in_their_strip():
     cfg["cameras"] = [{"id": "cam3", "mask": [[0, 0], [1, 0], [1, 1], [0, 1]]},
                       {"id": "cam4", "mask": [[0.3, 0], [1, 0], [1, 1], [0.3, 1]],
                        "tracking_mask": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
-    cfg["mct"].update(neighbours=[["cam3", "cam4"]], look_min_s=10)
+    cfg["mct"].update(neighbours=[["cam3", "cam4"]], look_min_s=10, look_min_sim=0.5, look_margin=0.05)
     lk = mct.TrackletLinker(cfg)
     box = lambda x, y=0.5: [x - 0.05, y - 0.05, x + 0.05, y + 0.05]
     for k in range(15):
@@ -827,3 +827,11 @@ def test_neighbours_without_floor_joined_by_look_in_their_strip():
         out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}, {"box": box(0.6), "emb": near(A)}],
                                        "cam4": [{"box": box(0.1), "emb": near(A)}]})
     assert out["cam4"][0] not in out["cam3"] and lk.stats["joined_by_look"] == 0
+
+    # cam4's own cow (once inside its mask) that walks into the strip is not a visitor: never joined
+    lk = mct.TrackletLinker(cfg)
+    for k in range(30):
+        x = 0.5 if k < 10 else 0.1
+        out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}],
+                                       "cam4": [{"box": box(x), "emb": near(A)}]})
+    assert out["cam4"][0] != out["cam3"][0] and lk.stats["joined_by_look"] == 0

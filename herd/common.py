@@ -112,7 +112,8 @@ DEFAULTS = {
             # link mode, neighbours with no floor mapping (a narrow strip along a fence): a cow one camera sees
             # beyond its mask (tracking_mask) joined to the other's counted cow by look - mean cos of frame
             # ids over look_min_s s at least look_min_sim, look_margin above the next cow
-            "look_min_s": 10, "look_min_sim": 0.5, "look_margin": 0.05,
+            # (barn, 8 min: 0.5 / 0.05 / 10 s joined two different cows - the identity model alone is weak)
+            "look_min_s": 30, "look_min_sim": 0.6, "look_margin": 0.1,
             # strict joining (off at 0): the next cow link_margin further; no join of two groups holding
             # tracks seen together link_contra_s seconds but near in less than link_contra of them
             # MmCows: link_margin 50 halved the wrong joins (2330 -> 1309) at the same IDF1 (0.498);

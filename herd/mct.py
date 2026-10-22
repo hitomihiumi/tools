@@ -702,9 +702,10 @@ class TrackletLinker:
         self.by_look = sorted({tuple(sorted(p)) for p in m.get("neighbours", [])
                                if self.floor.get(p[0]) is None or self.floor.get(p[1]) is None})
         self.look = {}                                         # (visitor, owner) -> (sum of cos, seconds)
-        self.look_min_s = m.get("look_min_s", 10)
-        self.look_min_sim = m.get("look_min_sim", m.get("handover_min_sim", 0.5))
-        self.look_margin = m.get("look_margin", 0.05)
+        self.look_min_s = m.get("look_min_s", 30)
+        self.look_min_sim = m.get("look_min_sim", 0.6)
+        self.look_margin = m.get("look_margin", 0.1)
+        self.counted_here = set()                              # tracks ever inside their own camera's mask
 
     def _by_look(self, ts, per_cam, ids):
         """Neighbours without a floor mapping: a cow camera x sees beyond its mask against the cows camera y
@@ -715,8 +716,14 @@ class TrackletLinker:
             for x, y in ((a, b), (b, a)):
                 if x not in per_cam or y not in per_cam or not self.masks[x]:
                     continue
+                for g, d in zip(ids[x], per_cam[x]):
+                    if in_mask(d["box"], self.masks[x]):
+                        self.counted_here.add(g)
+                # a visitor: a track that has never been inside its own camera's mask (a cow of the strip
+                # only - one that was, is this camera's own cow, or its tracker took another cow's box)
                 vis = [(self.root(g), np.asarray(d["emb"], np.float32)) for g, d in zip(ids[x], per_cam[x])
-                       if d.get("emb") is not None and not in_mask(d["box"], self.masks[x])]
+                       if d.get("emb") is not None and g not in self.counted_here
+                       and not in_mask(d["box"], self.masks[x])]
                 own = [(self.root(g), np.asarray(d["emb"], np.float32)) for g, d in zip(ids[y], per_cam[y])
                        if d.get("emb") is not None and in_mask(d["box"], self.masks[y])]
                 for v, ev in vis:
