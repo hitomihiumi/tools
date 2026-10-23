@@ -22,6 +22,12 @@ becomes OUT/<name>.mkv:
             keeps it as it came
   H.264     (without --fps) kept as it came
 
+The length goes by the computer's clock: a live stream's frames are stamped as they arrive (a camera's own
+stamps can jump ahead - the barn's did, and its recordings ended seconds in), and a stream that stops
+early (the camera or the network dropped it; 10 s without data) is recorded on into a new file named by
+its own start, which the tools read after the first. At the end each camera's minutes recorded are said
+against the minutes asked (!! when short).
+
 --keep-raw keeps the stream as it came beside it (OUT/<name>.mkv.raw, Matroska; not read by the tools).
 After the recording each camera's share of frames that arrived is said: the barn's cameras stamp 25 a
 second and ~60% arrive when all four record at once over the internet (the camera drops the rest when the
@@ -38,8 +44,10 @@ import argparse
 import datetime as dt
 import os
 import shutil
+import signal
 import subprocess
 import sys
+import threading
 import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -58,12 +66,23 @@ def _fmt(path):
     return ["-f", "matroska"] if path.endswith(RAW) else []
 
 
+LIVE = ("rtsp://", "rtsps://", "rtmp://", "http://", "https://", "udp://", "rtp://", "srt://")
+
+
 def command(url, seconds, path):
-    """The stream copied as it is into path (Matroska): over TCP, time stamps made where the camera's are
-    missing, damaged packets dropped (a camera's stream has them; HEVC 'too short RTP packet')."""
-    rtsp = ["-rtsp_transport", "tcp"] if url.startswith("rtsp") else []
-    return ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", *rtsp, "-fflags", "+genpts+discardcorrupt",
-            "-i", url, "-t", str(seconds), "-map", "0:v:0", "-c", "copy", "-an", "-f", "matroska", path]
+    """The stream copied as it is into path (Matroska) for `seconds`: over TCP (a connection silent for 10 s
+    given up), damaged packets dropped (a camera's stream has them; HEVC 'too short RTP packet'). A live
+    stream's frames are stamped with the time they arrive, not the camera's own stamps: those can jump
+    ahead (the barn's did), and -t, which goes by the stamps, ended such recordings seconds in, the frame
+    after the jump never written; by arrival the length is the clock's, and every camera on one clock.
+    A file (or an .sdp) plays at its own pace, as a camera would send it."""
+    rtsp = ["-rtsp_transport", "tcp", "-timeout", "10000000"] if url.startswith("rtsp") else []
+    sdp = ["-protocol_whitelist", "file,udp,rtp"] if url.lower().endswith(".sdp") else []
+    live = url.startswith(LIVE) or bool(sdp)
+    clock = ["-use_wallclock_as_timestamps", "1"] if live else ["-re"]
+    return ["ffmpeg", "-nostdin", "-loglevel", "error", "-y", *rtsp, *sdp, *clock,
+            "-fflags", "+genpts+discardcorrupt", "-i", url, "-t", str(seconds), "-map", "0:v:0", "-c", "copy", "-an",
+            "-f", "matroska", path]
 
 
 def encode(src, dst, fps, crf=20):
@@ -93,11 +112,14 @@ def codec(path):
     return "hevc" if four in ("hev1", "hvc1", "hevc", "h265") else four
 
 
+RATES = (1, 2, 5, 6, 8, 10, 12, 12.5, 15, 20, 24, 25, 30, 50, 60)      # what cameras send
+
+
 def delivered(path):
-    """What the camera's own clock says of the stream as it came (the recording before any re-encoding):
-    -> (its frames a second, the share of them that arrived, the gaps of 0.5 s or more, the longest gap)
-    or None. Inside the stream a camera stamps frames 1/rate apart; a jump in the stamps is frames that
-    never arrived (a connection too slow for it - the camera drops them)."""
+    """The stream as it came (the recording before any re-encoding, its frames stamped as they arrived):
+    -> (the camera's frames a second, the share of them that arrived, the gaps of 0.5 s or more, the
+    longest gap) or None. A camera sends frames 1/rate apart; a gap is frames that never arrived (a
+    connection too slow for them - the camera drops them)."""
     try:
         out = subprocess.run(["ffmpeg", "-nostdin", "-v", "error", *_fmt(path), "-i", path, "-map", "0:v:0", "-c",
                               "copy", "-f", "framecrc", "-"], capture_output=True, text=True, timeout=600).stdout
@@ -120,16 +142,18 @@ def delivered(path):
     d = d[d > 0]
     if not len(d):
         return None
-    step = float(np.median(d))                       # the camera's own frame time
-    span = t[-1] - t[0] + step
+    step = float(np.median(d))                       # the camera's frame time, as they arrive
     rate = 1 / step
+    near = min(RATES, key=lambda r: abs(np.log(r * step)))
+    rate = float(near) if abs(np.log(near * step)) < 0.25 else rate
+    span = t[-1] - t[0] + 1 / rate
     return rate, min(1.0, len(t) / (span * rate)), int((d >= 0.5).sum()), float(d.max())
 
 
 def real_rate(path):
-    """The camera's own frame rate (the spacing of its time stamps): every frame that arrived keeps its
-    place, the ones that did not are the previous frame held - the gaps as they were. Without stamps:
-    frames over seconds."""
+    """The camera's frame rate (the spacing of its frames): every frame that arrived keeps its place, the
+    ones that did not are the previous frame held - the gaps as they were. Without stamps: frames over
+    seconds."""
     got = delivered(path)
     if got:
         return float(max(1, round(got[0])))
@@ -243,6 +267,103 @@ def check(path, full=False):
     return text, ok
 
 
+def keep_recording(cam, url, out, tz, end, stop, segs, lock):
+    """One camera until `end` (the computer's clock): ffmpeg into <cam>_<start>.mkv.part; a stream that stops
+    before then (the camera or the network dropped it, 10 s without data) is recorded again into a new file
+    - the tools read a camera's files one after the other. ffmpeg still running at the end (+15 s) or on
+    Ctrl+C is stopped as by Ctrl+C: its file is closed properly. Three starts in a row that record nothing:
+    the camera given up."""
+    import math
+    failed = 0
+    while not stop.is_set():
+        left = end - time.time()
+        if left < 2:
+            return
+        base = os.path.join(out, f"{cam}_{dt.datetime.now(tz):%Y-%m-%d_%H-%M-%S}")
+        part = base + ".mkv.part"
+        pr = subprocess.Popen(command(url, int(math.ceil(left)), part))
+        t0 = time.time()
+        with lock:
+            segs.append((cam, base, pr))
+        while pr.poll() is None:
+            if stop.wait(0.5) or time.time() > end + 15:
+                pr.send_signal(signal.SIGINT)
+                try:
+                    pr.wait(timeout=15)
+                except subprocess.TimeoutExpired:
+                    pr.kill()
+                    pr.wait()
+                break
+        if stop.is_set() or end - time.time() < 2:
+            return
+        size = os.path.getsize(part) if os.path.exists(part) else 0
+        failed = 0 if size else failed + 1
+        if failed >= 3:
+            print(f"[record] {cam}: 3 starts in a row recorded nothing (ffmpeg exit {pr.returncode}) - given up; "
+                  "check its url", flush=True)
+            return
+        print(f"[record] {cam}: the stream stopped after {time.time() - t0:.0f} s (ffmpeg exit {pr.returncode}) - "
+              "recording on into a new file", flush=True)
+        stop.wait(2)
+
+
+def finish(cam, base, pr, args):
+    """A camera's .mkv.part -> <name>.mkv (re-encoded at --fps, or HEVC to H.264, or kept as it came) ->
+    its length in s, or None when nothing was recorded or it does not read."""
+    part, final, raw = base + ".mkv.part", base + ".mkv", base + ".mkv.raw"
+    size = os.path.getsize(part) / 2 ** 20 if os.path.exists(part) else 0
+    if not size:
+        if os.path.exists(part):
+            os.remove(part)
+        print(f"[record] {cam}: nothing recorded into {os.path.basename(final)}  !! ffmpeg exit {pr.returncode}",
+              flush=True)
+        return None
+    got = delivered(part)
+    if got:
+        rate, share, gaps, longest = got
+        print(f"[record] {cam}: the camera sends {rate:g} frames a second; {share:.0%} of them arrived "
+              f"({gaps} gaps of 0.5 s or more, the longest {longest:.1f} s)"
+              + ("  !! frames lost on the way: the connection to the cameras is too slow for them all - "
+                 "try one camera alone (--cameras cam1), a cable, or the cameras' second (lower) stream"
+                 if share < 0.9 else ""), flush=True)
+        if args.fps and args.fps > rate * share + 0.5:
+            print(f"[record] {cam}: --fps {args.fps:g} is more than the ~{rate * share:.0f} frames a second that "
+                  "arrived: many frames are the one before held", flush=True)
+    hevc = codec(part) == "hevc"
+    if args.fps or (hevc and not args.no_h264):
+        fps = args.fps or real_rate(part)
+        print(f"[record] {cam}: {'HEVC' if hevc else 'H.264'} -> H.264 at {fps:g} frames a second ...", flush=True)
+        tmp = base + ".mkv.encoding"
+        r = subprocess.run(encode(part, tmp, fps, args.crf), capture_output=True, text=True)
+        if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+            os.replace(tmp, final)
+            if args.keep_raw:
+                os.replace(part, raw)
+            else:
+                os.remove(part)
+        else:
+            if os.path.exists(tmp):
+                os.remove(tmp)
+            print(f"[record] {cam}: re-encoding failed ({(r.stderr or '').strip().splitlines()[-1:]}) - the stream "
+                  "kept as it came", flush=True)
+            os.replace(part, final)
+    else:
+        os.replace(part, final)                           # the stream as it came
+    text, ok = check(final)
+    print(f"[record] {cam}: {final} {os.path.getsize(final) / 2 ** 20:.0f} MB, {text}", flush=True)
+    return length(final) if ok else None
+
+
+def length(path):
+    """The file's length in s (ffprobe)."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", path],
+                             capture_output=True, text=True, timeout=120).stdout.strip()
+        return float(out.splitlines()[0])
+    except (OSError, ValueError, IndexError, subprocess.SubprocessError):
+        return 0.0
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", required=True)
@@ -304,64 +425,37 @@ def main(argv=None):
     tz = dt.timezone(dt.timedelta(hours=cfg["farm"]["timezone_offset_hours"]))
     start = dt.datetime.now(tz)
     seconds = int(args.minutes * 60)
-    procs = []
-    for c in cams:
-        base = os.path.join(args.out, f"{c['id']}_{start:%Y-%m-%d_%H-%M-%S}")
-        procs.append((c["id"], base, subprocess.Popen(command(c["url"], seconds, base + ".mkv.part"))))
-    print(f"[record] {len(procs)} cameras for {args.minutes:g} min from {start:%Y-%m-%d %H:%M:%S} -> {args.out}"
+    end = time.time() + seconds
+    stop, lock, segs = threading.Event(), threading.Lock(), []
+    threads = [threading.Thread(target=keep_recording, args=(c["id"], c["url"], args.out, tz, end, stop, segs, lock),
+                                daemon=True) for c in cams]
+    print(f"[record] {len(cams)} cameras for {args.minutes:g} min from {start:%Y-%m-%d %H:%M:%S} -> {args.out}"
           + (f", written at {args.fps:g} frames a second" if args.fps else ""), flush=True)
     t0 = time.time()
-    bad = 0
+    for th in threads:
+        th.start()
     try:
-        for _, _, pr in procs:
-            pr.wait()
+        while any(th.is_alive() for th in threads):
+            for th in threads:
+                th.join(timeout=1)
     except KeyboardInterrupt:                        # stopped early: what is recorded is kept (Matroska reads)
         print("[record] stopped - keeping what was recorded", flush=True)
-        for _, _, pr in procs:
-            pr.wait()
-    for cam, base, pr in procs:
-        part, final, raw = base + ".mkv.part", base + ".mkv", base + ".mkv.raw"
-        size = os.path.getsize(part) / 2 ** 20 if os.path.exists(part) else 0
-        if not size:
-            bad += 1
-            if os.path.exists(part):
-                os.remove(part)
-            print(f"[record] {cam}: nothing recorded  !! ffmpeg exit {pr.returncode} - check its url", flush=True)
-            continue
-        got = delivered(part)
-        if got:
-            rate, share, gaps, longest = got
-            print(f"[record] {cam}: the camera sends {rate:.0f} frames a second; {share:.0%} of them arrived "
-                  f"({gaps} gaps of 0.5 s or more, the longest {longest:.1f} s)"
-                  + ("  !! frames lost on the way: the connection to the cameras is too slow for them all - "
-                     "try one camera alone (--cameras cam1), a cable, or the cameras' second (lower) stream"
-                     if share < 0.9 else ""), flush=True)
-            if args.fps and args.fps > rate * share + 0.5:
-                print(f"[record] {cam}: --fps {args.fps:g} is more than the ~{rate * share:.0f} frames a second that "
-                      "arrived: many frames are the one before held", flush=True)
-        hevc = codec(part) == "hevc"
-        if args.fps or (hevc and not args.no_h264):
-            fps = args.fps or real_rate(part)
-            print(f"[record] {cam}: {'HEVC' if hevc else 'H.264'} -> H.264 at {fps:g} frames a second ...", flush=True)
-            tmp = base + ".mkv.encoding"
-            r = subprocess.run(encode(part, tmp, fps, args.crf), capture_output=True, text=True)
-            if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
-                os.replace(tmp, final)
-                if args.keep_raw:
-                    os.replace(part, raw)
-                else:
-                    os.remove(part)
-            else:
-                if os.path.exists(tmp):
-                    os.remove(tmp)
-                print(f"[record] {cam}: re-encoding failed ({(r.stderr or '').strip().splitlines()[-1:]}) - the stream "
-                      "kept as it came", flush=True)
-                os.replace(part, final)
-        else:
-            os.replace(part, final)                           # the stream as it came
-        text, ok = check(final)
-        bad += not ok
-        print(f"[record] {cam}: {final} {os.path.getsize(final) / 2 ** 20:.0f} MB, {text}", flush=True)
+        stop.set()
+        for th in threads:
+            th.join()
+    bad = 0
+    got = {c["id"]: 0.0 for c in cams}
+    for cam, base, pr in sorted(segs, key=lambda x: (x[0], x[1])):
+        secs = finish(cam, base, pr, args)
+        bad += secs is None
+        got[cam] += secs or 0.0
+    want = min(seconds, time.time() - t0) if stop.is_set() else seconds
+    for cam, secs in got.items():
+        n = sum(1 for c, _, _ in segs if c == cam)
+        short = secs < 0.95 * want
+        bad += short
+        print(f"[record] {cam}: {secs / 60:.1f} of {want / 60:.1f} min recorded" + (f" in {n} files" if n > 1 else "")
+              + ("  !! short - the stream stopped or did not start (see above)" if short else ""), flush=True)
     print(f"[record] done in {(time.time() - t0) / 60:.1f} min")
     return 1 if bad else 0
 

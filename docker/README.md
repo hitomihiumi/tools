@@ -161,6 +161,11 @@ goes into `<name>.mkv.part` as the camera sends it; at the end it becomes `<name
 - without `--fps`: an HEVC (H.265) camera re-encoded to H.264 at its own rate (the tools' reader decodes
   some cameras' HEVC poorly); an H.264 camera kept as it came.
 
+The length goes by the computer's clock, whatever the cameras' own time stamps do (the barn's jump ahead,
+which cut the first test recordings short); a stream that stops early is recorded on into a new file
+(`cam1_<its start>.mkv`, read after the first). At the end the log says per camera how many of the minutes
+asked were recorded, `!!` when short.
+
 `--keep-raw` keeps the stream as it came too (`<name>.mkv.raw`, not read by the tools). After the
 recording the log says per camera what share of its frames arrived (over the internet the barn's four
 cameras lose ~40%). `record --check /data/rec` checks recordings already made, every frame. Recordings made

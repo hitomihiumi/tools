@@ -276,6 +276,53 @@ def test_record_names_files_as_the_tools_read_them():
             assert record.codec(recs[0][1]) == "h264" and os.listdir(out4) == [os.path.basename(recs[0][1])]
 
 
+def test_record_length_by_the_clock():
+    """A camera whose stamps jump ahead (the barn's: -t, going by the stamps, ended its recording seconds
+    in) is recorded for the whole time, the frames stamped as they arrive; a stream that stops early is
+    recorded on into a new file, and a recording short of its time is said."""
+    import shutil
+    import socket
+    import subprocess
+    import threading
+    import time
+    import common
+    import record
+    if not shutil.which("ffmpeg"):
+        return
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "src.mkv")                 # as a camera sends: no B-frames, parameter sets repeated
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25", "-t", "12",
+                        "-c:v", "libx264", "-bf", "0", "-g", "25", "-bsf:v", "dump_extra", src], check=True)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as so:
+            so.bind(("127.0.0.1", 0))
+            port = so.getsockname()[1] // 2 * 2
+        sdp = os.path.join(d, "cam.sdp")
+        rtp = f"rtp://127.0.0.1:{port}"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", src, "-c", "copy", "-t", "0.01", "-f", "rtp", rtp,
+                        "-sdp_file", sdp], capture_output=True)
+        cfg = os.path.join(d, "barn.toml")
+        open(cfg, "w").write("[farm]\ntimezone_offset_hours = 2\n")
+
+        def camera():                                    # 2 s in, its stamps jump 90 s ahead
+            time.sleep(1)
+            subprocess.run(["ffmpeg", "-v", "error", "-re", "-i", src, "-c", "copy", "-bsf:v",
+                            "setts=ts=TS+gte(N\\,50)*90/TB", "-f", "rtp", rtp], capture_output=True)
+        th = threading.Thread(target=camera)
+        th.start()
+        out = os.path.join(d, "rec")
+        assert record.main(["--config", cfg, "--out", out, "--minutes", "0.1", "--url", f"cam1={sdp}"]) == 0
+        th.join()
+        recs, _ = common.recordings(out, ["cam1"], 2)
+        assert len(recs) == 1 and record.length(recs[0][1]) > 5.0
+        # a stream of 1 s: recorded on into new files, and said to be short
+        short = os.path.join(d, "short.mp4")
+        _video(short, 1)
+        out2 = os.path.join(d, "rec2")
+        assert record.main(["--config", cfg, "--out", out2, "--minutes", "0.1", "--url", f"cam1={short}"]) == 1
+        recs, _ = common.recordings(out2, ["cam1"], 2)
+        assert len(recs) >= 2 and not [f for f in os.listdir(out2) if f.endswith(record.RAW)]
+
+
 def test_zones_page_and_apply():
     import common
     import zone_page
