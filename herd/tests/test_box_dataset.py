@@ -250,8 +250,30 @@ def test_record_names_files_as_the_tools_read_them():
                             f"cam9={src}"]) == 0
         recs, bad = common.recordings(out2, ["cam1", "cam2", "cam9"], 2)
         assert sorted(c for c, _, _ in recs) == ["cam1", "cam9"] and not bad
-        assert all(p.endswith(".mp4") for _, p, _ in recs) and not any(f.endswith(".mkv") for f in os.listdir(out2))
+        assert all(p.endswith(".mkv") for _, p, _ in recs) and sorted(os.listdir(out2)) == sorted(
+            os.path.basename(p) for _, p, _ in recs)                              # nothing left beside them
         assert record.main(["--config", cfg, "--out", out2, "--check", out2]) == 0     # every file reads to its end
+        # --fps: H.264 at that rate, steady; --keep-raw: the stream as it came beside it, not read by the tools
+        hevc = os.path.join(d, "hevc.mkv")
+        import subprocess
+        made = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", src, "-c:v", "libx265", "-x265-params", "log-level=none",
+                               hevc]).returncode == 0
+        cam_src = hevc if made else src
+        out3 = os.path.join(d, "rec3")
+        assert record.main(["--config", cfg, "--out", out3, "--minutes", "0.05", "--url", f"cam1={cam_src}",
+                            "--fps", "2", "--keep-raw"]) == 0
+        recs, _ = common.recordings(out3, ["cam1"], 2)
+        assert len(recs) == 1 and recs[0][1].endswith(".mkv")
+        assert [f for f in os.listdir(out3) if f.endswith(".mkv.raw")] and not any(f.endswith(".part") for f in os.listdir(out3))
+        assert record.codec(recs[0][1]) == "h264"
+        rate = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate",
+                               "-of", "csv=p=0", recs[0][1]], capture_output=True, text=True).stdout.strip()
+        assert rate in ("2/1", "2"), rate
+        if made:                                        # HEVC without --fps: H.264 at the camera's own rate (5)
+            out4 = os.path.join(d, "rec4")
+            assert record.main(["--config", cfg, "--out", out4, "--minutes", "0.05", "--url", f"cam1={hevc}"]) == 0
+            recs, _ = common.recordings(out4, ["cam1"], 2)
+            assert record.codec(recs[0][1]) == "h264" and os.listdir(out4) == [os.path.basename(recs[0][1])]
 
 
 def test_zones_page_and_apply():

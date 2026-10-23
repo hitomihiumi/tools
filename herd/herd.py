@@ -32,7 +32,7 @@ Cameras' zones, drawn on their pictures:
     herd.py zones page --config barn.toml --videos DIR --out D    D/zones.html -> cameras.toml
     herd.py zones apply --config barn.toml --cameras cameras.toml
 Recordings for them:
-    herd.py record --config barn.toml --out DIR --minutes 60   every camera at once -> DIR/<cam>_<time>.mp4
+    herd.py record --config barn.toml --out DIR --minutes 60 [--fps 5]   every camera at once -> DIR/<cam>_<time>.mkv
     herd.py fix-videos --videos DIR --out DIR2             damaged recordings -> clean .mp4 the tools read
 A dress rehearsal on recordings (two passes: the gallery fills, then who is who, drawn per camera):
     herd.py trial --config barn.toml --videos DIR --out D [--boxes B --labels L]   (L: your ids -> IDF1)

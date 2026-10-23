@@ -148,10 +148,22 @@ docker compose run --rm herd show-zone --config /data/barn.toml --camera cam1 --
 **Recordings.** Every camera at once, an hour:
 
 ```bash
-docker compose run --rm herd record --config /data/barn.toml --out /data/rec --minutes 60
+docker compose run --rm herd record --config /data/barn.toml --out /data/rec --minutes 60 --fps 5
 ```
 
-The files are named as the tools read them (`rec/cam1_2026-10-20_06-00-00.mp4`). Recordings made
+The files are named as the tools read them (`rec/cam1_2026-10-20_06-00-00.mkv`, Matroska: a recording
+cut short - Ctrl+C, the network gone - still reads up to where it stopped). While it records, each camera
+goes into `<name>.mkv.part` as the camera sends it; at the end it becomes `<name>.mkv`:
+
+- `--fps 5`: re-encoded to H.264 at 5 frames a second, steady (at each 1/5 s the frame the camera sent
+  last). The tools take a frame a second and the tracker `track_fps` a few more, so 5 is plenty - and the
+  files and the time to encode them are a fraction;
+- without `--fps`: an HEVC (H.265) camera re-encoded to H.264 at its own rate (the tools' reader decodes
+  some cameras' HEVC poorly); an H.264 camera kept as it came.
+
+`--keep-raw` keeps the stream as it came too (`<name>.mkv.raw`, not read by the tools). After the
+recording the log says per camera what share of its frames arrived (over the internet the barn's four
+cameras lose ~40%). `record --check /data/rec` checks recordings already made, every frame. Recordings made
 elsewhere work too: copy them into `docker/data/rec/`, named by camera id and local start time.
 
 **Damaged recordings.** A recorder's file can play in a player and still be read wrong by the tools:
