@@ -105,14 +105,18 @@ def test_fit_and_overlay_line_the_floor_up():
         spots = _scene(d)
         st = _studio(d)
         state = st.state()
-        assert [c["still"] for c in state["cams"]] == [True, True] and state["points"]["cam1:cam2"] == spots
-        r = st.fit({"pair": "cam1:cam2", "points": state["points"], "floor": {}})
+        assert [c["still"] for c in state["cams"]] == [True, True]
+        # autocalib's pairs -> spots, one per row, on both cameras
+        assert [s["at"] for s in state["spots"]] == [{"cam1": r[:2], "cam2": r[2:]} for r in spots]
+        r = st.fit({"spots": state["spots"], "floor": {}, "changed": ["cam1"]})
         assert r["pairs"]["cam1:cam2"]["ok"] and r["pairs"]["cam1:cam2"]["median"] < 2
         assert set(r["floor"]) == {"cam1", "cam2"} and r["link_dist"] > 0
-        o = st.overlay({"base": "cam1", "top": "cam2", "floor": r["floor"], "spots": spots,
+        assert all(max(e.values()) < 3 for e in r["errors"].values()) and len(r["errors"]) == len(spots)
+        o = st.overlay({"base": "cam1", "top": "cam2", "floor": r["floor"],
                         "top_zones": {"mask": [[[0.2, 0.2], [0.8, 0.2], [0.8, 0.8]]]}})
-        assert o["share"] > 0.2 and all(s is not None and s[2] < 3 for s in o["spots"])
-        assert len(o["zones"]["mask"]) == 1 and o["png"]
+        assert o["share"] > 0.2 and len(o["zones"]["mask"]) == 1 and o["png"]
+        p = st.plan({"floor": r["floor"], "focus": "cam1"})
+        assert p["group"] == ["cam1", "cam2"] and set(p["cams"]) == {"cam1", "cam2"} and p["w"] >= 200
         # the warped picture sits on this one where both see the floor
         import base64
         import cv2
@@ -122,8 +126,8 @@ def test_fit_and_overlay_line_the_floor_up():
         ok[:, :4] = ok[:, -4:] = False
         assert np.abs(top[..., :3][ok].astype(int) - base[ok]).mean() < 25
         # too few spots: no floor, said so
-        r = st.fit({"pair": "cam1:cam2", "points": {"cam1:cam2": spots[:4]}, "floor": {}})
-        assert not r["pairs"]["cam1:cam2"]["ok"] and not r["floor"] and "5 at least" in r["notes"][0]
+        r = st.fit({"spots": state["spots"][:4], "floor": {}})
+        assert not r["pairs"]["cam1:cam2"]["ok"] and not r["floor"] and "5 at least" in r["pairs"]["cam1:cam2"]["notes"][0]
 
 
 def test_server_serves_the_page_and_saves():
@@ -144,16 +148,19 @@ def test_server_serves_the_page_and_saves():
             except OSError:
                 import time
                 time.sleep(0.1)
-        assert "Camera studio" in page
+        assert "Camera studio" in page and "function homography" in page
         assert urllib.request.urlopen(base + "/still/cam1.jpg").read()[:2] == b"\xff\xd8"
 
         def post(path, body):
             req = urllib.request.Request(base + path, json.dumps(body).encode(), {"Content-Type": "application/json"})
             return json.load(urllib.request.urlopen(req))
-        r = post("/api/fit", {"pair": "cam1:cam2", "points": {"cam1:cam2": spots}, "floor": {}})
+        sp = json.load(urllib.request.urlopen(base + "/api/state"))["spots"]
+        sp[0]["at"]["cam3"] = [0.5, 0.5]                     # a spot on a third camera (not in the config: ignored)
+        r = post("/api/fit", {"spots": sp, "floor": {}})
         s = post("/api/save", {"cams": {"cam2": {"exclude": [[[0, 0], [0.2, 0], [0.2, 0.2]]]}}, "floor": r["floor"],
-                               "points": {"cam1:cam2": spots[:-1]}, "link_dist": r["link_dist"],
-                               "calibrated_pairs": ["cam1:cam2"]})
+                               "spots": sp[:-1], "link_dist": r["link_dist"], "calibrated_pairs": ["cam1:cam2"]})
         cams = {c["id"]: c for c in s["state"]["cams"]}
         assert cams["cam1"]["calib"] and cams["cam2"]["calib"] and cams["cam2"]["exclude"] == [[[0, 0], [0.2, 0], [0.2, 0.2]]]
-        assert len(s["state"]["points"]["cam1:cam2"]) == len(spots) - 1
+        assert len(s["state"]["spots"]) == len(spots) - 1 and s["state"]["spots"][0]["at"]["cam3"] == [0.5, 0.5]
+        saved = json.load(open(os.path.join(d, "calib", "points.json")))
+        assert len(saved["pairs"]["cam1:cam2"]) == len(spots) - 1             # what autocalib --points reads

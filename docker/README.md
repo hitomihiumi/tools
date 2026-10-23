@@ -116,20 +116,26 @@ docker compose run --rm -p 8765:8765 herd studio --config /data/barn.toml --vide
 ```
 
 Open <http://localhost:8765> in a browser (Ctrl+C in the terminal stops it). `-p 8765:8765` lets the
-browser reach it. It shows every camera's picture at one moment of the recordings (`--at`, and the
-page can move it), the cows the detector finds on it:
+browser reach it. Every camera's picture at one moment of the recordings (`--at`; the left panel can move
+it), one, two or four cameras at once (keys `1` `2` `4`) or the **Plan** (`P`): the floor from above, the
+cameras' pictures carried onto it, their masks and the spots. Tools (keys in brackets):
 
-- **zones** (layers mask / exclude / tracking): drawn as on the zones page;
-- **spots** (view: two cameras): the same spot of the floor clicked on both pictures, as on
-  `pick.html`. From 5 spots the floor is fitted at once (as `autocalib --points`): green spots agree,
-  red are off, grey are left out; drag one to move it, click it and press Del to remove it;
-- **over it**: the other camera's picture laid over this one through the floor, a slider for how
-  much (as `autocalib --overlay`), with the other camera's mask (yellow) and tracking zone (blue)
-  drawn where they fall here. The zones and spots stay editable under it, and it follows each change;
-- **Floors**: which cameras are calibrated, fitted now or not; "forget this floor" drops a wrong one.
+- **Mask / Exclude / Tracking** (`M` `E` `T`): click round an area, a click on the first corner or Enter
+  closes it; drag a corner, double-click an edge for a corner more, right-click a corner to remove it;
+- **Spots** (`S`): one spot of the floor on every camera that sees it. Click it on one camera, then the
+  same place on the others - once the planes are known, where it should be is ringed (dashed): click
+  there. Each spot shows how far (px) it is from where the cameras together put it: green agrees, amber a
+  little off, red off. Every two cameras with 5 spots in common are fitted at once (Auto-fit, as
+  `autocalib --points`), all cameras they join on one plan;
+- **Plane** (`F`): the floor grid on each calibrated camera (about 1 m when the plan is in cm; `G` shows
+  it with any tool) and its plane points: drag them, or type a point's floor X, Y and the lens bend on the
+  right. Lay another camera over it (*over it*) and move the points until the floor lines up. "Start a
+  plane" gives a camera without one a plane to begin from; "Remove plane" drops a wrong one;
+- **Select** (`V`): select and move anything, Del removes it. `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo,
+  `Ctrl+wheel` zooms.
 
-Nothing is written until **Save to barn.toml**: the zones of the cameras changed, the fitted cameras'
-`floor_points` / `distortion` / `aspect`, and `[mct]` (link on, `link_dist`, the calibrated pairs out
+Nothing is written until **Save** (`Ctrl+S`): the zones of the cameras changed, the cameras' planes
+(`floor_points` / `distortion` / `aspect`, set or removed) and, after a fit, `[mct]` (link on, `link_dist`, the calibrated pairs out
 of `disjoint`). The old file is kept as `barn.toml.bak`, the spots go to `calib/points.json`. The floor
 plan is in about cm when `calib/` holds the cows' boxes cached by an `autocalib --videos` run
 (`boxes_<cam>.json`); without them `link_dist` is a guess. Without recordings:

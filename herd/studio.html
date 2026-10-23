@@ -1,0 +1,796 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Camera studio</title>
+<style>
+:root{--bg:#f4f4f1;--panel:#fff;--panel2:#f0efea;--fg:#1c1c1a;--mute:#6a6a64;--line:#dedcd4;--accent:#2f6f4f;--accent-fg:#fff;
+  --warn:#b45309;--bad:#b91c1c;--good:#15803d;--sel:#2563eb}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#121311;--panel:#1b1c1a;--panel2:#232421;--fg:#ecebe6;--mute:#9a9a92;
+  --line:#2f312c;--accent:#7fc29c;--accent-fg:#10140f;--warn:#f59e0b;--bad:#f87171;--good:#4ade80;--sel:#60a5fa}}
+*{box-sizing:border-box}html,body{height:100%}
+body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
+button,select,input{font:inherit;color:inherit}
+button{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 9px;cursor:pointer}
+button:hover{border-color:var(--mute)}button:disabled{opacity:.45;cursor:default}
+button.on{background:var(--accent);color:var(--accent-fg);border-color:var(--accent)}
+button.on kbd,button.primary kbd{color:inherit;border-color:currentColor;opacity:.75}
+button.primary{background:var(--accent);color:var(--accent-fg);border-color:var(--accent);font-weight:600}
+button.danger{color:var(--bad)}
+select,input[type=number],input[type=text]{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:3px 6px}
+kbd{font:11px ui-monospace,monospace;border:1px solid var(--line);border-bottom-width:2px;border-radius:4px;padding:0 4px;color:var(--mute);margin-left:4px}
+.mute{color:var(--mute)}.warn{color:var(--warn)}.bad{color:var(--bad)}.good{color:var(--good)}
+header{display:flex;flex-wrap:wrap;align-items:center;gap:10px;padding:8px 12px;border-bottom:1px solid var(--line);background:var(--panel)}
+header h1{font-size:15px;margin:0 6px 0 0;white-space:nowrap}
+.group{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
+.sep{width:1px;align-self:stretch;background:var(--line)}
+.spacer{flex:1}
+.app{display:grid;grid-template-columns:210px minmax(0,1fr) 290px;height:calc(100% - 50px);min-height:0}
+aside{background:var(--panel);overflow:auto;padding:10px;min-height:0}
+aside.left{border-right:1px solid var(--line)}aside.right{border-left:1px solid var(--line)}
+aside h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:12px 0 6px}
+aside h3:first-child{margin-top:0}
+.cam{display:flex;align-items:center;gap:7px;padding:6px 7px;border-radius:7px;cursor:pointer;border:1px solid transparent}
+.cam:hover{background:var(--panel2)}.cam.focus{border-color:var(--sel)}
+.cam .dot{width:10px;height:10px;border-radius:50%;flex:none}
+.cam .name{font-weight:600}.cam .chips{margin-left:auto;display:flex;gap:3px}
+.chip{font-size:10.5px;border-radius:10px;padding:0 6px;background:var(--panel2);color:var(--mute);white-space:nowrap}
+.chip.good{color:var(--good)}.chip.warn{color:var(--warn)}
+main{overflow:auto;padding:8px;min-height:0}
+.panes{display:grid;gap:8px}
+.panes.n1{grid-template-columns:1fr}.panes.n2{grid-template-columns:1fr 1fr}.panes.n4{grid-template-columns:1fr 1fr}
+.pane{background:var(--panel);border:1px solid var(--line);border-radius:8px;overflow:hidden;min-width:0}
+.pane.focus{border-color:var(--sel);box-shadow:0 0 0 1px var(--sel)}
+.ph{display:flex;align-items:center;gap:6px;padding:5px 7px;flex-wrap:wrap;border-bottom:1px solid var(--line)}
+.ph .info{margin-left:auto;color:var(--mute);font-size:12px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%}
+.ph input[type=range]{width:90px}
+.view{overflow:auto;background:#000;position:relative}
+.panes.n1 .view{max-height:calc(100vh - 140px)}.panes.n2 .view{max-height:calc(100vh - 140px)}.panes.n4 .view{max-height:calc(50vh - 80px)}
+canvas{display:block;touch-action:none}
+.inspector .row{display:flex;align-items:center;gap:6px;margin:4px 0;flex-wrap:wrap}
+.inspector label{color:var(--mute)}
+.inspector input[type=number]{width:78px}
+.card{border:1px solid var(--line);border-radius:8px;padding:8px;margin-bottom:8px;background:var(--panel)}
+.card h4{margin:0 0 4px;font-size:13px}
+.pairs div{display:flex;gap:6px;align-items:baseline;margin:2px 0}
+.log div{font-size:12px;margin:3px 0;padding-left:8px;border-left:2px solid var(--line)}
+.log div.good{border-color:var(--good)}.log div.warn{border-color:var(--warn)}.log div.bad{border-color:var(--bad)}
+.hint{font-size:12px;color:var(--mute)}
+.legend span{display:inline-flex;align-items:center;gap:4px;margin:2px 8px 2px 0;font-size:12px}
+.legend i{display:inline-block;width:14px;height:3px;border-radius:2px}
+.planbar{display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:6px}
+.toast{position:fixed;left:50%;bottom:18px;transform:translateX(-50%);background:var(--fg);color:var(--bg);padding:7px 14px;border-radius:8px;
+  font-size:13px;opacity:0;transition:opacity .2s;pointer-events:none;max-width:90vw}
+.toast.show{opacity:.95}
+@media (max-width:1000px){.app{grid-template-columns:1fr;height:auto}aside.left,aside.right{border:0;border-bottom:1px solid var(--line)}
+  .panes.n2,.panes.n4{grid-template-columns:1fr}}
+</style></head><body>
+<header>
+  <h1>Camera studio</h1>
+  <div class="group" id="layouts" title="how many cameras at once, or the floor from above">
+    <button data-layout="1">1</button><button data-layout="2">2</button><button data-layout="4">4</button><button data-layout="plan">Plan<kbd>P</kbd></button>
+  </div>
+  <div class="sep"></div>
+  <div class="group" id="tools">
+    <button data-tool="select" title="select and move anything: spots, corners, plane points">Select<kbd>V</kbd></button>
+    <button data-tool="mask" title="the floor this camera counts">Mask<kbd>M</kbd></button>
+    <button data-tool="exclude" title="greyed before the detector">Exclude<kbd>E</kbd></button>
+    <button data-tool="tracking_mask" title="where the camera follows cows beyond its mask">Tracking<kbd>T</kbd></button>
+    <button data-tool="spots" title="the same spot of the floor on every camera that sees it">Spots<kbd>S</kbd></button>
+    <button data-tool="plane" title="the floor plane: drag its points, set the lens">Plane<kbd>F</kbd></button>
+  </div>
+  <div class="sep"></div>
+  <div class="group">
+    <button data-toggle="grid" title="the floor grid on every calibrated camera">Grid<kbd>G</kbd></button>
+    <button data-toggle="cows" title="the cows the detector found, coloured by the zones">Cows<kbd>C</kbd></button>
+    <button data-toggle="autofit" title="fit the planes from the spots after each change">Auto-fit</button>
+  </div>
+  <div class="spacer"></div>
+  <div class="group">
+    <button id="undo" title="Ctrl+Z">Undo</button><button id="redo" title="Ctrl+Shift+Z">Redo</button>
+    <button id="reload" title="drop every change since the last save">Revert</button>
+    <button id="save" class="primary">Save</button>
+    <span id="status" class="mute"></span>
+  </div>
+</header>
+<div class="app">
+  <aside class="left">
+    <h3>Cameras</h3>
+    <div id="camlist"></div>
+    <div class="hint" style="margin-top:6px">Click a camera to show it in the highlighted view.</div>
+    <div id="momentbox"></div>
+    <h3>Legend</h3>
+    <div class="legend">
+      <span><i style="background:#3ee07a"></i>mask</span><span><i style="background:#4aa3ff"></i>tracking</span>
+      <span><i style="background:#ff4040"></i>exclude</span><span><i style="background:#ffd400"></i>other camera's mask</span>
+      <span><i style="background:#22d3ee"></i>floor grid</span><span><i style="background:#e879f9"></i>plane points</span>
+    </div>
+    <div class="legend">
+      <span><b class="good">&#9679;</b>spot agrees</span><span><b class="warn">&#9679;</b>off a little</span><span><b class="bad">&#9679;</b>off</span>
+      <span><b class="mute">&#9675;</b>where it should be</span>
+    </div>
+  </aside>
+  <main id="main"></main>
+  <aside class="right inspector" id="inspector"></aside>
+</div>
+<div class="toast" id="toast"></div>
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const esc = t => String(t).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const COL = {mask: "#3ee07a", exclude: "#ff4040", tracking_mask: "#4aa3ff"};
+const CAMCOL = ["#22d3ee", "#f472b6", "#a3e635", "#fbbf24", "#a78bfa", "#fb7185", "#34d399", "#60a5fa"];
+const LAYERS = ["mask", "exclude", "tracking_mask"];
+const NAMES = {mask: "mask", exclude: "exclude", tracking_mask: "tracking zone"};
+
+// ================================================================== geometry (as common.undistort / autocalib)
+function undistort(u, v, k, ar) {
+  const x = (u - 0.5) * ar, y = v - 0.5, s = 1 / (1 + k * (x * x + y * y) / (0.25 * ar * ar + 0.25));
+  return [0.5 + x * s / ar, 0.5 + y * s];
+}
+function distort(u, v, k, ar) {
+  if (!k) return [u, v];
+  const x = (u - 0.5) * ar, y = v - 0.5, c = k / (0.25 * ar * ar + 0.25), ru = Math.hypot(x, y), cr = c * ru;
+  let rd = ru;
+  if (Math.abs(cr) > 1e-12) { const d = 1 - 4 * cr * ru; if (d < 0) return null; rd = (1 - Math.sqrt(d)) / (2 * cr); }
+  const s = ru > 1e-12 ? rd / ru : 1;
+  return [0.5 + x * s / ar, 0.5 + y * s];
+}
+const mul3 = (A, B) => A.map(r => [0, 1, 2].map(j => r[0] * B[0][j] + r[1] * B[1][j] + r[2] * B[2][j]));
+function inv3(m) {
+  const [a, b, c] = m[0], [d, e, f] = m[1], [g, h, i] = m[2];
+  const A = e * i - f * h, B = -(d * i - f * g), C = d * h - e * g, det = a * A + b * B + c * C;
+  if (Math.abs(det) < 1e-18) return null;
+  return [[A / det, -(b * i - c * h) / det, (b * f - c * e) / det],
+          [B / det, (a * i - c * g) / det, -(a * f - c * d) / det],
+          [C / det, -(a * h - b * g) / det, (a * e - b * d) / det]];
+}
+const apply3 = (H, x, y) => { const w = H[2][0] * x + H[2][1] * y + H[2][2]; return [(H[0][0] * x + H[0][1] * y + H[0][2]) / w, (H[1][0] * x + H[1][1] * y + H[1][2]) / w, w]; };
+function solve(A, b) {
+  const n = b.length, M = A.map((r, i) => [...r, b[i]]);
+  for (let c = 0; c < n; c++) {
+    let p = c; for (let r = c + 1; r < n; r++) if (Math.abs(M[r][c]) > Math.abs(M[p][c])) p = r;
+    [M[c], M[p]] = [M[p], M[c]];
+    if (Math.abs(M[c][c]) < 1e-14) return null;
+    for (let r = 0; r < n; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k <= n; k++) M[r][k] -= f * M[c][k]; }
+  }
+  return M.map((r, i) => r[n] / r[i]);
+}
+function normT(P) {
+  const cx = P.reduce((s, p) => s + p[0], 0) / P.length, cy = P.reduce((s, p) => s + p[1], 0) / P.length;
+  const d = P.reduce((s, p) => s + Math.hypot(p[0] - cx, p[1] - cy), 0) / P.length || 1e-12, s = Math.SQRT2 / d;
+  return [[s, 0, -s * cx], [0, s, -s * cy], [0, 0, 1]];
+}
+function homography(src, dst) {             // dst ~ H src, least squares (DLT, Hartley-normalised)
+  const Ts = normT(src), Td = normT(dst), N = Array.from({length: 8}, () => new Array(8).fill(0)), r = new Array(8).fill(0);
+  src.forEach((p, i) => {
+    const [x, y] = apply3(Ts, p[0], p[1]), [u, v] = apply3(Td, dst[i][0], dst[i][1]);
+    for (const [row, rhs] of [[[x, y, 1, 0, 0, 0, -u * x, -u * y], u], [[0, 0, 0, x, y, 1, -v * x, -v * y], v]])
+      for (let a = 0; a < 8; a++) { r[a] += row[a] * rhs; for (let b = 0; b < 8; b++) N[a][b] += row[a] * row[b]; }
+  });
+  const h = solve(N, r); if (!h) return null;
+  const Tdi = inv3(Td); if (!Tdi) return null;
+  return mul3(mul3(Tdi, [[h[0], h[1], h[2]], [h[3], h[4], h[5]], [h[6], h[7], 1]]), Ts);
+}
+function model(c) {                         // a camera's plane: picture (0-1) <-> floor
+  const key = JSON.stringify(c.calib);
+  if (c._mk === key) return c._m;
+  c._mk = key; c._m = null;
+  const f = c.calib;
+  if (!f || !f.floor_points || f.floor_points.length < 4) return null;
+  const k = f.distortion || 0, ar = f.aspect || c.w / c.h, P = f.floor_points;
+  const und = P.map(p => undistort(p[0], p[1], k, ar)), H = homography(und, P.map(p => [p[2], p[3]]));
+  if (!H) return null;
+  const Hi = inv3(H); if (!Hi) return null;
+  const ws = und.map(([a, b]) => H[2][0] * a + H[2][1] * b + H[2][2]).sort((a, b) => a - b);
+  c._m = {H, Hi, k, ar, front: Math.sign(ws[ws.length >> 1]) || 1};
+  return c._m;
+}
+function toFloor(m, u, v) {
+  const [a, b] = undistort(u, v, m.k, m.ar), q = apply3(m.H, a, b);
+  return Math.sign(q[2]) === m.front && isFinite(q[0]) && isFinite(q[1]) ? [q[0], q[1]] : null;
+}
+function fromFloor(m, X, Y) {
+  const q = apply3(m.Hi, X, Y);
+  if (Math.sign(q[2]) !== m.front || !isFinite(q[0])) return null;
+  const p = distort(q[0], q[1], m.k, m.ar);
+  return p && isFinite(p[0]) && isFinite(p[1]) ? p : null;
+}
+function niceStep(r) { const e = Math.pow(10, Math.floor(Math.log10(r))); for (const m of [1, 2, 2.5, 5, 10]) if (m * e >= r) return m * e; return 10 * e; }
+const pct = (a, q) => a[Math.min(a.length - 1, Math.max(0, Math.floor(q * (a.length - 1))))];
+function floorBox(c, m) {                   // what of the floor a camera sees (its mask / tracking zone when drawn)
+  const zone = [...c.mask, ...c.tracking_mask].filter(p => p.length >= 3), xs = [], ys = [];
+  for (let i = 0; i < 24; i++) for (let j = 0; j < 24; j++) {
+    const u = 0.02 + 0.96 * i / 23, v = 0.02 + 0.96 * j / 23;
+    if (zone.length && !zone.some(p => inPoly(u, v, p))) continue;
+    const q = toFloor(m, u, v); if (q) { xs.push(q[0]); ys.push(q[1]); }
+  }
+  if (xs.length < 6) return null;
+  xs.sort((a, b) => a - b); ys.sort((a, b) => a - b);
+  return [pct(xs, 0.03), pct(ys, 0.03), pct(xs, 0.97), pct(ys, 0.97)];
+}
+function inPoly(x, y, p) { let ins = false; for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
+  const [x1, y1] = p[i], [x2, y2] = p[j]; if ((y1 > y) !== (y2 > y) && x < (x2 - x1) * (y - y1) / (y2 - y1 + 1e-12) + x1) ins = !ins; } return ins; }
+function distSeg(p, a, b) { const dx = b[0] - a[0], dy = b[1] - a[1], L = dx * dx + dy * dy || 1e-12;
+  const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / L)); return Math.hypot(p[0] - a[0] - t * dx, p[1] - a[1] - t * dy); }
+
+// ================================================================== state
+let S = null, cams = {}, order = [], spots = [], errors = {}, fitPairs = {}, floorDirty = {}, zonesChanged = new Set();
+let linkDist = null, okPairs = new Set(), undoStack = [], redoStack = [], edits = 0, logLines = [];
+let layout = "2", tool = "select", show = {grid: false, cows: true, autofit: true};
+let panes = [0, 1, 2, 3].map(() => ({cam: null, over: "", alpha: 0.5, zoom: 1, ov: null}));
+let focus = 0, sel = null, cur = null, drag = null, plan = null, planAlpha = 0.75, planHidden = new Set();
+const camColor = id => CAMCOL[order.indexOf(id) % CAMCOL.length];
+const spotById = id => spots.find(s => s.id === id);
+const unitsCm = id => S.boxes_cached.includes(id);
+
+async function api(path, body) {
+  const r = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
+  const j = await r.json(); if (j.error) throw new Error(j.error); return j;
+}
+function say(lines, cls) {
+  (Array.isArray(lines) ? lines : [lines]).forEach(t => logLines.unshift({t, cls}));
+  logLines = logLines.slice(0, 40); inspector();
+}
+let toastT = null;
+function toast(t) { const el = $("toast"); el.textContent = t; el.classList.add("show"); clearTimeout(toastT); toastT = setTimeout(() => el.classList.remove("show"), 2200); }
+function status() {
+  $("status").textContent = edits ? `${edits} unsaved change${edits > 1 ? "s" : ""}` : "saved";
+  $("status").className = edits ? "warn" : "mute";
+  $("undo").disabled = !undoStack.length; $("redo").disabled = !redoStack.length;
+}
+
+async function load(state) {
+  S = state || await api("/api/state");
+  order = S.cams.map(c => c.id); cams = {};
+  const t = Date.now();
+  S.cams.forEach(c => { cams[c.id] = c; if (c.still) { c.img = new Image(); c.img.onload = drawAll; c.img.src = `/still/${c.id}.jpg?${t}`; } });
+  spots = S.spots.map(s => ({id: s.id, at: {...s.at}}));
+  errors = {}; fitPairs = {}; floorDirty = {}; zonesChanged = new Set(); linkDist = null; okPairs = new Set();
+  undoStack = []; redoStack = []; edits = 0; sel = null; cur = null; drag = null; plan = null;
+  const withPic = order.filter(id => cams[id].still);
+  panes.forEach((p, i) => { if (!p.cam || !cams[p.cam]) p.cam = withPic[i % Math.max(1, withPic.length)] || order[0]; p.ov = null; });
+  recomputeErrors();
+  $("momentbox").innerHTML = S.videos ? `<h3>Moment</h3><div class="row" style="display:flex;gap:6px"><input id="at" type="number" step="10" value="${S.at}" style="width:80px"> s
+    <button id="go">Show</button></div><div class="hint">every camera's picture this many s into the recordings</div>` : "";
+  if (S.videos) $("go").onclick = async () => { toast("loading pictures..."); try { const st = await api("/api/moment", {at: +$("at").value}); keepEdits(st); } catch (e) { say(e.message, "bad"); } };
+  if (!S.boxes_cached.length) say(`No boxes_<cam>.json in ${S.calib_dir}: a fit gives a plan not in cm and a guessed link_dist (an autocalib --videos run caches them).`, "warn");
+  build(); status();
+}
+function keepEdits(st) {                    // new pictures, the edits kept
+  st.cams.forEach(c => { const o = cams[c.id]; if (o) { LAYERS.forEach(k => c[k] = o[k]); c.calib = o.calib; c.min_box_pct = o.min_box_pct; } });
+  S = st; order = S.cams.map(c => c.id); cams = {};
+  const t = Date.now();
+  S.cams.forEach(c => { cams[c.id] = c; if (c.still) { c.img = new Image(); c.img.onload = drawAll; c.img.src = `/still/${c.id}.jpg?${t}`; } });
+  panes.forEach(p => p.ov = null); build(); refreshOverlays(); toast("pictures of " + st.at + " s");
+}
+
+// ================================================================== undo
+function snapshot() {
+  const z = {}; order.forEach(id => { z[id] = {mask: cams[id].mask, exclude: cams[id].exclude, tracking_mask: cams[id].tracking_mask, calib: cams[id].calib}; });
+  return JSON.stringify({z, spots, floorDirty, zonesChanged: [...zonesChanged], linkDist, okPairs: [...okPairs], fitPairs, edits});
+}
+function restore(js) {
+  const o = JSON.parse(js);
+  order.forEach(id => Object.assign(cams[id], o.z[id]));
+  spots = o.spots; floorDirty = o.floorDirty; zonesChanged = new Set(o.zonesChanged); linkDist = o.linkDist;
+  okPairs = new Set(o.okPairs); fitPairs = o.fitPairs; edits = o.edits;
+  sel = null; cur = null; recomputeErrors(); afterAny(true);
+}
+function checkpoint() { undoStack.push(snapshot()); if (undoStack.length > 200) undoStack.shift(); redoStack = []; edits++; status(); }
+function undo() { if (!undoStack.length) return; redoStack.push(snapshot()); restore(undoStack.pop()); toast("undone"); }
+function redo() { if (!redoStack.length) return; undoStack.push(snapshot()); restore(redoStack.pop()); toast("redone"); }
+function afterAny(overlays) { drawAll(); camList(); inspector(); status(); if (overlays) { refreshOverlays(); if (layout === "plan") loadPlan(); } }
+
+// ================================================================== layout
+function build() {
+  document.querySelectorAll("[data-layout]").forEach(b => b.classList.toggle("on", b.dataset.layout === layout));
+  document.querySelectorAll("[data-tool]").forEach(b => b.classList.toggle("on", b.dataset.tool === tool));
+  document.querySelectorAll("[data-toggle]").forEach(b => b.classList.toggle("on", !!show[b.dataset.toggle]));
+  const main = $("main");
+  if (layout === "plan") { buildPlan(main); camList(); inspector(); return; }
+  const n = +layout; main.innerHTML = `<div class="panes n${n}" id="panes"></div>`;
+  if (focus >= n) focus = 0;
+  for (let i = 0; i < n; i++) {
+    const p = panes[i], d = document.createElement("div");
+    d.className = "pane" + (i === focus ? " focus" : "");
+    const opt = (v, none) => (none ? `<option value="">${none}</option>` : "") + order.map(id => `<option value="${id}" ${id === v ? "selected" : ""}>${id}${cams[id].still ? "" : " (no picture)"}</option>`).join("");
+    d.innerHTML = `<div class="ph"><select class="c" title="camera">${opt(p.cam)}</select>
+      <span class="mute">over it</span><select class="o" title="another camera's picture laid over this one through the floor">${opt(p.over, "nothing")}</select>
+      <input class="a" type="range" min="0" max="100" value="${Math.round(p.alpha * 100)}" title="how much of the other camera">
+      <button class="zo" title="zoom out (Ctrl+wheel)">&minus;</button><button class="zi" title="zoom in (Ctrl+wheel)">+</button><span class="info"></span></div>
+      <div class="view"><canvas></canvas></div>`;
+    d.querySelector(".c").onchange = e => { p.cam = e.target.value; p.ov = null; sel = null; cur = null; size(i); refreshOverlays(); camList(); inspector(); };
+    d.querySelector(".o").onchange = e => { p.over = e.target.value; p.ov = null; refreshOverlays(); draw(i); };
+    d.querySelector(".a").oninput = e => { p.alpha = e.target.value / 100; draw(i); };
+    d.querySelector(".zi").onclick = () => zoom(i, 1.5);
+    d.querySelector(".zo").onclick = () => zoom(i, 1 / 1.5);
+    $("panes").appendChild(d); p.el = d; p.view = d.querySelector(".view"); p.cv = d.querySelector("canvas"); p.ctx = p.cv.getContext("2d");
+    hook(i);
+  }
+  requestAnimationFrame(() => { for (let i = 0; i < n; i++) size(i); });
+  refreshOverlays(); camList(); inspector();
+}
+function setFocus(i) { if (focus === i) return; focus = i; document.querySelectorAll(".pane").forEach((el, k) => el.classList.toggle("focus", k === i)); camList(); inspector(); }
+function size(i) {
+  const p = panes[i], c = cams[p.cam], dpr = window.devicePixelRatio || 1;
+  const W = Math.max(50, Math.round((p.view.clientWidth || 600) * p.zoom)), H = Math.round(W * c.h / c.w);
+  p.W = W; p.H = H; p.cv.style.width = W + "px"; p.cv.style.height = H + "px";
+  p.cv.width = Math.round(W * dpr); p.cv.height = Math.round(H * dpr); p.ctx.setTransform(dpr, 0, 0, dpr, 0, 0); draw(i);
+}
+function zoom(i, f, cx, cy) {
+  const p = panes[i], v = p.view, old = p.zoom; p.zoom = Math.min(8, Math.max(1, p.zoom * f));
+  if (p.zoom === old) return;
+  const r = v.getBoundingClientRect(), x = cx === undefined ? r.width / 2 : cx - r.left, y = cy === undefined ? r.height / 2 : cy - r.top;
+  const fx = (v.scrollLeft + x) / p.W, fy = (v.scrollTop + y) / p.H;
+  size(i); v.scrollLeft = fx * p.W - x; v.scrollTop = fy * p.H - y;
+}
+function drawAll() { if (layout === "plan") return drawPlan(); for (let i = 0; i < +layout; i++) if (panes[i].cv) draw(i); }
+
+// ================================================================== drawing a camera
+function predict(s, id) {                   // where a spot should be on a camera, from the others' planes
+  const m = model(cams[id]); if (!m) return null;
+  const pts = [];
+  for (const c in s.at) { if (c === id) continue; const mc = model(cams[c]); if (!mc) continue; const q = toFloor(mc, ...s.at[c]); if (q) pts.push(q); }
+  if (!pts.length) return null;
+  const X = pts.reduce((a, q) => a + q[0], 0) / pts.length, Y = pts.reduce((a, q) => a + q[1], 0) / pts.length, p = fromFloor(m, X, Y);
+  return p && p[0] > -0.2 && p[0] < 1.2 && p[1] > -0.2 && p[1] < 1.2 ? p : null;
+}
+function errColor(e) { return e === undefined ? "#ffffff" : e < 12 ? "#22c55e" : e < 30 ? "#f59e0b" : "#ef4444"; }
+function gridLines(c, m) {
+  const b = floorBox(c, m); if (!b) return null;
+  const step = niceStep(Math.max(b[2] - b[0], b[3] - b[1]) / 9), out = [];
+  const span = (a0, a1) => { const r = []; for (let a = Math.ceil(a0 / step) * step; a <= a1 + 1e-9; a += step) r.push(a); return r; };
+  for (const [fixed, a0, a1, r0, r1] of [["x", b[0], b[2], b[1], b[3]], ["y", b[1], b[3], b[0], b[2]]])
+    for (const a of span(a0, a1)) {
+      const seg = []; let line = [];
+      for (let t = 0; t <= 60; t++) {
+        const o = r0 + (r1 - r0) * t / 60, p = fixed === "x" ? fromFloor(m, a, o) : fromFloor(m, o, a);
+        if (p && p[0] > -0.5 && p[0] < 1.5 && p[1] > -0.5 && p[1] < 1.5) line.push(p); else { if (line.length > 1) seg.push(line); line = []; }
+      }
+      if (line.length > 1) seg.push(line);
+      if (seg.length) out.push({axis: fixed, value: a, seg, major: Math.abs(a / step / 5 - Math.round(a / step / 5)) < 1e-6});
+    }
+  return {step, lines: out};
+}
+function fmtLen(v, id) { return unitsCm(id) ? (Math.abs(v) >= 100 ? (v / 100).toFixed(Math.abs(v) % 100 ? 1 : 0) + " m" : Math.round(v) + " cm") : String(+v.toFixed(1)); }
+
+function draw(i) {
+  const p = panes[i], c = cams[p.cam], ctx = p.ctx, W = p.W, H = p.H;
+  if (!ctx || !c) return;
+  const X = u => u * W, Y = v => v * H;
+  ctx.clearRect(0, 0, W, H); ctx.fillStyle = "#1a1a1a"; ctx.fillRect(0, 0, W, H);
+  if (c.img && c.img.complete && c.img.naturalWidth) ctx.drawImage(c.img, 0, 0, W, H);
+  else { ctx.fillStyle = "#aaa"; ctx.font = "15px system-ui"; ctx.fillText(`no picture of ${c.id} (--videos or --image)`, 16, 28); }
+  const ov = p.ov;
+  if (p.over && ov && ov.img && ov.img.complete) { ctx.globalAlpha = p.alpha; ctx.drawImage(ov.img, 0, 0, W, H); ctx.globalAlpha = 1; }
+  const path = q => { ctx.beginPath(); q.forEach(([x, y], k) => k ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))); ctx.closePath(); };
+  c.exclude.forEach(q => { path(q); ctx.fillStyle = "rgba(110,110,110,0.55)"; ctx.fill(); });
+  // the floor grid
+  const m = model(c);
+  if (m && (show.grid || tool === "plane")) {
+    const g = gridLines(c, m);
+    if (g) {
+      const placed = [];
+      g.lines.forEach(l => {
+        ctx.strokeStyle = l.major ? "rgba(34,211,238,0.95)" : "rgba(34,211,238,0.5)"; ctx.lineWidth = l.major ? 1.6 : 1;
+        l.seg.forEach(s => { ctx.beginPath(); s.forEach(([u, v], k) => k ? ctx.lineTo(X(u), Y(v)) : ctx.moveTo(X(u), Y(v))); ctx.stroke(); });
+        // its label where the line is nearest the viewer (lowest on the picture), none crowding another
+        let q = null; l.seg.forEach(s => s.forEach(a => { if (a[0] >= 0.01 && a[0] <= 0.97 && a[1] >= 0.03 && a[1] <= 0.99 && (!q || a[1] > q[1])) q = a; }));
+        if (!q) return;
+        const x = X(q[0]), y = Y(q[1]);
+        if (placed.some(([a, b]) => Math.hypot(a - x, b - y) < 44)) return;
+        placed.push([x, y]);
+        ctx.font = "11px system-ui"; ctx.lineWidth = 3; ctx.strokeStyle = "rgba(0,0,0,.75)";
+        const t = (l.axis === "x" ? "x " : "y ") + fmtLen(l.value, c.id); ctx.strokeText(t, x + 3, y - 3);
+        ctx.fillStyle = "#a5f3fc"; ctx.fillText(t, x + 3, y - 3);
+      });
+    }
+  }
+  // zones
+  LAYERS.forEach(l => c[l].forEach((q, k) => {
+    const isSel = sel && sel.kind === "poly" && sel.cam === c.id && sel.layer === l && sel.i === k;
+    path(q); ctx.lineWidth = isSel ? 3.5 : 2; ctx.strokeStyle = COL[l]; ctx.setLineDash(l === "tracking_mask" ? [8, 5] : []); ctx.stroke(); ctx.setLineDash([]);
+    if (l === "mask") { ctx.fillStyle = "rgba(62,224,122,0.08)"; ctx.fill(); }
+    if (tool === l || isSel) q.forEach(([x, y]) => { ctx.fillStyle = "#fff"; ctx.fillRect(X(x) - 4, Y(y) - 4, 8, 8); ctx.strokeStyle = COL[l]; ctx.lineWidth = 2; ctx.strokeRect(X(x) - 4, Y(y) - 4, 8, 8); });
+  }));
+  if (p.over && ov && ov.zones) [["mask", "#ffd400", []], ["tracking_mask", "#ffd400", [3, 4]]].forEach(([k, col, dash]) => (ov.zones[k] || []).forEach(q => {
+    ctx.strokeStyle = col; ctx.lineWidth = 2; ctx.setLineDash(dash); ctx.beginPath(); let on = false;
+    q.forEach(pt => { if (!pt) { on = false; return; } if (on) ctx.lineTo(X(pt[0]), Y(pt[1])); else { ctx.moveTo(X(pt[0]), Y(pt[1])); on = true; } });
+    ctx.stroke(); ctx.setLineDash([]);
+  }));
+  // the cows
+  let n = {kept: 0, excluded: 0, small: 0, other: 0};
+  if (show.cows) (c.boxes || []).forEach(b => {
+    const v = verdict(c, b); n[v]++;
+    ctx.lineWidth = 1.5; ctx.setLineDash(v === "other" ? [5, 4] : []);
+    ctx.strokeStyle = {kept: "#3ee07a", excluded: "#ff4040", small: "#ffa020", other: "#ffffff"}[v];
+    ctx.strokeRect(X(b[0]), Y(b[1]), X(b[2] - b[0]), Y(b[3] - b[1])); ctx.setLineDash([]);
+  });
+  // the plane's points
+  if (m && tool === "plane") c.calib.floor_points.forEach((fp, k) => {
+    const isSel = sel && sel.kind === "handle" && sel.cam === c.id && sel.i === k, x = X(fp[0]), y = Y(fp[1]), r = isSel ? 8 : 6;
+    ctx.beginPath(); ctx.moveTo(x, y - r); ctx.lineTo(x + r, y); ctx.lineTo(x, y + r); ctx.lineTo(x - r, y); ctx.closePath();
+    ctx.fillStyle = isSel ? "#fff" : "#e879f9"; ctx.fill(); ctx.strokeStyle = "#000"; ctx.lineWidth = 1; ctx.stroke();
+    if (isSel) { ctx.font = "12px system-ui"; ctx.lineWidth = 3; ctx.strokeStyle = "#000"; const t = `${fmtLen(fp[2], c.id)}, ${fmtLen(fp[3], c.id)}`; ctx.strokeText(t, x + 10, y - 8); ctx.fillStyle = "#f5d0fe"; ctx.fillText(t, x + 10, y - 8); }
+  });
+  // the spots: here, and where the selected one should be
+  spots.forEach(s => {
+    const isSel = sel && sel.kind === "spot" && sel.id === s.id;
+    let at = s.at[c.id], ghost = false;
+    if (!at) { if (!isSel) return; at = predict(s, c.id); ghost = true; if (!at) return; }
+    const e = errors[s.id] ? errors[s.id][c.id] : undefined, col = ghost ? "#ffffff" : errColor(e), x = X(at[0]), y = Y(at[1]);
+    if (isSel) { ctx.beginPath(); ctx.arc(x, y, 14, 0, 7); ctx.fillStyle = "rgba(96,165,250,0.25)"; ctx.fill(); }
+    ctx.setLineDash(ghost ? [3, 3] : []); ctx.strokeStyle = col; ctx.lineWidth = isSel ? 3 : 2.2;
+    ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+    if (!ghost) { ctx.beginPath(); ctx.arc(x, y, 1.5, 0, 7); ctx.fillStyle = col; ctx.fill(); }
+    const t = ghost ? s.id + "?" : String(s.id) + (e !== undefined && e >= 12 ? ` (${Math.round(e)} px)` : "");
+    ctx.font = "bold 13px system-ui"; ctx.lineWidth = 3; ctx.strokeStyle = "#000"; ctx.strokeText(t, x + 9, y - 8); ctx.fillStyle = col; ctx.fillText(t, x + 9, y - 8);
+  });
+  if (cur && cur.pane === i) {
+    ctx.strokeStyle = COL[cur.layer]; ctx.lineWidth = 2; ctx.beginPath();
+    cur.pts.forEach(([x, y], k) => k ? ctx.lineTo(X(x), Y(y)) : ctx.moveTo(X(x), Y(y))); if (cur.hover) ctx.lineTo(X(cur.hover[0]), Y(cur.hover[1])); ctx.stroke();
+    cur.pts.forEach(([x, y], k) => { ctx.fillStyle = k ? COL[cur.layer] : "#fff"; ctx.fillRect(X(x) - 4, Y(y) - 4, 8, 8); });
+  }
+  const info = [];
+  if (show.cows && (c.boxes || []).length) info.push(`cows ${c.boxes.length}: ${n.kept} kept, ${n.excluded} excluded, ${n.other} another's`);
+  if (p.over) info.push(ov ? (ov.error || `floor shared ${Math.round(ov.share * 100)}%`) : "...");
+  p.el.querySelector(".info").textContent = info.join(" · ");
+  p.el.querySelector(".info").title = info.join("\n");
+}
+function verdict(c, b) {
+  const cx = (b[0] + b[2]) / 2, cy = (b[1] + b[3]) / 2;
+  if (c.exclude.some(p => inPoly(cx, cy, p))) return "excluded";
+  if ((b[2] - b[0]) * (b[3] - b[1]) < (c.min_box_pct || 0) / 100) return "small";
+  if (c.mask.length && !c.mask.some(p => inPoly(cx, cy, p))) return "other";
+  return "kept";
+}
+
+// ================================================================== editing on a camera
+function hook(i) {
+  const p = panes[i], cv = p.cv;
+  const pt = e => { const r = cv.getBoundingClientRect(); return [Math.min(1, Math.max(0, (e.clientX - r.left) / r.width)), Math.min(1, Math.max(0, (e.clientY - r.top) / r.height))]; };
+  const near = (a, b, px = 10) => Math.hypot((a[0] - b[0]) * p.W, (a[1] - b[1]) * p.H) < px;
+  const hitSpot = q => { const c = cams[p.cam]; let best = null;
+    spots.forEach(s => { const a = s.at[c.id]; if (a && near(a, q)) best = {s, ghost: false};
+      else if (!a && sel && sel.kind === "spot" && sel.id === s.id) { const g = predict(s, c.id); if (g && near(g, q, 14)) best = {s, ghost: g}; } });
+    return best; };
+  const hitHandle = q => { const c = cams[p.cam]; if (!model(c)) return -1; return c.calib.floor_points.findIndex(fp => near([fp[0], fp[1]], q)); };
+  const hitVertex = (q, layers) => { const c = cams[p.cam];
+    for (const l of layers) for (let k = 0; k < c[l].length; k++) { const j = c[l][k].findIndex(v => near(v, q)); if (j >= 0) return {l, k, j}; } return null; };
+  const hitPoly = (q, layers) => { const c = cams[p.cam]; let best = null, area = Infinity;
+    for (const l of layers) c[l].forEach((poly, k) => { if (inPoly(q[0], q[1], poly)) { let a = 0; poly.forEach((v, j) => { const w = poly[(j + 1) % poly.length]; a += v[0] * w[1] - w[0] * v[1]; });
+      if (Math.abs(a) < area) { area = Math.abs(a); best = {l, k}; } } });
+    return best; };
+
+  cv.addEventListener("contextmenu", e => e.preventDefault());
+  cv.addEventListener("pointerdown", e => {
+    setFocus(i);
+    const q = pt(e), c = cams[p.cam];
+    if (e.button === 2) {                    // right click: a corner or a spot off this camera
+      const v = hitVertex(q, tool in COL ? [tool] : LAYERS);
+      if (v && c[v.l][v.k].length > 3) { checkpoint(); c[v.l][v.k].splice(v.j, 1); zonesEdited(c.id); return; }
+      const h = hitSpot(q); if (h && !h.ghost) { checkpoint(); delete h.s.at[c.id]; if (!Object.keys(h.s.at).length) spots = spots.filter(s => s !== h.s); spotsEdited([c.id]); }
+      return;
+    }
+    if (tool === "plane") {
+      const k = hitHandle(q);
+      if (k >= 0) { sel = {kind: "handle", cam: c.id, i: k}; checkpoint(); drag = {kind: "handle", k}; cv.setPointerCapture(e.pointerId); afterAny(false); return; }
+      const h = hitSpot(q); if (h && !h.ghost) { sel = {kind: "spot", id: h.s.id}; afterAny(false); return; }
+      sel = null; afterAny(false);
+      if (!model(c)) toast(`${c.id} has no plane yet: "Start a plane" on the right, or spots`);
+      return;
+    }
+    if (tool === "spots" || tool === "select") {
+      const h = hitSpot(q);
+      if (h) {
+        sel = {kind: "spot", id: h.s.id}; checkpoint();
+        if (h.ghost) h.s.at[c.id] = [+h.ghost[0].toFixed(5), +h.ghost[1].toFixed(5)];
+        drag = {kind: "spot", s: h.s, moved: !!h.ghost}; cv.setPointerCapture(e.pointerId); afterAny(false); return;
+      }
+    }
+    if (tool === "spots") {
+      checkpoint();
+      const s0 = sel && sel.kind === "spot" ? spotById(sel.id) : null;
+      if (s0 && !s0.at[c.id]) s0.at[c.id] = q.map(v => +v.toFixed(5));
+      else { const id = spots.reduce((a, s) => Math.max(a, s.id), 0) + 1; spots.push({id, at: {[c.id]: q.map(v => +v.toFixed(5))}}); sel = {kind: "spot", id};
+        if (+layout > 1) toast(`spot ${id}: now the same spot on the other cameras`); }
+      spotsEdited([c.id]); return;
+    }
+    if (tool === "select") {
+      const v = hitVertex(q, LAYERS);
+      if (v) { sel = {kind: "poly", cam: c.id, layer: v.l, i: v.k}; checkpoint(); drag = {kind: "vertex", ...v}; cv.setPointerCapture(e.pointerId); afterAny(false); return; }
+      const h = hitPoly(q, LAYERS); sel = h ? {kind: "poly", cam: c.id, layer: h.l, i: h.k} : null; afterAny(false); return;
+    }
+    // drawing a zone
+    const layer = tool;
+    if (cur && cur.pane === i) {
+      if (cur.pts.length >= 3 && near(cur.pts[0], q)) { closePoly(); return; }
+      cur.pts.push(q); draw(i); return;
+    }
+    const v = hitVertex(q, [layer]);
+    if (v) { sel = {kind: "poly", cam: c.id, layer, i: v.k}; checkpoint(); drag = {kind: "vertex", ...v}; cv.setPointerCapture(e.pointerId); afterAny(false); return; }
+    const h = hitPoly(q, [layer]);
+    if (h && !(sel && sel.kind === "poly" && sel.cam === c.id && sel.layer === layer && sel.i === h.k)) { sel = {kind: "poly", cam: c.id, layer, i: h.k}; afterAny(false); return; }
+    sel = null; cur = {pane: i, cam: c.id, layer, pts: [q]}; afterAny(false);
+  });
+  cv.addEventListener("pointermove", e => {
+    const q = pt(e), c = cams[p.cam];
+    if (cur && cur.pane === i && !drag) { cur.hover = q; draw(i); }
+    if (!drag) {
+      const over = (tool === "plane" && hitHandle(q) >= 0) || ((tool === "spots" || tool === "select") && hitSpot(q)) || (tool !== "plane" && tool !== "spots" && hitVertex(q, tool in COL ? [tool] : LAYERS));
+      cv.style.cursor = over ? "move" : tool === "select" ? "default" : "crosshair"; return;
+    }
+    const r = q.map(v => +v.toFixed(5));
+    if (drag.kind === "spot") { drag.s.at[c.id] = r; drag.moved = true; recomputeErrors(); drawAll(); }
+    else if (drag.kind === "vertex") { c[drag.l][drag.k][drag.j] = r; draw(i); }
+    else if (drag.kind === "handle") { const fp = c.calib.floor_points[drag.k]; fp[0] = r[0]; fp[1] = r[1]; c.calib = {...c.calib}; floorDirty[c.id] = true; recomputeErrors(); drawAll(); throttleOverlays(); }
+  });
+  cv.addEventListener("pointerup", () => {
+    if (!drag) return;
+    const d = drag, c = cams[p.cam]; drag = null;
+    if (d.kind === "spot") { if (d.moved) spotsEdited([c.id]); else { undoStack.pop(); edits--; afterAny(false); } }
+    else if (d.kind === "vertex") zonesEdited(c.id);
+    else if (d.kind === "handle") planEdited(c.id);
+  });
+  cv.addEventListener("dblclick", e => {        // a corner more on the selected zone's edge
+    const q = pt(e), c = cams[p.cam];
+    if (!(sel && sel.kind === "poly" && sel.cam === c.id)) return;
+    const poly = c[sel.layer][sel.i]; let best = -1, bd = 12 / p.W;
+    poly.forEach((a, j) => { const d = distSeg(q, a, poly[(j + 1) % poly.length]); if (d < bd) { bd = d; best = j; } });
+    if (best >= 0) { checkpoint(); poly.splice(best + 1, 0, q.map(v => +v.toFixed(5))); zonesEdited(c.id); }
+  });
+  p.view.addEventListener("wheel", e => { if (!e.ctrlKey && !e.metaKey) return; e.preventDefault(); zoom(i, e.deltaY < 0 ? 1.2 : 1 / 1.2, e.clientX, e.clientY); }, {passive: false});
+}
+function closePoly() { if (!cur || cur.pts.length < 3) return; checkpoint(); const c = cams[cur.cam]; c[cur.layer].push(cur.pts.map(q => q.map(v => +v.toFixed(5))));
+  sel = {kind: "poly", cam: c.id, layer: cur.layer, i: c[cur.layer].length - 1}; const id = c.id; cur = null; zonesEdited(id); }
+
+// ================================================================== what follows an edit
+function zonesEdited(id) { zonesChanged.add(id); afterAny(true); }
+function planEdited(id) { floorDirty[id] = true; recomputeErrors(); afterAny(true); }
+function spotsEdited(ids) { recomputeErrors(); afterAny(false); if (layout === "plan") drawPlan(); scheduleFit(ids); }
+function recomputeErrors() {
+  errors = {};
+  spots.forEach(s => {
+    const pts = {};
+    for (const c in s.at) { if (!cams[c]) continue; const m = model(cams[c]); if (!m) continue; const q = toFloor(m, ...s.at[c]); if (q) pts[c] = q; }
+    const ids = Object.keys(pts); if (ids.length < 2) return;
+    const X = ids.reduce((a, c) => a + pts[c][0], 0) / ids.length, Y = ids.reduce((a, c) => a + pts[c][1], 0) / ids.length, e = {};
+    ids.forEach(c => { const q = fromFloor(model(cams[c]), X, Y); if (q) { const w = cams[c].px_w || cams[c].w; e[c] = Math.hypot((q[0] - s.at[c][0]) * w, (q[1] - s.at[c][1]) * w * cams[c].h / cams[c].w); } });
+    errors[s.id] = e;
+  });
+}
+let fitTimer = null, fitCams = new Set();
+function scheduleFit(ids) { if (!show.autofit) return; ids.forEach(x => fitCams.add(x)); clearTimeout(fitTimer); fitTimer = setTimeout(() => fit([...fitCams]), 450); }
+function currentFloor() { const f = {}; order.forEach(id => f[id] = cams[id].calib); return f; }
+async function fit(changed) {
+  fitCams = new Set();
+  try {
+    const r = await api("/api/fit", {spots, floor: currentFloor(), changed});
+    Object.assign(fitPairs, r.pairs);
+    const got = Object.keys(r.floor);
+    got.forEach(id => { cams[id].calib = r.floor[id]; floorDirty[id] = true; });
+    for (const k in r.pairs) { if (r.pairs[k].ok) okPairs.add(k); else okPairs.delete(k); }
+    if (r.link_dist) linkDist = Math.max(linkDist || 0, r.link_dist);
+    recomputeErrors();
+    if (got.length) say(r.notes.concat([`planes fitted from the spots: ${got.join(", ")} (not saved yet)`]), "good");
+    else if (r.notes.length) say(r.notes, "warn");
+    afterAny(got.length > 0);
+  } catch (e) { say(e.message, "bad"); }
+}
+
+// ================================================================== overlays
+let ovTimer = null, ovLast = 0;
+function throttleOverlays() { const t = Date.now(); if (t - ovLast > 350) { ovLast = t; refreshOverlays(0); } }
+function refreshOverlays(delay = 200) {
+  clearTimeout(ovTimer);
+  ovTimer = setTimeout(async () => {
+    if (layout === "plan") return;
+    for (let i = 0; i < +layout; i++) {
+      const p = panes[i];
+      if (!p.over || p.over === p.cam) { p.ov = null; if (p.cv) draw(i); continue; }
+      const top = cams[p.over];
+      try {
+        const r = await api("/api/overlay", {base: p.cam, top: p.over, floor: currentFloor(), top_zones: {mask: top.mask, tracking_mask: top.tracking_mask}});
+        const im = new Image(); im.onload = () => draw(i); im.src = "data:image/png;base64," + r.png; r.img = im; p.ov = r;
+      } catch (e) { p.ov = {error: e.message}; }
+      if (p.cv) draw(i);
+    }
+  }, delay);
+}
+
+// ================================================================== the plan
+function buildPlan(main) {
+  const opts = order.map(id => `<label style="display:inline-flex;gap:4px;align-items:center"><input type="checkbox" data-pc="${id}" ${planHidden.has(id) ? "" : "checked"}><b style="color:${camColor(id)}">${id}</b></label>`).join(" ");
+  main.innerHTML = `<div class="planbar"><span class="mute">pictures</span><input id="palpha" type="range" min="0" max="100" value="${Math.round(planAlpha * 100)}">
+    ${opts}<span class="mute" id="pinfo"></span></div><div class="pane"><div class="view" id="pview" style="max-height:calc(100vh - 130px)"><canvas id="pcv"></canvas></div></div>`;
+  $("palpha").oninput = e => { planAlpha = e.target.value / 100; drawPlan(); };
+  main.querySelectorAll("[data-pc]").forEach(b => b.onchange = () => { if (b.checked) planHidden.delete(b.dataset.pc); else planHidden.add(b.dataset.pc); drawPlan(); });
+  const cv = $("pcv");
+  cv.addEventListener("pointerdown", e => {
+    if (!plan || !plan.view) return;
+    const r = cv.getBoundingClientRect(), x = e.clientX - r.left, y = e.clientY - r.top; let best = null, bd = 12;
+    spots.forEach(s => { const f = spotFloor(s); if (!f) return; const [px, py] = plan.view(f.X, f.Y), d = Math.hypot(px - x, py - y); if (d < bd) { bd = d; best = s; } });
+    sel = best ? {kind: "spot", id: best.id} : null; drawPlan(); inspector();
+  });
+  loadPlan();
+}
+let planTimer = null;
+function loadPlan() {
+  clearTimeout(planTimer);
+  planTimer = setTimeout(async () => {
+    const zones = {}; order.forEach(id => zones[id] = {mask: cams[id].mask, tracking_mask: cams[id].tracking_mask});
+    try {
+      const r = await api("/api/plan", {floor: currentFloor(), focus: panes[focus].cam, zones});
+      r.imgs = {}; for (const id in r.cams) { const im = new Image(); im.onload = drawPlan; im.src = "data:image/png;base64," + r.cams[id]; r.imgs[id] = im; }
+      plan = r;
+      $("pinfo").textContent = `${r.group.join(", ")}` + (r.apart.length ? ` · apart on the plan (no shared floor): ${r.apart.join(", ")}` : "");
+    } catch (e) { plan = {error: e.message}; }
+    drawPlan();
+  }, 150);
+}
+function spotFloor(s) {
+  const pts = []; for (const c in s.at) { const m = cams[c] && model(cams[c]); if (!m) continue; const q = toFloor(m, ...s.at[c]); if (q) pts.push({c, q}); }
+  if (!pts.length) return null;
+  return {X: pts.reduce((a, p) => a + p.q[0], 0) / pts.length, Y: pts.reduce((a, p) => a + p.q[1], 0) / pts.length, pts};
+}
+function drawPlan() {
+  const cv = $("pcv"); if (!cv) return;
+  const view = $("pview"), dpr = window.devicePixelRatio || 1, ctx = cv.getContext("2d");
+  if (!plan || plan.error) { cv.width = 600; cv.height = 80; ctx.fillStyle = "#1a1a1a"; ctx.fillRect(0, 0, 600, 80); ctx.fillStyle = "#bbb"; ctx.font = "14px system-ui";
+    ctx.fillText(plan ? plan.error : "loading the plan...", 16, 44); return; }
+  const [x0, y0, x1, y1] = plan.extent, W = Math.max(300, view.clientWidth - 2), H = Math.round(W * plan.h / plan.w);
+  cv.style.width = W + "px"; cv.style.height = H + "px"; cv.width = W * dpr; cv.height = H * dpr; ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const P = (X, Y) => [(X - x0) / (x1 - x0) * W, (Y - y0) / (y1 - y0) * H]; plan.view = P;
+  ctx.fillStyle = "#151515"; ctx.fillRect(0, 0, W, H);
+  ctx.globalAlpha = planAlpha;
+  plan.group.forEach(id => { const im = plan.imgs[id]; if (!planHidden.has(id) && im && im.complete) ctx.drawImage(im, 0, 0, W, H); });
+  ctx.globalAlpha = 1;
+  // the grid
+  const ref = plan.group[0], step = niceStep(Math.max(x1 - x0, y1 - y0) / 12);
+  ctx.font = "11px system-ui";
+  for (let X = Math.ceil(x0 / step) * step; X <= x1; X += step) { const [px] = P(X, 0); ctx.strokeStyle = "rgba(255,255,255,.14)"; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(px, 0); ctx.lineTo(px, H); ctx.stroke(); ctx.fillStyle = "rgba(255,255,255,.6)"; ctx.fillText(fmtLen(X, ref), px + 3, 12); }
+  for (let Y = Math.ceil(y0 / step) * step; Y <= y1; Y += step) { const [, py] = P(0, Y); ctx.strokeStyle = "rgba(255,255,255,.14)"; ctx.beginPath(); ctx.moveTo(0, py); ctx.lineTo(W, py); ctx.stroke(); ctx.fillStyle = "rgba(255,255,255,.6)"; ctx.fillText(fmtLen(Y, ref), 3, py - 3); }
+  // each camera's zones on the floor
+  plan.group.forEach(id => {
+    if (planHidden.has(id)) return;
+    const c = cams[id], m = model(c); if (!m) return;
+    [["mask", []], ["tracking_mask", [6, 4]]].forEach(([k, dash]) => c[k].forEach(poly => {
+      ctx.strokeStyle = camColor(id); ctx.lineWidth = k === "mask" ? 2.5 : 1.5; ctx.setLineDash(dash); ctx.beginPath(); let on = false;
+      poly.forEach((a, j) => { const b = poly[(j + 1) % poly.length];
+        for (let t = 0; t < 16; t++) { const u = a[0] + (b[0] - a[0]) * t / 16, v = a[1] + (b[1] - a[1]) * t / 16, q = toFloor(m, u, v);
+          if (!q) { on = false; continue; } const [px, py] = P(q[0], q[1]); if (on) ctx.lineTo(px, py); else { ctx.moveTo(px, py); on = true; } } });
+      ctx.stroke(); ctx.setLineDash([]);
+    }));
+  });
+  // the spots: each camera's floor point, the mean ringed
+  spots.forEach(s => {
+    const f = spotFloor(s); if (!f) return;
+    const isSel = sel && sel.kind === "spot" && sel.id === s.id, [mx, my] = P(f.X, f.Y);
+    f.pts.forEach(({c, q}) => { const [px, py] = P(q[0], q[1]); ctx.strokeStyle = camColor(c); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(px, py); ctx.stroke();
+      ctx.fillStyle = camColor(c); ctx.beginPath(); ctx.arc(px, py, 3, 0, 7); ctx.fill(); });
+    ctx.strokeStyle = isSel ? "#60a5fa" : "#fff"; ctx.lineWidth = isSel ? 3 : 1.5; ctx.beginPath(); ctx.arc(mx, my, isSel ? 9 : 6, 0, 7); ctx.stroke();
+    ctx.font = "bold 12px system-ui"; ctx.lineWidth = 3; ctx.strokeStyle = "#000"; ctx.strokeText(s.id, mx + 8, my - 7); ctx.fillStyle = "#fff"; ctx.fillText(s.id, mx + 8, my - 7);
+  });
+}
+
+// ================================================================== the side panels
+function camList() {
+  const fc = layout === "plan" ? null : panes[focus].cam;
+  $("camlist").innerHTML = order.map(id => {
+    const c = cams[id], n = spots.filter(s => s.at[id]).length;
+    const plane = !c.calib ? `<span class="chip">no plane</span>` : floorDirty[id] ? `<span class="chip warn">plane *</span>` : `<span class="chip good">plane</span>`;
+    const z = zonesChanged.has(id) ? `<span class="chip warn">zones *</span>` : "";
+    return `<div class="cam ${id === fc ? "focus" : ""}" data-cam="${id}"><span class="dot" style="background:${camColor(id)}"></span><span class="name">${id}</span>
+      <span class="chips">${z}${plane}${n ? `<span class="chip">${n} spots</span>` : ""}</span></div>`;
+  }).join("");
+  $("camlist").querySelectorAll(".cam").forEach(el => el.onclick = () => {
+    const id = el.dataset.cam;
+    if (layout === "plan") { panes[focus].cam = id; loadPlan(); return; }
+    panes[focus].cam = id; panes[focus].ov = null; build();
+  });
+}
+function inspector() {
+  const el = $("inspector"), parts = [];
+  // the selection
+  if (sel && sel.kind === "spot" && spotById(sel.id)) {
+    const s = spotById(sel.id), e = errors[s.id] || {};
+    const rows = order.map(id => {
+      const a = s.at[id], err = e[id];
+      return `<div class="row"><b style="color:${camColor(id)};min-width:44px">${id}</b>${a ? `<span>${err === undefined ? "placed" : `<span class="${err < 12 ? "good" : err < 30 ? "warn" : "bad"}">${err.toFixed(0)} px off</span>`}</span>
+        <button data-unspot="${id}" title="this spot off ${id}">remove</button>` : `<span class="mute">not on it</span>`}</div>`; }).join("");
+    parts.push(`<div class="card"><h4>Spot ${s.id}</h4>${rows}<div class="row"><button class="danger" id="delspot">Delete spot</button></div>
+      <div class="hint">Tool Spots: click the same spot of the floor on another camera to put it there; where the planes say it should be is ringed (dashed). Drag to move, right-click to take it off a camera.</div></div>`);
+  } else if (sel && sel.kind === "poly" && cams[sel.cam] && cams[sel.cam][sel.layer][sel.i]) {
+    const poly = cams[sel.cam][sel.layer][sel.i];
+    parts.push(`<div class="card"><h4>${sel.cam}: ${NAMES[sel.layer]}</h4><div class="row mute">${poly.length} corners</div>
+      <div class="row"><button class="danger" id="delpoly">Delete</button></div><div class="hint">Drag a corner to move it, double-click an edge for a corner more, right-click a corner to remove it.</div></div>`);
+  } else if (sel && sel.kind === "handle" && cams[sel.cam] && cams[sel.cam].calib) {
+    const fp = cams[sel.cam].calib.floor_points[sel.i];
+    parts.push(`<div class="card"><h4>${sel.cam}: plane point ${sel.i + 1}</h4>
+      <div class="row"><label>on the picture</label><span>${fp[0].toFixed(3)}, ${fp[1].toFixed(3)}</span></div>
+      <div class="row"><label>on the floor X</label><input type="number" id="hx" value="${fp[2]}" step="10"><label>Y</label><input type="number" id="hy" value="${fp[3]}" step="10"></div>
+      <div class="hint">Drag the point on the picture: the floor there is this X, Y. With another camera laid over (over it), move the points until the floor lines up.</div></div>`);
+  }
+  // the camera of the highlighted view
+  const id = layout === "plan" ? panes[focus].cam : panes[focus].cam, c = cams[id];
+  if (c) {
+    const pairs = Object.entries(fitPairs).filter(([k]) => k.split(":").includes(id));
+    const pairRows = pairs.map(([k, r]) => `<div><b>${k.replace(":", " &harr; ")}</b><span class="${r.ok ? "good" : "warn"}">${r.ok ? `fitted, ${r.n - (r.left_out || []).length}/${r.n} within ${Math.round(r.median)} px` : `${r.n} in common${r.n < 5 ? " (5 needed)" : " - not fitted"}`}</span></div>`).join("");
+    const lens = c.calib ? `<div class="row"><label>lens bend</label><input type="number" id="lens" value="${c.calib.distortion || 0}" step="0.05" min="-0.8" max="0.3"><span class="hint">0 straight, &minus;0.3 a wide lens</span></div>` : "";
+    parts.push(`<div class="card"><h4><span style="color:${camColor(id)}">&#9679;</span> ${id}</h4>
+      <div class="row"><label>plane</label>${!c.calib ? `<span class="mute">none</span>` : floorDirty[id] ? `<span class="warn">changed, not saved</span>` : `<span class="good">as in barn.toml</span>`}</div>${lens}
+      <div class="row">${c.calib ? `<button data-tool-go="plane">Edit the plane</button><button class="danger" id="forget">Remove plane</button>` : `<button id="newplane">Start a plane</button>`}
+      <button id="fitnow" title="fit every camera joined to this one by 5 spots">Fit from spots</button></div>
+      <div class="row"><label>zones</label><span>${LAYERS.map(l => `${c[l].length} ${NAMES[l]}`).join(", ")}</span></div>
+      <div class="pairs">${pairRows || `<div class="hint">No fit yet. 5 spots in common with another camera fit both.</div>`}</div></div>`);
+  }
+  parts.push(`<div class="card"><h4>Saving</h4><div class="hint">Save writes the changed zones, the planes and${linkDist ? ` [mct] link_dist ${linkDist} (now ${S && S.link_dist !== undefined ? S.link_dist : "-"})` : " (after a fit) [mct]"} into <b title="${esc(S ? S.config : "")}">${esc(S ? S.config.split(/[\\/]/).pop() : "barn.toml")}</b> (the old one kept as .bak), the spots into points.json. <kbd>Ctrl+S</kbd></div></div>`);
+  parts.push(`<div class="card log"><h4>Messages</h4>${logLines.map(l => `<div class="${l.cls || ""}">${esc(l.t)}</div>`).join("") || `<div class="hint">-</div>`}</div>`);
+  el.innerHTML = parts.join("");
+  el.querySelectorAll("[data-unspot]").forEach(b => b.onclick = () => { const s = spotById(sel.id); checkpoint(); delete s.at[b.dataset.unspot]; if (!Object.keys(s.at).length) { spots = spots.filter(x => x !== s); sel = null; } spotsEdited([b.dataset.unspot]); });
+  if ($("delspot")) $("delspot").onclick = () => { const s = spotById(sel.id); checkpoint(); spots = spots.filter(x => x !== s); sel = null; spotsEdited(Object.keys(s.at)); };
+  if ($("delpoly")) $("delpoly").onclick = () => { checkpoint(); cams[sel.cam][sel.layer].splice(sel.i, 1); const cid = sel.cam; sel = null; zonesEdited(cid); };
+  if ($("hx")) { const set = () => { checkpoint(); const c2 = cams[sel.cam], fp = c2.calib.floor_points[sel.i]; fp[2] = +$("hx").value; fp[3] = +$("hy").value; c2.calib = {...c2.calib}; planEdited(c2.id); }; $("hx").onchange = set; $("hy").onchange = set; }
+  if ($("lens")) $("lens").onchange = e => { checkpoint(); c.calib = {...c.calib, distortion: +(+e.target.value).toFixed(3)}; planEdited(id); };
+  if ($("forget")) $("forget").onclick = () => { if (!confirm(`Remove ${id}'s plane? (written on Save)`)) return; checkpoint(); c.calib = null; floorDirty[id] = true; [...okPairs].forEach(k => { if (k.split(":").includes(id)) okPairs.delete(k); }); planEdited(id); };
+  if ($("newplane")) $("newplane").onclick = () => { checkpoint(); c.calib = startPlane(c); floorDirty[id] = true; tool = "plane"; build(); planEdited(id);
+    say(`${id}: a plane to start from - drag its points (tool Plane), or spots shared with a calibrated camera fit it to the others`); };
+  if ($("fitnow")) $("fitnow").onclick = () => fit([id]);
+  el.querySelectorAll("[data-tool-go]").forEach(b => b.onclick = () => setTool(b.dataset.toolGo));
+}
+function startPlane(c) {                    // a trapezoid on the lower picture as a 10 x 6 m patch, clear of the other planes
+  let x = 0;
+  order.forEach(id => { const f = cams[id].calib; if (f && f.floor_points && id !== c.id) x = Math.max(x, ...f.floor_points.map(p => p[2]) ) ; });
+  x = x ? Math.ceil((x + 100000) / 100000) * 100000 : 0;
+  return {floor_points: [[0.3, 0.45, x, 0], [0.7, 0.45, x + 1000, 0], [0.95, 0.95, x + 1000, 600], [0.05, 0.95, x, 600]], distortion: 0, aspect: +(c.w / c.h).toFixed(4)};
+}
+
+// ================================================================== the bars, the keys
+function setTool(t) { tool = t; cur = null; if (t !== "spots" && t !== "select" && sel && sel.kind === "spot") sel = null;
+  document.querySelectorAll("[data-tool]").forEach(b => b.classList.toggle("on", b.dataset.tool === tool)); drawAll(); inspector(); }
+document.querySelectorAll("[data-tool]").forEach(b => b.onclick = () => setTool(b.dataset.tool));
+document.querySelectorAll("[data-layout]").forEach(b => b.onclick = () => { layout = b.dataset.layout; cur = null; build(); });
+document.querySelectorAll("[data-toggle]").forEach(b => b.onclick = () => { show[b.dataset.toggle] = !show[b.dataset.toggle]; b.classList.toggle("on", show[b.dataset.toggle]);
+  if (b.dataset.toggle === "autofit" && show.autofit) toast("auto-fit on: the planes follow the spots"); drawAll(); });
+$("undo").onclick = undo; $("redo").onclick = redo;
+$("reload").onclick = async () => { if (!edits || confirm("Drop every change since the last save?")) { await load(); toast("as in barn.toml"); } };
+$("save").onclick = async () => {
+  const camsOut = {}, floor = {};
+  zonesChanged.forEach(id => camsOut[id] = {mask: cams[id].mask, exclude: cams[id].exclude, tracking_mask: cams[id].tracking_mask});
+  for (const id in floorDirty) floor[id] = cams[id].calib;
+  const pairs = [...okPairs].filter(k => k.split(":").every(id => cams[id] && cams[id].calib));
+  try {
+    toast("saving...");
+    const r = await api("/api/save", {cams: camsOut, floor, spots: spots.filter(s => Object.keys(s.at).length), link_dist: pairs.length ? linkDist : null, calibrated_pairs: pairs});
+    const keep = {layout, tool, panes: panes.map(p => ({cam: p.cam, over: p.over, alpha: p.alpha, zoom: p.zoom})), logLines};
+    await load(r.state); layout = keep.layout; tool = keep.tool; keep.panes.forEach((p, i) => Object.assign(panes[i], p)); logLines = keep.logLines;
+    say(r.said, "good"); build(); toast("saved to barn.toml");
+  } catch (e) { say("not saved: " + e.message, "bad"); toast("not saved"); }
+};
+document.addEventListener("keydown", e => {
+  if (["INPUT", "SELECT", "TEXTAREA"].includes(e.target.tagName)) return;
+  const k = e.key.toLowerCase();
+  if ((e.ctrlKey || e.metaKey) && k === "z") { e.preventDefault(); e.shiftKey ? redo() : undo(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === "y") { e.preventDefault(); redo(); return; }
+  if ((e.ctrlKey || e.metaKey) && k === "s") { e.preventDefault(); $("save").click(); return; }
+  if (e.ctrlKey || e.metaKey || e.altKey) return;
+  const tools = {v: "select", m: "mask", e: "exclude", t: "tracking_mask", s: "spots", f: "plane"};
+  if (tools[k]) return setTool(tools[k]);
+  if (k === "g" || k === "c") { const b = document.querySelector(`[data-toggle="${k === "g" ? "grid" : "cows"}"]`); b.click(); return; }
+  if (k === "p") { layout = layout === "plan" ? "2" : "plan"; build(); return; }
+  if (["1", "2", "4"].includes(k)) { layout = k; build(); return; }
+  if (e.key === "Enter" && cur) { closePoly(); return; }
+  if (e.key === "Escape") { cur = null; sel = null; drawAll(); inspector(); return; }
+  if ((e.key === "Delete" || e.key === "Backspace") && sel) {
+    e.preventDefault();
+    if (sel.kind === "poly") { checkpoint(); cams[sel.cam][sel.layer].splice(sel.i, 1); const cid = sel.cam; sel = null; zonesEdited(cid); }
+    else if (sel.kind === "spot") {
+      const s = spotById(sel.id), fc = panes[focus].cam; checkpoint();
+      if (layout !== "plan" && s.at[fc] && Object.keys(s.at).length > 1) { delete s.at[fc]; spotsEdited([fc]); toast(`spot ${s.id} off ${fc}`); }
+      else { spots = spots.filter(x => x !== s); sel = null; spotsEdited(Object.keys(s.at)); toast(`spot ${s.id} deleted`); }
+    }
+  }
+});
+window.addEventListener("beforeunload", e => { if (edits) { e.preventDefault(); e.returnValue = ""; } });
+window.addEventListener("resize", () => { if (layout === "plan") drawPlan(); else for (let i = 0; i < +layout; i++) if (panes[i].cv) size(i); });
+load().catch(e => { document.body.insertAdjacentHTML("afterbegin", `<div style="padding:12px;color:#b91c1c">${esc(e.message)}</div>`); });
+</script></body></html>
