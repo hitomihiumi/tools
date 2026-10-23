@@ -4,7 +4,7 @@ at once, for --minutes, into OUT/<camera>_<local start time>.mkv (Matroska: a fi
 computer asleep, the network gone - still reads up to where it stopped).
 
     python herd/herd.py record --config barn.toml --out /srv/herd/rec --minutes 60
-    python herd/herd.py record --config barn.toml --out /srv/herd/rec --minutes 60 --fps 5
+    python herd/herd.py record --config barn.toml --out /srv/herd/rec --minutes 60 --fps 5 [--gpu]
     python herd/herd.py record --config barn.toml --out /srv/herd/rec --minutes 30 --cameras cam1 cam2
     python herd/herd.py record --config barn.toml --out /srv/herd/rec --minutes 60 \
         --url cam1=rtsp://user:pass@10.0.0.11:554/stream1 cam2=rtsp://...     (the config's urls left as they are)
@@ -21,6 +21,8 @@ becomes OUT/<name>.mkv:
             HEVC poorly (the barn's: 496 of 926 frames, where ffmpeg itself decodes them all); --no-h264
             keeps it as it came
   H.264     (without --fps) kept as it came
+  --gpu     the re-encoding on the NVIDIA card (decoded with NVDEC, encoded with NVENC); the CPU when
+            the card cannot (said at the start)
 
 The length goes by the computer's clock: a live stream's frames are stamped as they arrive (a camera's own
 stamps can jump ahead - the barn's did, and its recordings ended seconds in), and a stream that stops
@@ -85,13 +87,35 @@ def command(url, seconds, path):
             "-f", "matroska", path]
 
 
-def encode(src, dst, fps, crf=20):
+def encode(src, dst, fps, crf=20, gpu=False):
     """The stream as it came -> H.264 at fps frames a second, steady (at each 1/fps s the frame sent last), in
-    Matroska."""
-    return ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-err_detect", "ignore_err",
-            "-fflags", "+genpts+discardcorrupt", *_fmt(src), "-i", src, "-map", "0:v:0", "-an",
-            "-vf", f"setpts=PTS-STARTPTS,fps={fps:g}", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
-            "-pix_fmt", "yuv420p", "-f", "matroska", dst]
+    Matroska. gpu: decoded on the NVIDIA card (NVDEC - the heavy part: every frame of the camera's stream)
+    and encoded there (NVENC, -cq at the crf's quality); else libx264 on the CPU."""
+    head = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-err_detect", "ignore_err",
+            "-fflags", "+genpts+discardcorrupt"]
+    if gpu:
+        head += ["-hwaccel", "cuda"]                     # frames come back to memory for the filters
+        enc = ["-c:v", "h264_nvenc", "-preset", "p4", "-rc", "vbr", "-cq", str(crf), "-b:v", "0"]
+    else:
+        enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf)]
+    return head + [*_fmt(src), "-i", src, "-map", "0:v:0", "-an", "-vf", f"setpts=PTS-STARTPTS,fps={fps:g}",
+                   *enc, "-pix_fmt", "yuv420p", "-f", "matroska", dst]
+
+
+def nvenc_ready():
+    """Whether ffmpeg encodes on the NVIDIA card here -> (yes, why not). In Docker the container needs the
+    driver's video part (NVIDIA_DRIVER_CAPABILITIES with video: the image sets it; compose.yaml gives the
+    card)."""
+    try:
+        r = subprocess.run(["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i",
+                            "testsrc=size=640x360:rate=5", "-t", "1", "-c:v", "h264_nvenc", "-f", "null", "-"],
+                           capture_output=True, text=True, timeout=60)
+    except (OSError, subprocess.SubprocessError) as e:
+        return False, str(e)
+    if r.returncode == 0:
+        return True, ""
+    lines = [x.split("] ", 1)[-1] for x in (r.stderr or "").strip().splitlines()]
+    return False, (lines or ["ffmpeg failed"])[0]          # the first: the cause (Cannot load libcuda.so.1, ...)
 
 
 def codec(path):
@@ -332,10 +356,17 @@ def finish(cam, base, pr, args):
     hevc = codec(part) == "hevc"
     if args.fps or (hevc and not args.no_h264):
         fps = args.fps or real_rate(part)
-        print(f"[record] {cam}: {'HEVC' if hevc else 'H.264'} -> H.264 at {fps:g} frames a second ...", flush=True)
+        print(f"[record] {cam}: {'HEVC' if hevc else 'H.264'} -> H.264 at {fps:g} frames a second"
+              f"{' on the NVIDIA card' if args.gpu else ''} ...", flush=True)
         tmp = base + ".mkv.encoding"
-        r = subprocess.run(encode(part, tmp, fps, args.crf), capture_output=True, text=True)
-        if r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0:
+        r = subprocess.run(encode(part, tmp, fps, args.crf, gpu=args.gpu), capture_output=True, text=True)
+        made = r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0
+        if not made and args.gpu:                         # the card refused this one: the CPU does it
+            print(f"[record] {cam}: on the NVIDIA card it failed ({(r.stderr or '').strip().splitlines()[-1:]}) - "
+                  "on the CPU instead ...", flush=True)
+            r = subprocess.run(encode(part, tmp, fps, args.crf), capture_output=True, text=True)
+            made = r.returncode == 0 and os.path.exists(tmp) and os.path.getsize(tmp) > 0
+        if made:
             os.replace(tmp, final)
             if args.keep_raw:
                 os.replace(part, raw)
@@ -378,6 +409,8 @@ def main(argv=None):
                    help="keep the stream as it came beside the recording (<name>.mkv.raw)")
     p.add_argument("--no-h264", action="store_true", help="an HEVC stream kept as it came (no re-encoding)")
     p.add_argument("--crf", type=int, default=20, help="H.264 quality when re-encoding (lower = better, bigger)")
+    p.add_argument("--gpu", action="store_true", help="re-encode on the NVIDIA card (NVDEC + NVENC: many times "
+                   "faster, the CPU left free); the CPU when the card cannot")
     p.add_argument("--check", default=None, metavar="DIR", help="only check the recordings in DIR")
     args = p.parse_args(argv)
     if args.fps is not None and not 0 < args.fps <= 60:
@@ -403,6 +436,13 @@ def main(argv=None):
         return 1 if bad else 0
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg is not installed (the Docker image has it; on a server: apt install ffmpeg)")
+    if args.gpu:                                       # said now, not after an hour of recording
+        ok, why = nvenc_ready()
+        if not ok:
+            print(f"[record] --gpu: ffmpeg cannot encode on the NVIDIA card here ({why}) - re-encoding on the CPU. "
+                  "In Docker: a current NVIDIA driver, the image built again (NVIDIA_DRIVER_CAPABILITIES with "
+                  "video), compose.yaml's GPU", flush=True)
+            args.gpu = False
     cfg = load_config(args.config)
     urls = {}
     for u in args.url:

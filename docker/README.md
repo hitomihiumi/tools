@@ -148,7 +148,7 @@ docker compose run --rm herd show-zone --config /data/barn.toml --camera cam1 --
 **Recordings.** Every camera at once, an hour:
 
 ```bash
-docker compose run --rm herd record --config /data/barn.toml --out /data/rec --minutes 60 --fps 5
+docker compose run --rm herd record --config /data/barn.toml --out /data/rec --minutes 60 --fps 5 --gpu
 ```
 
 The files are named as the tools read them (`rec/cam1_2026-10-20_06-00-00.mkv`, Matroska: a recording
@@ -160,6 +160,11 @@ goes into `<name>.mkv.part` as the camera sends it; at the end it becomes `<name
   files and the time to encode them are a fraction;
 - without `--fps`: an HEVC (H.265) camera re-encoded to H.264 at its own rate (the tools' reader decodes
   some cameras' HEVC poorly); an H.264 camera kept as it came.
+- `--gpu`: that re-encoding on the NVIDIA card (decoded with NVDEC, encoded with NVENC) - many times
+  faster, the CPU left free. The log says at the start when the card cannot (`Cannot load libcuda.so.1`:
+  no card given to the container; then a current NVIDIA driver and `docker compose build` again - the
+  image asks the driver for its video part) and the CPU does it; a file the card refuses midway is
+  re-encoded on the CPU.
 
 The length goes by the computer's clock, whatever the cameras' own time stamps do (the barn's jump ahead,
 which cut the first test recordings short); a stream that stops early is recorded on into a new file

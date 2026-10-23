@@ -323,6 +323,38 @@ def test_record_length_by_the_clock():
         assert len(recs) >= 2 and not [f for f in os.listdir(out2) if f.endswith(record.RAW)]
 
 
+def test_record_gpu_falls_back_to_the_cpu():
+    """--gpu: NVDEC + NVENC; a computer whose ffmpeg cannot use the card is said so at the start and
+    re-encodes on the CPU; a file the card refuses midway is re-encoded on the CPU."""
+    import shutil
+    import common
+    import record
+    cmd = record.encode("a.mkv.part", "b.mkv", 5, 20, gpu=True)
+    assert cmd[cmd.index("-hwaccel") + 1] == "cuda" and cmd[cmd.index("-c:v") + 1] == "h264_nvenc"
+    assert "-crf" not in cmd and cmd[cmd.index("-cq") + 1] == "20"
+    assert record.encode("a.mkv.part", "b.mkv", 5)[record.encode("a.mkv.part", "b.mkv", 5).index("-c:v") + 1] == "libx264"
+    if not shutil.which("ffmpeg"):
+        return
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "src.mp4")
+        _video(src, 4)
+        cfg = os.path.join(d, "barn.toml")
+        open(cfg, "w").write("[farm]\ntimezone_offset_hours = 2\n")
+        ready, old = record.nvenc_ready(), record.nvenc_ready
+        for card in (False, True):                       # True: the card said ready, then refusing the file
+            record.nvenc_ready = (lambda: (True, "")) if card else old
+            out = os.path.join(d, f"rec{card}")
+            try:
+                assert record.main(["--config", cfg, "--out", out, "--minutes", "0.05", "--url", f"cam1={src}",
+                                    "--fps", "2", "--gpu"]) == 0
+            finally:
+                record.nvenc_ready = old
+            recs, _ = common.recordings(out, ["cam1"], 2)
+            assert len(recs) == 1 and record.codec(recs[0][1]) == "h264" and os.listdir(out) == [os.path.basename(recs[0][1])]
+            if ready[0]:                                 # a computer with the card: nothing to fall back from
+                break
+
+
 def test_zones_page_and_apply():
     import common
     import zone_page
