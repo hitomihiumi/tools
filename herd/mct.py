@@ -720,6 +720,7 @@ class TrackletLinker:
         self.unlink_s = m.get("unlink_s", 10)
         self.both_counted = collections.Counter()              # (root, track a, track b) -> seconds
         self.never = set()                                     # track pairs that are two cows
+        self.warned = set()                                    # mask overlaps already said (_overlap)
 
     def _by_look(self, ts, per_cam, ids):
         """Neighbours without a floor mapping: a cow camera x sees beyond its mask against the cows camera y
@@ -838,20 +839,39 @@ class TrackletLinker:
                 continue                                       # shares floor with whoever sees it too
             for g, d in zip(gs, per_cam[cam]):
                 if in_mask(d["box"], mask):
-                    counted[self.root(g)].append((cam, g))
+                    counted[self.root(g)].append((cam, g, d))
         for root, seen in counted.items():
             cams = {}
-            for cam, g in seen:
-                cams.setdefault(cam, g)
+            for cam, g, d in seen:
+                cams.setdefault(cam, (g, d))
             if len(cams) < 2:
                 continue
-            for (ca, ga), (cb, gb) in itertools.combinations(sorted(cams.items()), 2):
+            for (ca, (ga, da)), (cb, (gb, db)) in itertools.combinations(sorted(cams.items()), 2):
+                if self._overlap(ca, da, cb, db, ts):
+                    continue
                 k = (root,) + self._key(ga, gb)
                 self.both_counted[k] += 1
                 if self.both_counted[k] >= self.unlink_s:
                     later = max((ga, gb), key=lambda t: self.life.get(t, ("", 0, 0))[1])
                     self._unlink(later, ts)
                     del self.both_counted[k]
+
+    def _overlap(self, ca, da, cb, db, ts):
+        """Two calibrated cameras counting one cow at one floor place (within link_dist): their masks overlap
+        there - one cow, not two. Said once a place (the masks are to be cut there: herd.py zones page)."""
+        pa, pb = self._points(ca, [da]), self._points(cb, [db])
+        if not pa or not pb or self._d(pa[0], pb[0]) > self.dist:
+            return False
+        self.stats["counted_by_two_masks"] += 1
+        centre = lambda b: ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)          # the point the masks use (in_mask)
+        (ua, va), (ub, vb) = centre(da["box"]), centre(db["box"])
+        place = (ca, cb) + tuple(round(v * 10) for v in (ua, va, ub, vb))
+        if place not in self.warned:
+            self.warned.add(place)
+            print(f"[mct] {ca} and {cb} both count one cow (at {ca} {ua:.2f},{va:.2f} / {cb} {ub:.2f},{vb:.2f}): "
+                  "their masks overlap there - cut one of them back (herd.py zones page), else she is counted "
+                  "twice", flush=True)
+        return True
 
     def _points(self, cam, ds):
         f = self.floor.get(cam)

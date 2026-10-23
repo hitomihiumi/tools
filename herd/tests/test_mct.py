@@ -915,3 +915,24 @@ def test_join_undone_when_both_cameras_count_the_cow():
                                            "cam4": [{"box": box(x), "emb": near(B)}]})
         assert out["cam4"][0] != out["cam3"][0] and lk.stats["unlinked"] == 1
         assert not st.track_roots()                                          # the link gone from the store
+
+
+def test_calibrated_cow_in_both_masks_stays_one_cow():
+    """Two calibrated cameras whose masks overlap a little, a cow lying right there: both count her, at one
+    floor place - their masks overlap, she is one cow: joined and kept so (not undone as two), said once."""
+    import contextlib
+    import io
+    import mct
+    cfg = _cfg()
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    cfg["cameras"] = [{"id": "cam1", "mask": [[0, 0], [0.6, 0], [0.6, 1], [0, 1]], "floor_points": pts},
+                      {"id": "cam2", "mask": [[0.4, 0], [1, 0], [1, 1], [0.4, 1]], "floor_points": pts}]
+    cfg["mct"].update(neighbours=[["cam1", "cam2"]], link_dist=80, unlink_s=10)
+    box = [0.45, 0.4, 0.55, 0.5]
+    lk = mct.TrackletLinker(cfg)
+    said = io.StringIO()
+    with contextlib.redirect_stdout(said):
+        for k in range(40):
+            out = lk.update_all(float(k), {"cam1": [{"box": box}], "cam2": [{"box": [v + 0.01 for v in box]}]})
+    assert out["cam1"][0] == out["cam2"][0] and not lk.stats["unlinked"]
+    assert lk.stats["counted_by_two_masks"] > 0 and said.getvalue().count("masks overlap") == 1
