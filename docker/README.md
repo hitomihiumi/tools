@@ -107,6 +107,35 @@ docker compose run --rm herd zones page --config /data/barn.toml --videos /data/
    docker compose run --rm herd zones apply --config /data/barn.toml --cameras /data/cameras.toml
    ```
 
+**Zones, floor calibration and its check in one page (studio).** Once the cameras are in `barn.toml`
+(their `url`, e.g. from the zones page above), everything else can be edited in one place and saved
+straight into `barn.toml`:
+
+```bash
+docker compose run --rm -p 8765:8765 herd studio --config /data/barn.toml --videos /data/rec_fixed
+```
+
+Open <http://localhost:8765> in a browser (Ctrl+C in the terminal stops it). `-p 8765:8765` lets the
+browser reach it. It shows every camera's picture at one moment of the recordings (`--at`, and the
+page can move it), the cows the detector finds on it:
+
+- **zones** (layers mask / exclude / tracking): drawn as on the zones page;
+- **spots** (view: two cameras): the same spot of the floor clicked on both pictures, as on
+  `pick.html`. From 5 spots the floor is fitted at once (as `autocalib --points`): green spots agree,
+  red are off, grey are left out; drag one to move it, click it and press Del to remove it;
+- **over it**: the other camera's picture laid over this one through the floor, a slider for how
+  much (as `autocalib --overlay`), with the other camera's mask (yellow) and tracking zone (blue)
+  drawn where they fall here. The zones and spots stay editable under it, and it follows each change;
+- **Floors**: which cameras are calibrated, fitted now or not; "forget this floor" drops a wrong one.
+
+Nothing is written until **Save to barn.toml**: the zones of the cameras changed, the fitted cameras'
+`floor_points` / `distortion` / `aspect`, and `[mct]` (link on, `link_dist`, the calibrated pairs out
+of `disjoint`). The old file is kept as `barn.toml.bak`, the spots go to `calib/points.json`. The floor
+plan is in about cm when `calib/` holds the cows' boxes cached by an `autocalib --videos` run
+(`boxes_<cam>.json`); without them `link_dist` is a guess. Without recordings:
+`--image cam1=/data/cam1.jpg --image cam2=...`, or the pictures the spots were clicked on
+(`calib/pick`) are used.
+
 A still from a camera, and its zone drawn:
 
 ```bash

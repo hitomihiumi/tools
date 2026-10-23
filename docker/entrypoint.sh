@@ -70,6 +70,9 @@ docker/data on your computer is /data here: the config, the recordings, everythi
   zones page --config /data/barn.toml --videos /data/rec --cameras cam1 cam2 cam3 cam4 --out /data/zones
                                  a still of every camera -> zones.html: draw masks / excluded zones
   zones apply --config /data/barn.toml --cameras /data/cameras.toml   the drawn zones into barn.toml
+  studio --config /data/barn.toml --videos /data/rec_fixed   (docker compose run --rm -p 8765:8765 herd ...)
+                                 zones, floor calibration and its check in one page, saved to barn.toml:
+                                 http://localhost:8765
   show-zone --config /data/barn.toml --camera cam1 --image /data/cam1.jpg   a camera's zone drawn
   record --config /data/barn.toml --out /data/rec --minutes 60
                                  every camera at once -> /data/rec/<camera>_<time>.mp4

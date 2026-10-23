@@ -26,6 +26,8 @@ Barn data for identity (once the barn runs with [training_cache] enabled):
     herd.py barn video --config barn.toml --videos DIR --out D   recorded camera files -> D/training_cache
     herd.py barn build --cache C --out F [--merges merges.csv] [--val-from DAY]
     then train --extra-train F/train, eval --extra-val F/val
+Cameras' zones, floor calibration and its check, all in one page (a local web server; saves to barn.toml):
+    herd.py studio --config barn.toml --videos DIR [--calib C] [--port 8765]   then http://localhost:8765
 Cameras' zones, drawn on their pictures:
     herd.py zones page --config barn.toml --videos DIR --out D    D/zones.html -> cameras.toml
     herd.py zones apply --config barn.toml --cameras cameras.toml
@@ -127,6 +129,9 @@ def main():
     if cmd == "zones":
         import zone_page
         return zone_page.main(argv)
+    if cmd == "studio":
+        import studio
+        return studio.main(argv)
     if cmd == "autocalib":
         import autocalib
         return autocalib.main(argv)

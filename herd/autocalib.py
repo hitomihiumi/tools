@@ -656,12 +656,13 @@ def toml_value(v):
     return json.dumps(v)
 
 
-def apply_config(path, calib, link_dist, shared=()):
+def apply_config(path, calib, link_dist, shared=(), backup=True):
     """barn.toml: the calibrated cameras' floor_points / distortion / aspect, and [mct] link on; the camera
     pairs found to share floor taken out of [mct] disjoint."""
     old_disjoint = load_config(path)["mct"].get("disjoint", [])
     text = open(path, encoding="utf-8").read()
-    shutil.copy(path, path + ".bak")
+    if backup:
+        shutil.copy(path, path + ".bak")
     blocks = re.split(r"(?m)^(?=\[\[cameras\]\])", text)
     out = [blocks[0]]
     for b in blocks[1:]:
@@ -876,12 +877,7 @@ def consensus(A, B, wa, ha, thr):
 
 def from_points(path, only, T, aspect, size, out, videos=None):
     """The pairs' floor mappings from the spots clicked on pick.html (the same spot of the floor on both
-    pictures): a homography B -> A; with 7 spots or more each lens's bend too, when it brings the spots
-    clearly closer.
-
-    The spots one mapping agrees on are used; one that disagrees with them (clicked on two different
-    places) is left out and named. Fewer than 5 that agree, or spots along one line (one fence), give no
-    floor: refused."""
+    pictures): fit_spots for each pair, said, and drawn (OUT/<a>_<b>_spots.jpg)."""
     data = json.load(open(path, encoding="utf-8"))
     found = {}
     for key, pts in data.get("pairs", {}).items():
@@ -889,59 +885,77 @@ def from_points(path, only, T, aspect, size, out, videos=None):
         if only and (a, b) not in only:
             continue
         P = np.array(pts, float).reshape(-1, 4)
-        wa, ha = size.get(a, (1920, 1080))
-        thr = 0.025 * wa
-        if len(P) < 5:
-            print(f"[calib] {a}-{b}: {len(P)} spots clicked - 5 at least (7-10 is better); skipped", flush=True)
-            continue
-        fits = {}
-        for kA, kB in itertools.product(K_GRID_POINTS, K_GRID_POINTS) if len(P) >= 7 else [(0.0, 0.0)]:
-            pa = np.c_[undistort(P[:, 0], P[:, 1], kA, aspect[a])]
-            pb = np.c_[undistort(P[:, 2], P[:, 3], kB, aspect[b])]
-            inl, H, e = consensus(pa, pb, wa, ha, thr)
-            fits[(kA, kB)] = (len(inl), float(np.median(e[inl])), inl, H, e)
-        most = max(f[0] for f in fits.values())
-        (kA, kB), (_, med, inl, H, e) = min(((k, f) for k, f in fits.items() if f[0] == most),
-                                            key=lambda kf: kf[1][1])
-        straight = fits[(0.0, 0.0)]
-        if (kA, kB) != (0.0, 0.0) and straight[0] == most and med > 0.8 * straight[1]:
-            (kA, kB), (_, med, inl, H, e) = (0.0, 0.0), straight      # a bent lens only when clearly closer
-        dropped = sorted(set(range(len(P))) - set(inl.tolist()))
-        r = {"H": H, "kA": kA, "kB": kB, "lag": 0, "spots": len(P), "spots_used": len(inl),
-             "spots_left_out": [i + 1 for i in dropped], "spot_error_px": [round(float(x), 1) for x in e]}
-        draw_spots(os.path.join(out, f"{a}_{b}_spots.jpg"), out, a, b, P, e, dropped)
-        if dropped:
-            print(f"[calib] {a}-{b}: spot(s) {', '.join(str(i + 1) for i in dropped)} left out - "
-                  f"{', '.join(f'{min(e[i], 9999):.0f}' for i in dropped)} px from where the others put it: not the "
-                  "same spot on both pictures? (fix on pick.html, save, run again)", flush=True)
-        if len(inl) < 5:
-            print(f"[calib] {a}-{b}: NOT calibrated - no 5 spots agree on one floor (most: {len(inl)}): the same "
-                  f"spot of the floor on both pictures? see {a}_{b}_spots.jpg", flush=True)
-            continue
-        K = P[inl]
-        line = [c for c, j in ((a, 0), (b, 2)) if flatness(K[:, j:j + 2]) < 0.12]
-        if line:
-            print(f"[calib] {a}-{b}: NOT calibrated - the spots lie almost on one line on {', '.join(line)} (along "
-                  "one fence?): a floor needs spots across it too - add some far from that line", flush=True)
-            continue
-        # every spot seen by both cameras is in front of both: the mapping must not put one behind A
-        pb = np.c_[undistort(K[:, 2], K[:, 3], kB, aspect[b])]
-        if len(set(np.sign(np.c_[pb, np.ones(len(pb))] @ H[2]))) > 1:
-            print(f"[calib] {a}-{b}: NOT calibrated - the mapping folds the floor over: check the spots on "
-                  f"{a}_{b}_spots.jpg", flush=True)
-            continue
-        lens = f"lens {a} k={kA}, {b} k={kB}" if len(P) >= 7 else "lenses taken straight (7 spots or more to fit them)"
-        print(f"[calib] {a}-{b}: {len(inl)} of {len(P)} spots agree, within {med:.0f} px (median, on {a}); {lens}",
-              flush=True)
-        if T.get(a) and T.get(b):
-            share, n, chance = agreement(T[a], T[b], H, 0, kA, kB, aspect[a], aspect[b])
-            r.update(share=share, chance=chance, checked=n)
-            print(f"[calib] {a}-{b}: check on the cows - {share:.0%} of {b}'s {n} cow-seconds over {a}'s picture "
-                  f"land on one of {a}'s cows ({chance:.0%} would by chance)", flush=True)
-        found[(a, b)] = r
+        r, notes = fit_spots(a, b, P, size, aspect, T)
+        for n in notes:
+            print(f"[calib] {n}", flush=True)
+        if r is not None and "spot_error_px" in r:
+            draw_spots(os.path.join(out, f"{a}_{b}_spots.jpg"), out, a, b, P, np.array(r["spot_error_px"]),
+                       [i - 1 for i in r["spots_left_out"]])
+        if r is not None and r.get("ok"):
+            found[(a, b)] = r
     if not found:
         sys.exit(f"[calib] no camera pair calibrated from {path} - nothing written")
     return found
+
+
+def fit_spots(a, b, P, size, aspect, T=None):
+    """One pair's floor mapping from its clicked spots P [[uA, vA, uB, vB], ...] (the same spot of the floor
+    on both pictures): a homography B -> A; with 7 spots or more each lens's bend too, when it brings the
+    spots clearly closer. -> (result or None, what to say). result["ok"]: calibrated.
+
+    The spots one mapping agrees on are used; one that disagrees with them (clicked on two different
+    places) is left out and named. Fewer than 5 that agree, or spots along one line (one fence), give no
+    floor: refused."""
+    T = T or {}
+    notes = []
+    wa, ha = size.get(a, (1920, 1080))
+    thr = 0.025 * wa
+    if len(P) < 5:
+        return None, [f"{a}-{b}: {len(P)} spots clicked - 5 at least (7-10 is better)"]
+    fits = {}
+    for kA, kB in itertools.product(K_GRID_POINTS, K_GRID_POINTS) if len(P) >= 7 else [(0.0, 0.0)]:
+        pa = np.c_[undistort(P[:, 0], P[:, 1], kA, aspect[a])]
+        pb = np.c_[undistort(P[:, 2], P[:, 3], kB, aspect[b])]
+        inl, H, e = consensus(pa, pb, wa, ha, thr)
+        fits[(kA, kB)] = (len(inl), float(np.median(e[inl])), inl, H, e)
+    most = max(f[0] for f in fits.values())
+    (kA, kB), (_, med, inl, H, e) = min(((k, f) for k, f in fits.items() if f[0] == most),
+                                        key=lambda kf: kf[1][1])
+    straight = fits[(0.0, 0.0)]
+    if (kA, kB) != (0.0, 0.0) and straight[0] == most and med > 0.8 * straight[1]:
+        (kA, kB), (_, med, inl, H, e) = (0.0, 0.0), straight      # a bent lens only when clearly closer
+    dropped = sorted(set(range(len(P))) - set(inl.tolist()))
+    r = {"H": H, "kA": kA, "kB": kB, "lag": 0, "spots": len(P), "spots_used": len(inl),
+         "spots_left_out": [i + 1 for i in dropped], "spot_error_px": [round(float(x), 1) for x in e],
+         "median_px": round(med, 1), "ok": False}
+    if dropped:
+        notes.append(f"{a}-{b}: spot(s) {', '.join(str(i + 1) for i in dropped)} left out - "
+                     f"{', '.join(f'{min(e[i], 9999):.0f}' for i in dropped)} px from where the others put it: not "
+                     "the same spot on both pictures?")
+    if len(inl) < 5:
+        notes.append(f"{a}-{b}: NOT calibrated - no 5 spots agree on one floor (most: {len(inl)}): the same spot of "
+                     "the floor on both pictures?")
+        return r, notes
+    K = P[inl]
+    line = [c for c, j in ((a, 0), (b, 2)) if flatness(K[:, j:j + 2]) < 0.12]
+    if line:
+        notes.append(f"{a}-{b}: NOT calibrated - the spots lie almost on one line on {', '.join(line)} (along one "
+                     "fence?): a floor needs spots across it too - add some far from that line")
+        return r, notes
+    # every spot seen by both cameras is in front of both: the mapping must not put one behind A
+    pb = np.c_[undistort(K[:, 2], K[:, 3], kB, aspect[b])]
+    if len(set(np.sign(np.c_[pb, np.ones(len(pb))] @ H[2]))) > 1:
+        notes.append(f"{a}-{b}: NOT calibrated - the mapping folds the floor over: check the spots")
+        return r, notes
+    lens = f"lens {a} k={kA}, {b} k={kB}" if len(P) >= 7 else "lenses taken straight (7 spots or more to fit them)"
+    notes.append(f"{a}-{b}: {len(inl)} of {len(P)} spots agree, within {med:.0f} px (median, on {a}); {lens}")
+    if T.get(a) and T.get(b):
+        share, n, chance = agreement(T[a], T[b], H, 0, kA, kB, aspect[a], aspect[b])
+        r.update(share=share, chance=chance, checked=n)
+        notes.append(f"{a}-{b}: check on the cows - {share:.0%} of {b}'s {n} cow-seconds over {a}'s picture land "
+                     f"on one of {a}'s cows ({chance:.0%} would by chance)")
+    r["ok"] = True
+    return r, notes
 
 
 def draw_spots(path, out, a, b, P, err_px, dropped):
@@ -1252,18 +1266,29 @@ def cow_spread(TA, TB, MA, MB, kA, kB, arA, arB, lag):
     return out
 
 
-def finish(args, cfg, found, T, videos, aspect):
-    """One floor plan per group of cameras that share floor (about cm), the link distance, the pictures,
-    calib.json and, with --apply, barn.toml."""
+def floor_plan(found, T, aspect, taken=()):
+    """The pairs found -> one floor plan per group of cameras that share floor (about cm, from the cows' box
+    sizes when T has them), each group placed clear of the others and of `taken` (x ranges [lo, hi] of the
+    plan other cameras already use) -> ({camera: floor_points, distortion, aspect}, link_dist, references)."""
     lens = {}
     for (a, b), r in found.items():
         lens.setdefault(a, r["kA"]), lens.setdefault(b, r["kB"])
-    plan, refs = {}, []
-    for g, (ref, to_ref) in enumerate(components(found)):
+    plan, refs, used = {}, [], [tuple(x) for x in taken]
+    for ref, to_ref in components(found):
         R = straighten(T.get(ref) or {}, lens[ref], aspect[ref])
-        shift = np.array([[1, 0, g * GROUP_APART], [0, 1, 0], [0, 0, 1.0]])
+        shift = 0.0
+        while True:                                           # the next free stretch of the plan
+            S = np.array([[1, 0, shift], [0, 1, 0], [0, 0, 1.0]])
+            xs = [apply_h(S @ R @ Hc, np.array([undistort(u, v, lens[c], aspect[c]) for u, v in
+                                                grid_points(((0.05, 0.3), (0.95, 0.95)))]))[:, 0]
+                  for c, Hc in to_ref.items()]
+            lo, hi = float(min(x.min() for x in xs)), float(max(x.max() for x in xs))
+            if not any(lo < b_ + GROUP_APART / 2 and a_ - GROUP_APART / 2 < hi for a_, b_ in used):
+                break
+            shift += GROUP_APART
         for cam, Hc in to_ref.items():
-            plan[cam] = shift @ R @ Hc
+            plan[cam] = S @ R @ Hc
+        used.append((lo, hi))
         refs.append(ref)
     spread = []
     for (a, b), r in found.items():
@@ -1282,6 +1307,13 @@ def finish(args, cfg, found, T, videos, aspect):
             q = apply_h(M, np.array([undistort(u, v, k, ar)]))[0]
             fp.append([round(float(u), 4), round(float(v), 4), round(float(q[0]), 1), round(float(q[1]), 1)])
         calib[cam] = {"floor_points": fp, "distortion": k, "aspect": round(ar, 4)}
+    return calib, link, refs
+
+
+def finish(args, cfg, found, T, videos, aspect):
+    """One floor plan per group of cameras that share floor (about cm), the link distance, the pictures,
+    calib.json and, with --apply, barn.toml."""
+    calib, link, refs = floor_plan(found, T, aspect)
     pics = []
     for (a, b), r in found.items():
         pic = draw(os.path.join(args.out, f"{a}_{b}.jpg"), videos, a, b, T.get(a) or {}, T.get(b) or {}, r["H"],
