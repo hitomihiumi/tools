@@ -917,9 +917,10 @@ def test_join_undone_when_both_cameras_count_the_cow():
         assert not st.track_roots()                                          # the link gone from the store
 
 
-def test_calibrated_cow_in_both_masks_stays_one_cow():
-    """Two calibrated cameras whose masks overlap a little, a cow lying right there: both count her, at one
-    floor place - their masks overlap, she is one cow: joined and kept so (not undone as two), said once."""
+def test_calibrated_cows_counted_by_two_cameras_near_stay_two():
+    """Two calibrated cameras, a cow counted in each one's mask at nearly one floor place (the barn: two cows
+    lying side by side, each camera seeing the nearer): joined by the floor at first, then undone as two
+    cows - each camera counts its own; the place said once."""
     import contextlib
     import io
     import mct
@@ -933,6 +934,6 @@ def test_calibrated_cow_in_both_masks_stays_one_cow():
     said = io.StringIO()
     with contextlib.redirect_stdout(said):
         for k in range(40):
-            out = lk.update_all(float(k), {"cam1": [{"box": box}], "cam2": [{"box": [v + 0.01 for v in box]}]})
-    assert out["cam1"][0] == out["cam2"][0] and not lk.stats["unlinked"]
-    assert lk.stats["counted_by_two_masks"] > 0 and said.getvalue().count("masks overlap") == 1
+            out = lk.update_all(float(k), {"cam1": [{"box": box}], "cam2": [{"box": [v + 0.03 for v in box]}]})
+    assert out["cam1"][0] != out["cam2"][0] and lk.stats["linked"] == 1 and lk.stats["unlinked"] == 1
+    assert lk.stats["counted_by_two_near"] > 0 and said.getvalue().count("nearly one floor place") == 1

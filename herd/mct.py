@@ -720,7 +720,7 @@ class TrackletLinker:
         self.unlink_s = m.get("unlink_s", 10)
         self.both_counted = collections.Counter()              # (root, track a, track b) -> seconds
         self.never = set()                                     # track pairs that are two cows
-        self.warned = set()                                    # mask overlaps already said (_overlap)
+        self.warned = set()                                    # places already said (_near_note)
 
     def _by_look(self, ts, per_cam, ids):
         """Neighbours without a floor mapping: a cow camera x sees beyond its mask against the cows camera y
@@ -847,8 +847,7 @@ class TrackletLinker:
             if len(cams) < 2:
                 continue
             for (ca, (ga, da)), (cb, (gb, db)) in itertools.combinations(sorted(cams.items()), 2):
-                if self._overlap(ca, da, cb, db, ts):
-                    continue
+                self._near_note(ca, da, cb, db)
                 k = (root,) + self._key(ga, gb)
                 self.both_counted[k] += 1
                 if self.both_counted[k] >= self.unlink_s:
@@ -856,22 +855,22 @@ class TrackletLinker:
                     self._unlink(later, ts)
                     del self.both_counted[k]
 
-    def _overlap(self, ca, da, cb, db, ts):
-        """Two calibrated cameras counting one cow at one floor place (within link_dist): their masks overlap
-        there - one cow, not two. Said once a place (the masks are to be cut there: herd.py zones page)."""
+    def _near_note(self, ca, da, cb, db):
+        """Two calibrated cameras each counting a cow at nearly one floor place (within link_dist): still two
+        cows (the barn, labelled: two cows lying side by side, each camera seeing the one nearer to it) -
+        said once a place, as it may also be masks overlapping there (herd.py zones page)."""
         pa, pb = self._points(ca, [da]), self._points(cb, [db])
         if not pa or not pb or self._d(pa[0], pb[0]) > self.dist:
-            return False
-        self.stats["counted_by_two_masks"] += 1
+            return
+        self.stats["counted_by_two_near"] += 1
         centre = lambda b: ((b[0] + b[2]) / 2, (b[1] + b[3]) / 2)          # the point the masks use (in_mask)
         (ua, va), (ub, vb) = centre(da["box"]), centre(db["box"])
         place = (ca, cb) + tuple(round(v * 10) for v in (ua, va, ub, vb))
         if place not in self.warned:
             self.warned.add(place)
-            print(f"[mct] {ca} and {cb} both count one cow (at {ca} {ua:.2f},{va:.2f} / {cb} {ub:.2f},{vb:.2f}): "
-                  "their masks overlap there - cut one of them back (herd.py zones page), else she is counted "
-                  "twice", flush=True)
-        return True
+            print(f"[mct] {ca} and {cb} each count a cow at nearly one floor place ({ca} {ua:.2f},{va:.2f} / "
+                  f"{cb} {ub:.2f},{vb:.2f}): kept as two cows - two lying side by side, or the masks overlap "
+                  "there (then cut one back: herd.py zones page)", flush=True)
 
     def _points(self, cam, ds):
         f = self.floor.get(cam)
