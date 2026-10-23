@@ -382,6 +382,23 @@ the px), grey were left out. Fix them on the page (it remembers your clicks), sa
 pictures `calib/cam1_cam2.jpg`, `calib/cam3_cam4.jpg`. With `--apply` the pairs also leave `[mct]
 disjoint`; two groups of cameras that share no floor are kept far apart on the plan.
 
+**Check the calibration by eye** - what barn.toml holds now (its `floor_points`, `distortion`), on the
+pictures the spots were clicked on (`calib/pick`):
+
+```bash
+docker compose run --rm herd autocalib --config /data/barn.toml --out /data/calib --overlay
+```
+
+For each calibrated pair, both ways, the other camera's picture is carried over the floor onto this one
+and laid over it half-transparent: `calib/cam2_on_cam1.jpg`, `calib/cam1_on_cam2.jpg`, and
+`calib/overlay.html` with a slider (0% this camera only, 100% the other's). Where the mapping is right
+the floor's lines, stall edges and the feet of posts and drinkers stay in place as the slider moves;
+cows' backs, walls and rails stand above the floor and never line up - that is expected. Circles are
+the spots clicked on this picture, crosses where the other picture's clicks land (the line between: px
+off); yellow / blue are the other camera's `mask` / `tracking_mask` drawn on this picture. Darkened: no
+floor both cameras see. Options: `--pairs cam1:cam2`, `--videos /data/rec_fixed --at 300` (the
+recordings' moment 300 s in instead of the clicked pictures), `--alpha 0.7` (the jpgs' opacity).
+
 ## 7. The barn, live
 
 ```bash

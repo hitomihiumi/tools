@@ -88,6 +88,9 @@ docker/data on your computer is /data here: the config, the recordings, everythi
                                  cameras sharing floor calibrated by the cows moving in both ([mct] link)
   autocalib ... --pick           no cows walking: the same floor spots clicked on both pictures
                                  (calib/pick.html), then autocalib ... --points /data/calib/points.json
+  autocalib --config /data/barn.toml --out /data/calib --overlay
+                                 the calibration checked by eye: each camera's picture laid over the
+                                 other's through the floor (calib/overlay.html, a slider)
   check --config /data/barn.toml   the models on your labels: the detector on herd_det_barn_*.tgz, the
                                  identity model on herd_barn_ids_*.tgz (the newest in /data)
   run --config /data/barn.toml   the barn live (better: docker compose --profile live up -d barn)
