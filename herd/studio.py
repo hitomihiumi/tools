@@ -12,8 +12,9 @@ A small web server (in Docker: docker compose run --rm -p 8765:8765 herd studio 
           spots in common are fitted at once (autocalib's fit: the lens bend from 7, spots that disagree
           left out) into one floor plan; each spot's error on each camera is shown
   plane   each calibrated camera's floor drawn on its picture as a grid (about 1 m when the plan is in
-          cm), its plane points dragged to move it and the lens bend set by hand; a camera without a
-          plane gets one to start from
+          cm) and moved as a whole: in the picture as the camera would turn (tilt, pan, roll), zoomed, its
+          lens bend set; on the plan moved, turned and sized (studio.html: any plane, also one fitted
+          from spots that no real camera gives exactly); a camera without a plane gets one to start from
   check   any camera with another one's picture carried over the floor onto it, half-transparent (as
           autocalib --overlay), the other's mask / tracking_mask drawn where they fall on this one
   plan    the floor from above: the cameras' pictures carried onto it, their zones and the spots

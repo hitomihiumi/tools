@@ -128,9 +128,13 @@ cameras' pictures carried onto it, their masks and the spots. Tools (keys in bra
   little off, red off. Every two cameras with 5 spots in common are fitted at once (Auto-fit, as
   `autocalib --points`), all cameras they join on one plan;
 - **Plane** (`F`): the floor grid on each calibrated camera (about 1 m when the plan is in cm; `G` shows
-  it with any tool) and its plane points: drag them, or type a point's floor X, Y and the lens bend on the
-  right. Lay another camera over it (*over it*) and move the points until the floor lines up. "Start a
-  plane" gives a camera without one a plane to begin from; "Remove plane" drops a wrong one;
+  it with any tool), and the plane moved as a whole. On the picture: drag and the floor follows the hand
+  (the camera tilted and panned), Shift+drag rolls it. On the right: Tilt, Pan, Roll, Zoom and the Lens
+  bend - how the floor sits in the picture - and Turn, Size and Move - where the camera's floor lies on
+  the plan; Reset puts it back. On the **Plan** each camera's floor has a dot where it begins and an
+  arrow where it looks: drag the dot to move it, the arrow to turn it. Lay another camera over this one
+  (*over it*) and move the plane until the floor lines up. "Start a plane" gives a camera without one a
+  plane to begin from; "Remove plane" drops a wrong one;
 - **Select** (`V`): select and move anything, Del removes it. `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo,
   `Ctrl+wheel` zooms.
 
