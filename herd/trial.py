@@ -233,6 +233,8 @@ def same_cow_page(out, boxes_dir, labels, frames, merged, per_cam=2):
             mine = sorted((x for x in items if x[0] == cam), key=lambda x: x[3])
             for k in sorted({int(round(i)) for i in np.linspace(0, len(mine) - 1, min(per_cam, len(mine)))}):
                 _, file, b, _ = mine[k]
+                if not os.path.exists(os.path.join(boxes_dir, file)):   # frames.json alone (no frames/): no crop
+                    continue
                 with Image.open(os.path.join(boxes_dir, file)) as im:
                     w, h = im.size
                     pad = 0.08

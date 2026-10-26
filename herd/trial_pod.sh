@@ -7,7 +7,7 @@
 #      Docker build unpacks them into /models. Identity models this pod trained (WORK/reid/id_model_all*/,
 #      reid_pod.sh) are taken as they are.
 #   2. WORK/data/: what docker/data/ holds for a trial - barn.toml (the RTSP passwords out: the trial plays
-#      files), the recordings (rec_fixed/), boxes/ (frames.json) and labels.json
+#      files), the recordings (rec_fixed/), boxes/ (frames.json; its frames/ too for same_cow.html) and labels.json
 #   3. /models -> WORK/models, /data -> WORK/data: barn.toml's /models/... and /data/... paths as they are
 #   4. for every identity model: barn.toml with its [model] identity, `herd.py trial ... --boxes --labels`
 #      -> WORK/data/trial_<model>/ (score.json, trial.json); one that has its score.json is not run again
@@ -175,15 +175,28 @@ for f in $IDENTITIES; do
     n="$(basename "$(dirname "$f")")"
     names+=("$n")
     out="$D/trial_$n"
-    if [ -f "$out/score.json" ] && [ "${AGAIN:-0}" != "1" ]; then
-        step "$n: scored already ($out/score.json; AGAIN=1 runs it again)"
-        continue
+    ident="$(readlink -f "$f")"
+    was=""
+    [ -f "$out/barn.toml" ] && was="$(sed -n 's/^identity = "\(.*\)".*/\1/p' "$out/barn.toml" | head -1)"
+    if [ "$was" = "$ident" ] && [ "${AGAIN:-0}" != "1" ]; then
+        if [ -f "$out/score.json" ]; then
+            step "$n: scored already ($out/score.json; AGAIN=1 runs it again)"
+            continue
+        fi
+        if [ -f "$out/trial.json" ] && [ -f "$out/pass2/herd.sqlite" ]; then   # played, the scoring stopped
+            step "$n: played already - scored again"
+            "$PY" "$HERE/herd.py" trial --score-only --config "$out/barn.toml" --out "$out" --boxes "$BOXES" --labels "$LABELS" \
+                || echo "!! $n: scoring stopped (above)"
+            continue
+        fi
+    elif [ -n "$was" ]; then
+        echo "$n: its trial ran with another model ($was, now $ident): again"
     fi
     step "Trial with the identity model $n"
     rm -rf "$out"
     mkdir -p "$out"
     cfg="$out/barn.toml"
-    python3 - "$CONFIG" "$cfg" "$(readlink -f "$f")" <<'PYEOF'
+    python3 - "$CONFIG" "$cfg" "$ident" <<'PYEOF'
 import re, sys
 src, dst, ident = sys.argv[1:]
 text = open(src, encoding="utf-8").read()
@@ -195,7 +208,8 @@ text = re.sub(r'://[^/"@\s]+@', "://", text)                 # no camera passwor
 open(dst, "w", encoding="utf-8").write(text)
 print(f"[model] identity = \"{ident}\"   (was \"{m.group(1)}\")")
 PYEOF
-    "$PY" "$HERE/herd.py" trial --config "$cfg" --videos "$VIDEOS" --out "$out" --boxes "$BOXES" --labels "$LABELS"
+    "$PY" "$HERE/herd.py" trial --config "$cfg" --videos "$VIDEOS" --out "$out" --boxes "$BOXES" --labels "$LABELS" \
+        || echo "!! $n: the trial stopped (above) - on to the next model; run again to finish it"
 done
 
 step "Every identity model on your labels"

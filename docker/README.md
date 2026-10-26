@@ -385,7 +385,7 @@ is best on your own cows. Upload to the pod's `/workspace`:
 | where | what |
 |---|---|
 | `/workspace/models/` | the archives in `docker/models/` (`herd_models_*.tgz`, the detector's, `herd_rumination_*.tgz`; those two may also lie in `/workspace` itself, and models the pod already has under `/workspace/herd/` are linked in) and a `herd_reid_*.tgz` of each identity model to compare (identity models trained on that pod are taken as they are) |
-| `/workspace/data/` | `barn.toml` (the RTSP passwords out: the trial plays files), `rec_fixed/`, `boxes/` (`frames.json` is enough), `labels.json` |
+| `/workspace/data/` | `barn.toml` (the RTSP passwords out: the trial plays files), `rec_fixed/`, `boxes/` (`frames.json`; with its `frames/` the page of one cow under two names gets pictures), `labels.json` |
 
 Then `bash herd/trial_pod.sh` (and `bash herd/trial_pod.sh log`). `/models` and `/data` point at those two
 folders, so barn.toml's paths stay as they are; the script stops naming any `/models/...` file it lacks.
