@@ -937,8 +937,10 @@ function inspector() {
       const rowsE = order.map(id => { const n = here.filter(y => y.cam === id).length, bad = here.filter(y => y.cam === id && edgeErr[y.id] >= 12).length;
         return n ? `<div class="row"><b style="color:${camColor(id)};min-width:44px">${id}</b><span>${n} point${n > 1 ? "s" : ""}${bad ? ` <span class="warn">(${bad} off)</span>` : ""}</span></div>` : ""; }).join("");
       parts.push(`<div class="card"><h4>Edge ${edgeName(a, b)}</h4>${rowsE || `<div class="hint">no points on it yet</div>`}
+        ${sel.kind === "epoint" ? `<div class="row"><label>measured: from ${spotName(a)} along the edge</label></div>
+          <div class="row"><input type="number" id="epd" step="10" placeholder="cm"><span class="mute">cm</span><button id="epset" ${a.xy && b.xy ? "" : "disabled title=\"both corners measured first\""}>Make it a measured point</button></div>` : ""}
         <div class="row">${sel.kind === "epoint" ? `<button class="danger" id="delep">Delete this point</button>` : ""}<button id="endedge">Done<kbd>Esc</kbd></button></div>
-        <div class="hint">Click along this edge of the floor (where the fence or the kerb meets the floor) on any picture - also where its corners are out of sight: each point says "on this edge". 2-3 points on each edge a camera sees, spread along it; with ${a.xy && b.xy ? "both corners measured" : `<b>both corners measured</b> (not yet)`} they count. A far corner lies on its edge already: an edge then adds its direction, so a camera that sees 2 corners and the side edges needs one measured point more on each side, or spots shared with another camera.</div></div>`);
+        <div class="hint">A fence post on this edge: click its foot, then type how far it is from ${spotName(a)} along the edge (a tape along the fence) - it becomes a measured point (2 equations, not 1), which you can put on other cameras too (tool Spots). Click along this edge of the floor (where the fence or the kerb meets the floor) on any picture - also where its corners are out of sight: each point says "on this edge". 2-3 points on each edge a camera sees, spread along it; with ${a.xy && b.xy ? "both corners measured" : `<b>both corners measured</b> (not yet)`} they count. A far corner lies on its edge already: an edge then adds its direction, so a camera that sees 2 corners and the side edges needs one measured point more on each side, or spots shared with another camera.</div></div>`);
     }
   } else if (sel && sel.kind === "poly" && cams[sel.cam] && cams[sel.cam][sel.layer][sel.i]) {
     const poly = cams[sel.cam][sel.layer][sel.i];
@@ -1013,6 +1015,18 @@ function inspector() {
   el.querySelectorAll("[data-edge]").forEach(b => b.onclick = () => { const [a, bb] = b.dataset.edge.split(":").map(Number); sel = {kind: "edge", a, b: bb}; setTool("floor"); afterAny(false); });
   if ($("refine")) $("refine").onclick = () => { toast("fitting every camera..."); fit(order); };
   if ($("endedge")) $("endedge").onclick = () => { sel = null; afterAny(false); };
+  if ($("epset")) $("epset").onclick = () => {      // a post on the edge, measured along it: a measured spot
+    const x = edgePts.find(y => y.id === sel.id), a = x && spotById(x.a), b = x && spotById(x.b), d = +$("epd").value;
+    if (!x || !a || !b || !a.xy || !b.xy) return;
+    if (!(d >= 0)) { toast("the distance from " + spotName(a) + ", please"); return; }
+    const L = Math.hypot(b.xy[0] - a.xy[0], b.xy[1] - a.xy[1]), t = d / L;
+    if (t > 1.05) { toast(`${d} cm is beyond ${spotName(b)} (${Math.round(L)} cm)`); return; }
+    checkpoint();
+    const id = spots.reduce((acc, y) => Math.max(acc, y.id), 0) + 1;
+    spots.push({id, at: {[x.cam]: x.p.slice()}, xy: [+(a.xy[0] + t * (b.xy[0] - a.xy[0])).toFixed(1), +(a.xy[1] + t * (b.xy[1] - a.xy[1])).toFixed(1)]});
+    edgePts = edgePts.filter(y => y !== x); sel = {kind: "spot", id};
+    spotsEdited([x.cam]); toast(`a measured point ${d} cm from ${spotName(a)} - tool Spots puts it on the other cameras`);
+  };
   if ($("delep")) $("delep").onclick = () => { const x = edgePts.find(y => y.id === sel.id); if (!x) return; checkpoint(); edgePts = edgePts.filter(y => y !== x); sel = {kind: "edge", a: x.a, b: x.b}; spotsEdited([x.cam]); };
   if ($("delspot")) $("delspot").onclick = () => { const s = spotById(sel.id); checkpoint(); spots = spots.filter(x => x !== s); edgePts = edgePts.filter(e => e.a !== s.id && e.b !== s.id); sel = null; spotsEdited(Object.keys(s.at)); };
   if ($("delpoly")) $("delpoly").onclick = () => { checkpoint(); cams[sel.cam][sel.layer].splice(sel.i, 1); const cid = sel.cam; sel = null; zonesEdited(cid); };

@@ -140,7 +140,9 @@ cameras' pictures carried onto it, their masks and the spots. Tools (keys in bra
   the floors' outlines (dashed where only the planes put them) and its grid only on the floors. A far
   corner lies on its edge already, so a camera that sees 2 corners and the side edges has 6 equations,
   not 8: the page says what to add (a measured post along each side, or spots shared with the camera
-  opposite);
+  opposite). A post on an edge: click its foot as an edge point, type how far it is from the edge's first
+  corner along the fence (a tape) and it becomes a measured point - then put it on the other cameras
+  that see it (tool Spots);
 - **Spots** (`S`): one spot of the floor on every camera that sees it. Click it on one camera, then the
   same place on the others - once the planes are known, where it should be is ringed (dashed): click
   there. Each spot shows how far (px) it is from where the cameras together put it: green agrees, amber a
