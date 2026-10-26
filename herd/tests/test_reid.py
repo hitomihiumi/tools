@@ -288,6 +288,13 @@ def test_moments_loss_and_the_models_own_thresholds():
                    "--patience", "4", "--moments", "4"])
         ev = json.load(open(os.path.join(d, "id_model", "eval.json")))
         assert "moment_cross_cam_top1" in ev["after"] and ev["after"]["moment_queries"] > 0
+        # ArcFace alone: the frames over MmCows' cows by ArcFace as well; it learns them too
+        torch.manual_seed(0)
+        reid.main(["train", "--data", d, "--sources", "mmcows", "--model", mp, "--epochs", "4", "--P", "16",
+                   "--patience", "4", "--moments", "4", "--loss", "arcface", "--out", os.path.join(d, "id_arc")])
+        ea = json.load(open(os.path.join(d, "id_arc", "eval.json")))
+        assert ea["loss"]["loss"] == "arcface"
+        assert ea["after"]["moment_cross_cam_top1"] > ea["before"]["moment_cross_cam_top1"], ea
         assert ev["after"]["moment_cross_cam_top1"] >= ev["before"]["moment_cross_cam_top1"]
         th = reid.identity_thresholds(os.path.join(d, "id_model", "identity.pt"))
         for k in ("reacquire_sim", "handover_min_sim", "late_sim", "new_cow_similarity", "merge_similarity"):

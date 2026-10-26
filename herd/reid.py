@@ -1204,7 +1204,7 @@ def cmd_train(args):
           f"{mm_line(m0)}", flush=True)
     rng = random.Random(args.seed)
     torch.manual_seed(args.seed)
-    head = None
+    head = frame_head = None
     if args.loss != "supcon":                  # sub-center ArcFace over every training cow (only while training)
         from model import ID_DIM
         n_ids = int(tr.identity.max()) + 1
@@ -1212,9 +1212,14 @@ def cmd_train(args):
         print(f"[train] loss {args.loss}: sub-center ArcFace over {n_ids} cows ({args.arc_k} centres each, s "
               f"{args.arc_s:g}, margin {args.arc_m:g} reached over {args.arc_warm} epochs)"
               + (f" + SupCon (weight {args.arc_w:g} on ArcFace)" if args.loss == "both" else ""), flush=True)
+        if args.loss == "arcface" and mo_tr is not None:   # ArcFace alone: MmCows' frames too, over its cows
+            frame_head = arcface_head(ID_DIM, len(mo_tr.ids), args.arc_k, args.arc_s, args.arc_m).to(dev)
+            print(f"[train] frame against frame: ArcFace over {len(mo_tr.ids)} MmCows cows (no SupCon anywhere)",
+                  flush=True)
+    heads = [h for h in (head, frame_head) if h is not None]
     groups = [{"params": model.parameters()}]
-    if head is not None:                       # the centres start at random: they learn faster
-        groups.append({"params": head.parameters(), "lr": args.lr * 10, "weight_decay": 0.0})
+    for h in heads:                            # the centres start at random: they learn faster
+        groups.append({"params": h.parameters(), "lr": args.lr * 10, "weight_decay": 0.0})
     opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=0.05)
     steps = max(1, len(tr.bursts) // args.P)
     sched = torch.optim.lr_scheduler.OneCycleLR(opt, [g.get("lr", args.lr) for g in groups], total_steps=args.epochs * steps,
@@ -1233,10 +1238,10 @@ def cmd_train(args):
             x, t, v = views(tr, ids, rng, args.crop_s, args.single_p, dev)
             o = model(x, t, v)
             y = torch.as_tensor(tr.identity[ids], device=dev)
+            margin = args.arc_m * min(1.0, (epoch + 1) / max(1, args.arc_warm))   # ArcFace's margin grown in
             if head is None:
                 loss = supcon(o["fingerprint"], y, args.temperature)
             else:
-                margin = args.arc_m * min(1.0, (epoch + 1) / max(1, args.arc_warm))   # the margin grown in
                 loss = args.arc_w * head(o["fingerprint"], y, margin)
                 if args.loss == "both":
                     loss = loss + supcon(o["fingerprint"], y, args.temperature)
@@ -1244,11 +1249,12 @@ def cmd_train(args):
                 fx, fy = mo_tr.sample(rng, args.moments)
                 fx = torch.from_numpy(fx).to(dev)[:, None]
                 o2 = model(fx, fx.new_zeros(len(fx), 1), torch.ones(len(fx), 1, dtype=torch.bool, device=dev))
-                loss = loss + args.frame_w * supcon(o2["fingerprint"], torch.as_tensor(fy, device=dev),
-                                                    args.temperature)
+                fy = torch.as_tensor(fy, device=dev)
+                loss = loss + args.frame_w * (frame_head(o2["fingerprint"], fy, margin) if frame_head is not None
+                                              else supcon(o2["fingerprint"], fy, args.temperature))
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(list(model.parameters()) + (list(head.parameters()) if head is not None else []), 1.0)
+            torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [q for h in heads for q in h.parameters()], 1.0)
             opt.step()
             sched.step()
             losses.append(float(loss.detach()))
@@ -1383,7 +1389,8 @@ def main(argv=None):
     t.add_argument("--temperature", type=float, default=0.1)
     t.add_argument("--loss", choices=("supcon", "arcface", "both"), default="supcon",
                    help="supcon: bursts of a step against each other (as before); arcface: sub-center ArcFace over "
-                        "every training cow; both: ArcFace + SupCon")
+                        "every training cow, and MmCows' frame against frame over its cows - no SupCon anywhere; "
+                        "both: ArcFace + SupCon (the frames SupCon)")
     t.add_argument("--arc-s", type=float, default=30.0, help="ArcFace: the scale")
     t.add_argument("--arc-m", type=float, default=0.3, help="ArcFace: the angular margin (radians)")
     t.add_argument("--arc-k", type=int, default=3, help="ArcFace: centres per cow (sub-centers: a cow's two flanks)")

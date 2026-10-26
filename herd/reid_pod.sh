@@ -31,7 +31,8 @@
 #
 # Knobs: WORK=/workspace  RUN=run9  DET=<best/> (default: the newest)  INIT=<identity.pt> (fine-tune it; default: from scratch)
 #        SOURCES="mmcows cobra sideview multicam cows2021 opencows aerialcattle cowdataset"  EPOCHS=30  MCT=1
-#        LOSS=both (sub-center ArcFace + SupCon; arcface: ArcFace alone; default supcon) -> reid/id_model_all_<LOSS>
+#        LOSS=both (sub-center ArcFace + SupCon; arcface: ArcFace alone, MmCows' frames too; default supcon)
+#        -> reid/id_model_all_<LOSS>
 #        ARC_W=0.3 (ArcFace's weight with LOSS=both; default 1 -> its folder gets _w<ARC_W>)
 #        PICK=moment (keep the epoch best frame against frame across cameras; default score, the mean)
 #        LABEL_EVERY=60 (s between 7/25's human-labelled frames; 15: every label MmCows has - but two runs at 15
