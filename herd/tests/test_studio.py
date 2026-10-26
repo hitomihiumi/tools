@@ -205,12 +205,11 @@ def test_floor_corners_measured_put_the_plan_on_the_floor():
         probe = [(100, 100), (700, 500), (400, 300)]
         # one camera alone: its 4 measured corners
         r = st.fit({"spots": [s for s in spots if s.get("corner")], "floor": {}, "changed": ["cam1"]})
-        assert set(r["floor"]) == {"cam1"} and r["planes"]["cam1"]["corners"] == 4
+        assert set(r["floor"]) == {"cam1"} and r["planes"]["cam1"]["points"] == 4
         assert _off(r["floor"]["cam1"], 1280 / 720, Ha, probe) < 2
         # both: fitted together by 3 corners + 4 spots, the plan put on the 4 measured corners
         r = st.fit({"spots": spots, "floor": {}})
-        assert r["pairs"]["cam1:cam2"]["ok"] and set(r["floor"]) == {"cam1", "cam2"}
-        assert any("perspective" in n for n in r["notes"])
+        assert set(r["floor"]) == {"cam1", "cam2"} and r["planes"]["cam2"]["points"] >= 4     # cam2 through cam1
         assert _off(r["floor"]["cam1"], 1280 / 720, Ha, probe) < 3 and _off(r["floor"]["cam2"], 1280 / 720, Hb, probe) < 3
         assert all(max(e.values()) < 3 for e in r["errors"].values())
         # 2 measured corners: turned, shifted and scaled only - and said so
@@ -224,3 +223,62 @@ def test_floor_corners_measured_put_the_plan_on_the_floor():
         back = st.state()["spots"]
         assert [s.get("corner") for s in back][:4] == [1, 2, 3, 4] and back[0]["xy"] == [0.0, 0.0]
         assert any(s["id"] == 99 and s["corner"] == 5 and not s["at"] for s in back)
+
+
+def test_a_camera_that_sees_two_corners_and_the_edges_and_one_that_sees_none():
+    """The barn's cameras: one sees only its pen's 2 far corners (the near ones are under it) and the two side
+    edges - 6 equations, not 8 (a corner lies on its edge already): how deep the floor is stays open, said so;
+    one measured point along a side (a post) closes it. Another sees no measured corner at all, only spots it
+    shares with the first - placed through it; with only a thin strip of 3 spots, its plane set roughly by
+    hand is refined onto the floor."""
+    with tempfile.TemporaryDirectory() as d:
+        _scene(d)
+        st = _studio(d)
+        Hc = np.array([[1.0, 0.25, 140], [0.0, -0.9, 900], [0.0, 0.0007, 1.0]])     # cam1: A3, A4 and the sides
+        Hd = np.array([[-0.9, 0.1, 1000], [0.05, 0.7, 120], [0.0, 0.0004, 1.0]])    # cam2: its own view
+        uv = lambda H, X, Y: (lambda q: [q[0] / q[2] / 1280, q[1] / q[2] / 720])(H @ [X, Y, 1.0])
+        corners = [{"id": k, "floor": 1, "corner": k, "xy": list(xy), "at": {}}
+                   for k, xy in enumerate(((0, 0), (800, 0), (800, 600), (0, 600)), 1)]
+        for c in corners[2:]:
+            c["at"]["cam1"] = uv(Hc, *c["xy"])
+        assert all(0 < x < 1 for c in corners[2:] for x in c["at"]["cam1"])
+        assert not all(0 < x < 1 for x in uv(Hc, 0, 0))                          # A1, A2: not in the picture
+        edges = [{"id": 100 + i, "a": a, "b": b, "cam": "cam1", "p": uv(Hc, X, Y)}
+                 for i, (a, b, X, Y) in enumerate(((4, 1, 0, 300), (4, 1, 0, 150), (2, 3, 800, 300), (2, 3, 800, 150)))]
+        probe = [(100, 200), (700, 500), (400, 400)]
+        r = st.fit({"spots": corners, "edges": edges, "floor": {}})
+        assert not r["floor"] and any("how deep the floor is open" in n for n in r["notes"])
+        post = {"id": 50, "xy": [0, 250], "at": {"cam1": uv(Hc, 0, 250)}}           # a post 3.5 m from A4 along the side
+        r = st.fit({"spots": corners + [post], "edges": edges, "floor": {}})          # on its edge: 1 equation more, 7
+        assert not r["floor"]
+        post = [post, {"id": 51, "xy": [800, 250], "at": {"cam1": uv(Hc, 800, 250)}}]  # and one on the other side: 8
+        r = st.fit({"spots": corners + post, "edges": edges, "floor": {}})
+        assert set(r["floor"]) == {"cam1"} and r["planes"]["cam1"]["edge_points"] == 4
+        assert _off(r["floor"]["cam1"], 1280 / 720, Hc, probe) < 2
+        # one edge point less and no post: 7 equations - said, no plane
+        r = st.fit({"spots": corners, "edges": edges[:3], "floor": {}})
+        assert not r["floor"] and any("7 of the 8" in n for n in r["notes"])
+        # cam2 sees no measured corner, only 4 spots it shares with cam1: placed through cam1
+        strip = [{"id": 10 + i, "at": {"cam1": uv(Hc, X, Y), "cam2": uv(Hd, X, Y)}}
+                 for i, (X, Y) in enumerate(((150, 380), (650, 380), (300, 470), (520, 450)))]
+        assert all(0 < x < 1 for sp in strip for c in sp["at"].values() for x in c)
+        r = st.fit({"spots": corners + post + strip, "edges": edges, "floor": {}})
+        assert set(r["floor"]) == {"cam1", "cam2"} and r["planes"]["cam2"]["points"] == 4
+        assert _off(r["floor"]["cam2"], 1280 / 720, Hd, [(200, 400), (600, 440)]) < 3
+        # a thin strip of 3 spots only (6 equations): cam2's plane set roughly by hand (40 off), then refined
+        thin = [{"id": 20 + i, "at": {"cam1": uv(Hc, X, 420), "cam2": uv(Hd, X, 420)}} for i, X in enumerate((150, 400, 650))]
+        rough_pts = [[u, v] for u in (0.2, 0.5, 0.8) for v in (0.3, 0.55, 0.8)]
+        Hdi = np.linalg.inv(Hd)
+        rough = []
+        for u, v in rough_pts:
+            q = Hdi @ [u * 1280, v * 720, 1.0]
+            rough.append([u, v, q[0] / q[2] + 40, q[1] / q[2] - 15])
+        start = {"cam2": {"floor_points": rough, "distortion": 0.0, "aspect": 1280 / 720}}
+        before = _off(start["cam2"], 1280 / 720, Hd, [(200, 420), (600, 420)])
+        r = st.fit({"spots": corners + post + thin, "edges": edges, "floor": start})
+        assert "cam2" in r["floor"] and any("refined together" in n for n in r["notes"])
+        after = _off(r["floor"]["cam2"], 1280 / 720, Hd, [(200, 420), (600, 420)])
+        assert before > 30 and after < 0.3 * before, (before, after)
+        # the edges kept through a save
+        st.save({"cams": {}, "floor": {}, "spots": corners + strip, "edges": edges})
+        assert len(st.state()["edges"]) == 4 and st.state()["spots"][0]["floor"] == 1

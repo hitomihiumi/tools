@@ -7,11 +7,12 @@ A small web server (in Docker: docker compose run --rm -p 8765:8765 herd studio 
   zones   mask (the floor a camera counts), exclude (greyed before the detector), tracking_mask (where it
           follows cows beyond its mask) - drawn on the picture, the cows found coloured by the rule the barn
           uses (as herd.py zones page)
-  floor   the floor itself: its corners clicked round its edge, the same corners on every camera that sees
-          them (corners are spots with a place along the edge), its outline and grid drawn on every
-          camera; measured corners (a rectangle's width x length, or any corner's X, Y) put the plan on
-          the real floor - 3 or more square and in cm, 2 turned, shifted and scaled - and a camera seeing
-          4 measured corners gets its plane on its own
+  floor   the floors themselves (a pen A, the next B, ...): their corners clicked round the edge, the same
+          corners on every camera that sees them (corners are spots with a floor and a place along its
+          edge), points along an edge where its corners are out of sight; measured sizes (a rectangle,
+          or any corner's or spot's X, Y) put the plan on the real floor: a camera with 8 equations of it
+          gets its plane alone (dlt_mixed: points and points on lines), the others follow through shared
+          spots or are fitted in pairs and put on the corners either sees, then all are refined together
   spots   the same spot of the floor, clicked on every camera that sees it (one spot, any number of
           cameras; picked on one, it is shown - or where it should be - on all). Every two cameras with 5
           spots in common are fitted at once (autocalib's fit: the lens bend from 7, spots that disagree
@@ -138,8 +139,9 @@ def save_config(path, cams, floor, link_dist=None, shared=()):
 
 def spots_from_file(data):
     """points.json -> [{id, at: {cam: [u, v]}, corner?, xy?}]: its spots (one spot of the floor, on any number of
-    cameras; a corner of the floor's outline has its place along it, `corner`, and maybe its measured floor
-    point, `xy`), or, from autocalib's pick page, each pair's row as a spot on those two."""
+    cameras; a corner of a floor's outline has its floor (1, 2, ... - A, B, ...) and its place along it,
+    `corner`, and maybe its measured floor point, `xy`), or, from autocalib's pick page, each pair's row as a
+    spot on those two."""
     if data.get("spots"):
         out = []
         for s in data["spots"]:
@@ -148,6 +150,7 @@ def spots_from_file(data):
             sp = {"id": int(s["id"]), "at": {c: [float(p[0]), float(p[1])] for c, p in (s.get("at") or {}).items()}}
             if s.get("corner") is not None:
                 sp["corner"] = int(s["corner"])
+                sp["floor"] = int(s.get("floor") or 1)
             if s.get("xy") is not None:
                 sp["xy"] = [float(s["xy"][0]), float(s["xy"][1])]
             out.append(sp)
@@ -172,6 +175,42 @@ def pairs_from_spots(spots, ids):
             rows.append([*s["at"][a], *s["at"][b]])
             sid.append(s["id"])
     return out
+
+
+def _norm(P):
+    """Hartley's normalisation of 2D points: centred, mean distance sqrt(2) -> 3x3."""
+    P = np.asarray(P, float)
+    c = P.mean(0)
+    s = np.sqrt(2) / max(float(np.mean(np.hypot(*(P - c).T))), 1e-12)
+    return np.array([[s, 0, -s * c[0]], [0, s, -s * c[1]], [0, 0, 1.0]])
+
+
+def dlt_mixed(p, X, e=(), L=()):
+    """H (picture -> floor) from picture points p on floor points X, and picture points e on floor lines L
+    (a, b, c: aX + bY + c = 0 - an edge of the floor, its corners measured): one DLT, Hartley-normalised.
+    A point gives 2 equations, a point on a line 1; 8 are needed, and they must fix H (no 3 points on one
+    line doing all the work) -> 3x3, or None."""
+    p, X = np.asarray(p, float).reshape(-1, 2), np.asarray(X, float).reshape(-1, 2)
+    e, L = np.asarray(e, float).reshape(-1, 2), np.asarray(L, float).reshape(-1, 3)
+    if len(X) < 2:
+        return None
+    Ti, Tf = _norm(np.r_[p, e]), _norm(X)
+    ap = lambda T, P: (np.c_[P, np.ones(len(P))] @ T.T)[:, :2]
+    rows = []
+    for (x, y), (U, V) in zip(ap(Ti, p), ap(Tf, X)):
+        rows += [[x, y, 1, 0, 0, 0, -U * x, -U * y, -U], [0, 0, 0, x, y, 1, -V * x, -V * y, -V]]
+    Ln = L @ np.linalg.inv(Tf)                    # lines go with the inverse: l' = l T^-1
+    for (x, y), (a, b, c) in zip(ap(Ti, e), Ln):
+        n = np.hypot(a, b) or 1.0
+        a, b, c = a / n, b / n, c / n
+        rows.append([a * x, a * y, a, b * x, b * y, b, c * x, c * y, c])
+    if len(rows) < 8:
+        return None
+    _, S, Vt = np.linalg.svd(np.array(rows))
+    if (S[-1] if len(S) < 9 else S[-2]) < 1e-6 * S[0]:
+        return None                               # not fixed: the constraints leave a family of planes
+    H = np.linalg.inv(Tf) @ Vt[-1].reshape(3, 3) @ Ti
+    return H / H[2, 2] if abs(H[2, 2]) > 1e-12 else H
 
 
 # ------------------------------------------------------------------ the server's state
@@ -258,13 +297,16 @@ class Studio:
 
     def state(self):
         self.cfg = load_config(self.args.config)
-        spots = []
+        spots, edges = [], []
         pj = os.path.join(self.calib, "points.json")
         if os.path.exists(pj):
             try:
-                spots = spots_from_file(json.load(open(pj, encoding="utf-8")))
-            except (OSError, ValueError, KeyError, IndexError):
-                spots = []
+                data = json.load(open(pj, encoding="utf-8"))
+                spots = spots_from_file(data)
+                edges = [{"id": int(e["id"]), "a": int(e["a"]), "b": int(e["b"]), "cam": e["cam"],
+                          "p": [float(e["p"][0]), float(e["p"][1])]} for e in data.get("edges") or []]
+            except (OSError, ValueError, KeyError, IndexError, TypeError):
+                spots, edges = [], []
 
         def polys(m):
             if not m:
@@ -279,7 +321,7 @@ class Studio:
                          **{k: polys(c.get(k)) for k in ZONES},
                          "calib": {k: c.get(k) for k in FLOOR} if c.get("floor_points") else None})
         m = self.cfg["mct"]
-        return {"cams": cams, "spots": spots, "at": self.at, "videos": bool(self.videos),
+        return {"cams": cams, "spots": spots, "edges": edges, "at": self.at, "videos": bool(self.videos),
                 "boxes_cached": sorted(self.T), "link_dist": m.get("link_dist"),
                 "neighbours": m.get("neighbours", []), "disjoint": m.get("disjoint", []),
                 "config": os.path.abspath(self.args.config), "calib_dir": os.path.abspath(self.calib)}
@@ -313,15 +355,21 @@ class Studio:
         return out
 
     def fit(self, req):
-        """The spots -> every two cameras with 5 in common fitted (autocalib.fit_spots), each group of cameras
-        they join (only those with a camera in req["changed"], all without it) on one floor plan, placed
-        clear of the other calibrated cameras -> the pairs' results, the cameras' new planes (a preview),
-        link_dist, each spot's error on each camera."""
+        """The floor and the spots -> the cameras' planes (a preview): first every camera onto the measured
+        floor (onto_floor: its measured corners, its points on the floor's edges, and the spots it shares
+        with a camera already on it); then every two cameras with 5 spots in common fitted to each other
+        (autocalib.fit_spots), each group they join - one with no camera on the measured floor, and a
+        camera of it in req["changed"] (all without it) - on one floor plan, placed clear of the other
+        calibrated cameras and moved onto the measured corners it sees -> the pairs' results, the cameras'
+        new planes, how each was found, link_dist, each spot's error on each camera."""
         spots = req.get("spots") or []
+        edges = req.get("edges") or []
         floor = dict(req.get("floor") or {})
         changed = set(req.get("changed") or self.ids)
-        pairs = pairs_from_spots(spots, self.ids)
         aspect = {c: self.aspect(c) for c in self.ids}
+        new, planes, floor_said = self.onto_floor(spots, edges, aspect)
+        notes = [n for c, n in floor_said.items() if c in new]          # placed on the floor: said now
+        pairs = pairs_from_spots(spots, self.ids)
         graph = collections.defaultdict(set)
         for k, (rows, _) in pairs.items():
             if len(rows) >= 5:
@@ -339,13 +387,13 @@ class Studio:
                             queue.append(y)
                 seen |= g
                 groups.append(g)
-        results, notes, new, links = {}, [], {}, []
+        results, links = {}, []
         for k, (rows, sid) in pairs.items():
             if len(rows) < 5:
                 results[k] = {"ok": False, "n": len(rows), "spots": sid,
                               "notes": [f"{k.replace(':', '-')}: {len(rows)} spots in common - 5 at least"]}
         for g in groups:
-            if not g & changed:
+            if not g & changed or g & set(new):       # on the measured floor already: by it, not by pairs
                 continue
             found = {}
             for k, (rows, sid) in pairs.items():
@@ -363,7 +411,7 @@ class Studio:
                 continue
             fitted = {c for ab in found for c in ab}
             taken = [(min(p[2] for p in v["floor_points"]), max(p[2] for p in v["floor_points"]))
-                     for c, v in floor.items() if v and v.get("floor_points") and c not in fitted]
+                     for c, v in {**floor, **new}.items() if v and v.get("floor_points") and c not in fitted]
             calib, link, _ = autocalib.floor_plan(found, self.T, aspect, taken)
             calib, said, measured = self.onto_measured(calib, spots, aspect)
             notes += said
@@ -373,22 +421,226 @@ class Studio:
             if missing and measured < 3:
                 notes.append(f"no boxes cached for {', '.join(missing)} in {self.calib} (boxes_<cam>.json from an "
                              "autocalib --videos run): the plan is not in cm and link_dist is a guess")
-        planes = {}
-        for c in self.ids:                       # a camera on its own: 4 measured corners or more give its plane
-            if c in new or c not in changed:
-                continue
-            rows = [[*sp["at"][c], *sp["xy"]] for sp in spots if sp.get("xy") and c in sp["at"]]
-            if len(rows) < 4:
-                continue
-            cal, med = self.from_measured(c, rows, aspect[c])
-            if cal:
-                new[c] = cal
-                planes[c] = {"corners": len(rows), "median": med}
-                notes.append(f"{c}: its plane from {len(rows)} measured corners" + (f", within {med:.0f} px" if len(rows) > 4 else
-                             " (4: exact, nothing to check them against)"))
+        notes += [n for c, n in floor_said.items() if c not in new]     # why not on the floor - those left without
         floor.update(new)
+        if req.get("refine", True):
+            moved, said = self.refine(floor, spots, edges, aspect)
+            new.update(moved)
+            floor.update(moved)
+            notes += said
         return {"pairs": results, "notes": notes, "floor": new, "planes": planes,
                 "link_dist": round(max(links)) if links else None, "errors": self.spot_errors(spots, floor)}
+
+    def onto_floor(self, spots, edges, aspect):
+        """Every camera that sees enough of the measured floor gets its plane on its own: its measured corners
+        (2 equations each), its points on the floor's edges between two measured corners (1 each), and the
+        spots it shares with cameras placed so far, at the floor point they give them (2 each) - 8 at least
+        (fit_floor). Round by round, so that a camera seeing no measured corner follows one that does. ->
+        ({camera: calib}, {camera: how}, {camera: what to say})."""
+        measured = {sp["id"]: sp["xy"] for sp in spots if sp.get("xy")}
+        if len(measured) < 2:
+            return {}, {}, {}
+        line = lambda a, b: np.cross([*measured[a], 1.0], [*measured[b], 1.0]) if a in measured and b in measured else None
+        known, out, planes, said = dict(measured), {}, {}, {}
+        for _ in range(len(self.ids)):
+            grew = False
+            for c in self.ids:
+                if c in out:
+                    continue
+                pts = [[*sp["at"][c], *known[sp["id"]]] for sp in spots if c in sp["at"] and sp["id"] in known]
+                lns = [[*e["p"], *L] for e in edges if e.get("cam") == c for L in [line(e.get("a"), e.get("b"))] if L is not None]
+                n_eq = 2 * len(pts) + len(lns)
+                if not pts and not lns:
+                    continue
+                if len(pts) < 2 or n_eq < 8:
+                    said[c] = (f"{c}: {len(pts)} floor point(s) and {len(lns)} edge point(s) - {n_eq} of the 8 equations "
+                               "a plane needs (a measured corner or a spot placed by another camera: 2, a point on a "
+                               "floor's edge: 1; 2 points at least)")
+                    continue
+                cal, px, why = self.fit_floor(c, pts, lns, aspect[c])
+                if cal is None:
+                    said[c] = f"{c}: {why}"
+                    continue
+                out[c] = cal
+                planes[c] = {"points": len(pts), "edge_points": len(lns), "rms": px, "lens": cal["distortion"]}
+                said[c] = (f"{c}: its plane from the floor - {len(pts)} point(s), {len(lns)} on its edges"
+                           + (f", within {px:.0f} px (rms)" if n_eq > 8 else " (8 equations: exact, nothing to check them against)")
+                           + (f"; lens {cal['distortion']}" if cal["distortion"] else ""))
+                grew = True
+            fs = {c: autocalib.camera_floor(v, aspect[c]) for c, v in out.items()}
+            for sp in spots:                     # the spots of the cameras placed: where they are on the floor
+                if sp["id"] in measured:
+                    continue
+                P = []
+                for c, (u, v) in sp["at"].items():
+                    if c in fs:
+                        X, Y, ok = fs[c][0](np.array([u]), np.array([v]))
+                        if ok[0] and np.isfinite(X[0]) and np.isfinite(Y[0]):
+                            P.append((float(X[0]), float(Y[0])))
+                if P:
+                    known[sp["id"]] = list(np.mean(P, 0))
+            if not grew:
+                break
+        return out, planes, {c: said[c] for c in self.ids if c in said}
+
+    def fit_floor(self, cam, pts, lns, ar):
+        """One camera's plane from floor points [[u, v, X, Y], ...] and points on floor lines [[u, v, a, b, c],
+        ...] (dlt_mixed); with 12 equations or more the lens bend too, when clearly closer -> (calib, rms px
+        off, None) or (None, None, why not)."""
+        P, E = np.array(pts, float).reshape(-1, 4), np.array(lns, float).reshape(-1, 5)
+        w = self.size.get(cam, (1280, 720))[0]
+        n_eq = 2 * len(P) + len(E)
+        best = None
+        for k in (autocalib.K_GRID_POINTS if n_eq >= 12 else (0.0,)):
+            pu = np.c_[undistort(P[:, 0], P[:, 1], k, ar)]
+            eu = np.c_[undistort(E[:, 0], E[:, 1], k, ar)] if len(E) else np.zeros((0, 2))
+            H = dlt_mixed(pu, P[:, 2:4], eu, E[:, 2:5])
+            if H is None:
+                continue
+            side = np.sign(np.r_[pu, eu] @ H[2, :2] + H[2, 2])
+            if len(set(side)) > 1:
+                continue                          # the floor folded over: not this lens
+            Hi = np.linalg.inv(H)
+            err = []
+            for (u, v, X, Y) in P:
+                q = Hi @ [X, Y, 1.0]
+                ua, va = autocalib.distort(q[0] / q[2], q[1] / q[2], k, ar)
+                err.append(np.hypot((ua - u) * w, (va - v) * w / ar))
+            for (u, v, a, b, c), (x, y) in zip(E, eu):
+                q = H @ [x, y, 1.0]
+                q = q[:2] / q[2]
+                n2 = a * a + b * b
+                foot = q - (a * q[0] + b * q[1] + c) / n2 * np.array([a, b])
+                r = Hi @ [foot[0], foot[1], 1.0]
+                ua, va = autocalib.distort(r[0] / r[2], r[1] / r[2], k, ar)
+                err.append(np.hypot((ua - u) * w, (va - v) * w / ar))
+            err = np.array(err, float)
+            if not np.all(np.isfinite(err)):
+                continue
+            rms = float(np.sqrt(np.mean(err ** 2)))
+            if best is None or (rms < 0.8 * best[0] if best[1] == 0.0 else rms < best[0]):
+                best = (rms, k, H, side[0])
+        if best is None:
+            return None, None, ("what it sees of the floor does not fix a plane - 2 far corners and the side edges leave "
+                                "how deep the floor is open (a corner already lies on its edge: an edge then adds only "
+                                "its direction, and a measured point on an edge only its place along it). Add measured points "
+                                "(a post along each side at a known distance, or one inside the floor), spots shared with "
+                                "a camera that sees the other corners, or set the plane roughly (tool Plane) and Refine")
+        rms, k, H, side = best
+        uv = np.r_[P[:, :2], E[:, :2]]
+        lo, hi = np.clip(uv.min(0) - 0.02, 0.03, 0.97), np.clip(uv.max(0) + 0.02, 0.03, 0.97)
+        fp = []
+        for u in np.linspace(lo[0], hi[0], 3):
+            for v in np.linspace(lo[1], hi[1], 3):
+                a, b = undistort(u, v, k, ar)
+                q = H @ [a, b, 1.0]
+                if np.sign(q[2]) == side:
+                    fp.append([round(float(u), 4), round(float(v), 4), round(float(q[0] / q[2]), 1), round(float(q[1] / q[2]), 1)])
+        if len(fp) < 4:
+            return None, None, "its floor points lie beyond the picture's horizon"
+        return {"floor_points": fp, "distortion": k, "aspect": round(ar, 4)}, round(rms, 1), None
+
+    def refine(self, floor, spots, edges, aspect):
+        """Every camera's plane adjusted at once (least squares, robust to a bad click): the measured points
+        and corners where each camera sees them, the points on the floor's edges on those edges, and each
+        spot shared by cameras at one floor point for them all - in px of the pictures. What none of that
+        fixes stays as it is (a weak hold on each plane): a plane set by hand (tool Plane) and refined keeps
+        what was set where nothing says otherwise - a thin strip shared by two cameras is enough then.
+        -> ({camera: calib} of those that moved, what to say)."""
+        from scipy.optimize import least_squares
+        cams = [c for c in self.ids if (floor.get(c) or {}).get("floor_points")]
+        measured = {sp["id"]: sp["xy"] for sp in spots if sp.get("xy")}
+        line = lambda a, b: np.cross([*measured[a], 1.0], [*measured[b], 1.0]) if a in measured and b in measured else None
+        info = {}
+        for c in cams:
+            f = floor[c]
+            k, ar = float(f.get("distortion") or 0.0), float(f.get("aspect") or self.aspect(c))
+            P = np.array(f["floor_points"], float)
+            uu, vv = undistort(P[:, 0], P[:, 1], k, ar)
+            H0 = homography(np.c_[uu, vv], P[:, 2:4])
+            g = np.c_[uu, vv]
+            d_img = np.hypot(*(g[:, None] - g[None]).transpose(2, 0, 1))
+            gf = np.c_[g, np.ones(len(g))] @ H0.T
+            gf = gf[:, :2] / gf[:, 2:3]
+            d_fl = np.hypot(*(gf[:, None] - gf[None]).transpose(2, 0, 1))
+            scale = float(np.median(d_fl[d_img > 1e-6] / d_img[d_img > 1e-6]))          # floor units per picture unit
+            info[c] = {"k": k, "ar": ar, "w": self.size.get(c, (1280, 720))[0], "H0": H0 / H0[2, 2], "g": g, "gf": gf,
+                       "scale": scale, "P": P}
+        ci = {c: i for i, c in enumerate(cams)}
+        pts, shared, lns = [], [], []
+        for sp in spots:
+            seen = [c for c in sp["at"] if c in ci]
+            if sp["id"] in measured:
+                pts += [(ci[c], sp["at"][c], measured[sp["id"]]) for c in seen]
+            elif len(seen) >= 2:
+                shared.append((sp["id"], [(ci[c], sp["at"][c]) for c in seen]))
+        for e in edges:
+            L = line(e.get("a"), e.get("b"))
+            if L is not None and e.get("cam") in ci:
+                lns.append((ci[e["cam"]], e["p"], L))
+        if not shared and not pts and not lns:
+            return {}, []
+        # the start: the planes as they are; each shared spot at the mean of the cameras' floor points
+        x0 = [info[c]["H0"].ravel()[:8] for c in cams]
+        spot0 = []
+        for _, obs in shared:
+            fl = []
+            for i, (u, v) in obs:
+                c = cams[i]
+                a, b = undistort(u, v, info[c]["k"], info[c]["ar"])
+                q = info[c]["H0"] @ [a, b, 1.0]
+                fl.append(q[:2] / q[2])
+            spot0.append(np.mean(fl, 0))
+        x0 = np.concatenate([np.concatenate(x0)] + [np.array(s_) for s_ in spot0]) if spot0 else np.concatenate(x0)
+        n8 = 8 * len(cams)
+
+        def px(c, H, X, Y, u, v):                # the floor point (X, Y) on camera c's picture vs the click, px
+            q = np.linalg.solve(H, [X, Y, 1.0])
+            ua, va = autocalib.distort(q[0] / q[2], q[1] / q[2], info[c]["k"], info[c]["ar"])
+            w, ar = info[c]["w"], info[c]["ar"]
+            return [(ua - u) * w, (va - v) * w / ar]
+
+        def residuals(x, hold=True):
+            Hs = [np.append(x[8 * i: 8 * i + 8], 1.0).reshape(3, 3) for i in range(len(cams))]
+            r = []
+            for i, (u, v), (X, Y) in pts:
+                r += px(cams[i], Hs[i], X, Y, u, v)
+            for j, (_, obs) in enumerate(shared):
+                X, Y = x[n8 + 2 * j: n8 + 2 * j + 2]
+                for i, (u, v) in obs:
+                    r += px(cams[i], Hs[i], X, Y, u, v)
+            for i, (u, v), (a, b, c0) in lns:
+                c = cams[i]
+                ua_, va_ = undistort(u, v, info[c]["k"], info[c]["ar"])
+                q = Hs[i] @ [ua_, va_, 1.0]
+                q = q[:2] / q[2]
+                foot = q - (a * q[0] + b * q[1] + c0) / (a * a + b * b) * np.array([a, b])
+                d = px(c, Hs[i], foot[0], foot[1], u, v)
+                r.append(float(np.hypot(*d)))
+            if hold:                             # the weak hold: each plane's own grid stays where it was
+                for i, c in enumerate(cams):
+                    I = info[c]
+                    q = np.c_[I["g"], np.ones(len(I["g"]))] @ Hs[i].T
+                    r += list((((q[:, :2] / q[:, 2:3]) - I["gf"]) / I["scale"] * I["w"] * 0.05).ravel())
+            return np.array(r, float)
+
+        before = residuals(x0, hold=False)
+        sol = least_squares(residuals, x0, loss="soft_l1", f_scale=8.0, max_nfev=400, x_scale="jac")
+        after = residuals(sol.x, hold=False)
+        rms = lambda r: float(np.sqrt(np.mean(np.square(r)))) if len(r) else 0.0
+        out = {}
+        for i, c in enumerate(cams):
+            I, H = info[c], np.append(sol.x[8 * i: 8 * i + 8], 1.0).reshape(3, 3)
+            q = np.c_[I["g"], np.ones(len(I["g"]))] @ H.T
+            fl = q[:, :2] / q[:, 2:3]
+            moved = float(np.max(np.hypot(*(fl - I["gf"]).T)) / I["scale"] * I["w"])
+            if moved > 0.5 and np.all(np.sign(q[:, 2]) == np.sign(q[0, 2])):
+                out[c] = {"floor_points": [[round(float(u), 4), round(float(v), 4), round(float(X), 1), round(float(Y), 1)]
+                                           for (u, v), (X, Y) in zip(I["P"][:, :2], fl)],
+                          "distortion": I["k"], "aspect": round(I["ar"], 4)}
+        said = [f"refined together ({len(pts)} measured, {len(shared)} shared spots, {len(lns)} edge points): "
+                f"{rms(before):.1f} -> {rms(after):.1f} px (rms); moved: {', '.join(out) or 'none'}"] if out else []
+        return out, said
 
     def onto_measured(self, calib, spots, aspect):
         """A group of cameras on one plan -> the plan moved onto the floor's measured corners (xy) they see:
@@ -436,37 +688,6 @@ class Studio:
         if n == 2:
             said.append("2 measured corners only turn, shift and scale the plan: 3 or more also fix its shape")
         return out, said, n
-
-    def from_measured(self, cam, rows, ar):
-        """One camera's plane from the floor's measured corners it sees [[u, v, X, Y], ...] (4 or more): a
-        homography, with 6 or more the lens bend too (when clearly closer) -> (calib, median px off) or
-        (None, None)."""
-        P = np.array(rows, float)
-        w = self.size.get(cam, (1280, 720))[0]
-        best = None
-        for k in (autocalib.K_GRID_POINTS if len(P) >= 6 else (0.0,)):
-            uu, vv = undistort(P[:, 0], P[:, 1], k, ar)
-            H = homography(np.c_[uu, vv], P[:, 2:4])
-            q = np.c_[P[:, 2:4], np.ones(len(P))] @ np.linalg.inv(H).T
-            ua, va = autocalib.distort(q[:, 0] / q[:, 2], q[:, 1] / q[:, 2], k, ar)
-            med = float(np.median(np.hypot((ua - P[:, 0]) * w, (va - P[:, 1]) * w / ar)))
-            if best is None or (med < 0.8 * best[0] if best[1] == 0.0 else med < best[0]):
-                best = (med, k, H)
-        med, k, H = best
-        uu, vv = undistort(P[:, 0], P[:, 1], k, ar)
-        side = np.sign(np.median(np.c_[uu, vv, np.ones(len(P))] @ H[2]))
-        lo = np.clip(P[:, :2].min(0) - 0.02, 0.03, 0.97)
-        hi = np.clip(P[:, :2].max(0) + 0.02, 0.03, 0.97)
-        fp = []
-        for u in np.linspace(lo[0], hi[0], 3):
-            for v in np.linspace(lo[1], hi[1], 3):
-                a, b = undistort(u, v, k, ar)
-                q = H @ [a, b, 1.0]
-                if np.sign(q[2]) == side:
-                    fp.append([round(float(u), 4), round(float(v), 4), round(float(q[0] / q[2]), 1), round(float(q[1] / q[2]), 1)])
-        if len(fp) < 4:
-            fp = [[round(float(r[0]), 4), round(float(r[1]), 4), float(r[2]), float(r[3])] for r in P]
-        return {"floor_points": fp, "distortion": k, "aspect": round(ar, 4)}, round(med, 1)
 
     def overlay(self, req):
         """req: base, top, floor {cam: floor}, top_zones {mask, tracking_mask} -> the top camera's picture
@@ -553,7 +774,7 @@ class Studio:
         spots = [s for s in (req.get("spots") or []) if s.get("at") or s.get("corner") is not None]
         pairs = {k: rows for k, (rows, _) in pairs_from_spots(spots, self.ids).items()}
         with open(os.path.join(self.calib, "points.json"), "w", encoding="utf-8") as fh:
-            json.dump({"spots": spots, "pairs": pairs}, fh, indent=1)
+            json.dump({"spots": spots, "edges": req.get("edges") or [], "pairs": pairs}, fh, indent=1)
         said = [f"{self.args.config}: zones of " + (", ".join(req.get("cams") or {}) or "no camera changed")]
         if floor:
             said.append("plane " + ", ".join(f"{c} {'set' if v else 'removed'}" for c, v in floor.items()))

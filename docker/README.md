@@ -122,15 +122,25 @@ cameras' pictures carried onto it, their masks and the spots. Tools (keys in bra
 
 - **Mask / Exclude / Tracking** (`M` `E` `T`): click round an area, a click on the first corner or Enter
   closes it; drag a corner, double-click an edge for a corner more, right-click a corner to remove it;
-- **Floor** (`O`): the floor itself, the main way to calibrate. Click its corners round its edge on one
-  camera (F1, F2, ...), then the same corners on the others: the next corner that camera has not got is
-  picked for you (ringed where the planes put it, once there are planes); "Not seen here" (`N`) skips it,
-  a double-click on the outline's edge puts a corner between two. Every camera shows the floor's outline
-  (dashed where only the planes put it) and its grid only on the floor. Corners are shared like spots: 5
-  corners or spots in common fit two cameras together. Measured sizes put the plan on the real floor: for
-  4 corners "a rectangle" width x length (cm), or X, Y of any corner (pick one as 0, 0) - 3 measured
-  corners or more make the plan square and in cm, 2 only turn, shift and scale it, and a camera that sees
-  4 measured corners is calibrated on its own;
+- **Floor** (`O`): the floors themselves (a pen is floor A, the next pen B, an alley C - "+ New floor"),
+  the main way to calibrate. Click a floor's corners round its edge on one camera (A1, A2, ...), then the
+  same corners on the others: the next corner that camera has not got is picked (ringed where the planes
+  put it, once there are planes); `N` skips one it does not see, Esc to add new corners there instead. A
+  corner the camera does not see (the near ones are often under it) is no problem: pick an **edge** (the
+  buttons A1–A2, ... on the right, or a click on the outline) and click a few points along it on the
+  pictures - where the fence or kerb meets the floor; a double-click on the outline puts a corner between
+  two. Measured sizes put the plan on the real floor: for 4 corners "a rectangle" width x length (cm) and
+  where its first corner is, or X, Y of any corner or spot (a post, a drinker's corner). Then, in order:
+  a camera with 8 equations of the measured floor (2 per measured corner or point, 1 per edge point) gets
+  its plane on its own; a camera that sees none follows one placed already through 4 spots it shares; two
+  cameras with 5 spots in common are fitted together and put on the corners either of them sees (two
+  cameras facing each other, each seeing the other's near corners); and "Fit / Refine all" adjusts every
+  plane together - a camera that shares only a thin strip with its neighbour, its plane set roughly by
+  hand first (tool Plane), is pulled onto the floor by the strip's spots and its edges. Every camera shows
+  the floors' outlines (dashed where only the planes put them) and its grid only on the floors. A far
+  corner lies on its edge already, so a camera that sees 2 corners and the side edges has 6 equations,
+  not 8: the page says what to add (a measured post along each side, or spots shared with the camera
+  opposite);
 - **Spots** (`S`): one spot of the floor on every camera that sees it. Click it on one camera, then the
   same place on the others - once the planes are known, where it should be is ringed (dashed): click
   there. Each spot shows how far (px) it is from where the cameras together put it: green agrees, amber a
