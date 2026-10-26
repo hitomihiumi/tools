@@ -1264,16 +1264,17 @@ def cmd_train(args):
     ab = fit_abstain(rows, args.max_error, os.path.join(args.out, "abstain.json"))
     th = calibrate(model, va, mo_va)
     write_json(os.path.join(args.out, "thresholds.json"), th)
+    loss = {"loss": args.loss, "temperature": args.temperature,
+            **({"arc_s": args.arc_s, "arc_m": args.arc_m, "arc_k": args.arc_k, "arc_w": args.arc_w}
+               if args.loss != "supcon" else {})}
     torch.save({"in_dim": base.in_dim, "kw": {k: v for k, v in base.kw.items() if k != "frame_id"},
                 "state": {k: v.cpu() for k, v in model.state_dict().items()}, "features": ck.get("features", {}),
                 "base": os.path.abspath(args.model), "init": os.path.abspath(args.init) if args.init else "",
                 "sources": sorted(set(args.sources) | set(ck0.get("sources", []) if args.init else [])),
                 "eval": best_m, "before": m0, "thresholds": th,
-                "loss": {"loss": args.loss, "temperature": args.temperature,
-                         **({"arc_s": args.arc_s, "arc_m": args.arc_m, "arc_k": args.arc_k, "arc_w": args.arc_w}
-                            if args.loss != "supcon" else {})}},
+                "loss": loss},
                os.path.join(args.out, "identity.pt"))
-    write_json(os.path.join(args.out, "eval.json"), {"before": m0, "after": best_m,
+    write_json(os.path.join(args.out, "eval.json"), {"loss": loss, "before": m0, "after": best_m,
                                                      "abstain": {k: ab[k] for k in ("threshold", "dev_top1", "dev")}})
     print(f"[train] best epoch {best_m['epoch']}: another day {best_m.get('other_day_top1', 0):.1%} (was "
           f"{m0.get('other_day_top1', 0):.1%}), another camera {best_m.get('other_camera_top1', 0):.1%} (was "
