@@ -379,6 +379,19 @@ The second scores a rehearsal already made. The log and `trial/score.json` give:
 Only the boxes a camera counts (its mask) are scored. Use the labels.json with the ids as the gallery
 page saved them (the same cow one id on every camera).
 
+**Several identity models, one rehearsal each, on a pod** (`herd/trial_pod.sh`): which identity model
+is best on your own cows. Upload to the pod's `/workspace`:
+
+| where | what |
+|---|---|
+| `/workspace/models/` | the archives in `docker/models/` (`herd_models_*.tgz`, the detector's, `herd_rumination_*.tgz`) and a `herd_reid_*.tgz` of each identity model to compare (identity models trained on that pod are taken as they are) |
+| `/workspace/data/` | `barn.toml` (the RTSP passwords out: the trial plays files), `rec_fixed/`, `boxes/` (`frames.json` is enough), `labels.json` |
+
+Then `bash herd/trial_pod.sh` (and `bash herd/trial_pod.sh log`). `/models` and `/data` point at those two
+folders, so barn.toml's paths stay as they are; the script stops naming any `/models/...` file it lacks.
+Each identity model gets `/workspace/data/trial_<model>/` and a line in the table at the end (IDF1 of all
+cameras and of each); `/workspace/export/herd_trials_<date>.tgz` keeps every `score.json` and `trial.json`.
+
 **Cameras that share floor, calibrated without measuring anything.** A cow seen by two cameras should
 be one cow. `[mct] link` joins her two tracks by where she stands on one floor plan. Marks measured by
 hand are not needed: a cow that gets up or walks does it at the same moment on both cameras. The
