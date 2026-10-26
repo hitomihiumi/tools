@@ -81,6 +81,17 @@ def test_identity_training_knows_a_cow_on_another_day():
         assert ev2["after"]["score"] >= ev2["before"]["score"]
         ck = torch.load(os.path.join(d, "id_model_ft", "identity.pt"), weights_only=False)
         assert ck["init"].endswith("identity.pt") and ck["sources"] == ["multicam"]
+        # sub-center ArcFace (+ SupCon): learns as well, the head only while training; the loss kept in the model
+        torch.manual_seed(0)
+        reid.main(["train", "--data", d, "--sources", "multicam", "--model", mp, "--epochs", "6", "--P", "16",
+                   "--patience", "6", "--loss", "both", "--out", os.path.join(d, "id_model_arc")])
+        ev3 = json.load(open(os.path.join(d, "id_model_arc", "eval.json")))
+        assert ev3["after"]["other_day_top1"] > 0.6, ev3
+        ck = torch.load(os.path.join(d, "id_model_arc", "identity.pt"), weights_only=False)
+        assert ck["loss"]["loss"] == "both" and ck["loss"]["arc_k"] == 3
+        assert not any(k.startswith("w") and v.shape[0] == 15 * 3 for k, v in ck["state"].items())   # no centres saved
+        idm, _ = reid.load_identity(os.path.join(d, "id_model_arc", "identity.pt"), meta, torch.device("cpu"))
+        assert idm(x, torch.zeros(2, 5), torch.ones(2, 5, dtype=torch.bool))["fingerprint"].shape == (2, mdl.ID_DIM)
 
 
 def test_plan_reads_cobra_and_sideview():

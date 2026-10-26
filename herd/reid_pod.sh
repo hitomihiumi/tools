@@ -31,6 +31,7 @@
 #
 # Knobs: WORK=/workspace  RUN=run9  DET=<best/> (default: the newest)  INIT=<identity.pt> (fine-tune it; default: from scratch)
 #        SOURCES="mmcows cobra sideview multicam cows2021 opencows aerialcattle cowdataset"  EPOCHS=30  MCT=1
+#        LOSS=both (sub-center ArcFace + SupCon; arcface: ArcFace alone; default supcon) -> reid/id_model_all_<LOSS>
 #        LABEL_EVERY=60 (s between 7/25's human-labelled frames; 15: every label MmCows has - but two runs at 15
 #        knew cows 11-16 by look 32-35%, the run at 60 51%: MmCows' ten cows then outweigh the other sets)
 #        UWB_DAYS="" (neck-tag days, e.g. "0722 0728 0801": off - ~4% of their labels are another cow, mostly a
@@ -72,7 +73,7 @@ if [ -z "${HERD_REID_IN_TMUX:-}" ]; then
     fi
     mkdir -p "$R"
     knobs=""
-    for v in WORK RUN DET SOURCES EPOCHS MCT MINUTES MODELS INIT UWB_DAYS UWB_EVERY LABEL_EVERY WAIT_MIN TRAIN REQUIRE BARN; do
+    for v in WORK RUN DET SOURCES EPOCHS MCT MINUTES MODELS INIT UWB_DAYS UWB_EVERY LABEL_EVERY WAIT_MIN TRAIN REQUIRE BARN LOSS; do
         [ -n "${!v+x}" ] && knobs+="$v=$(printf '%q' "${!v}") "            # only those set: unset stays unset
     done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
@@ -121,6 +122,11 @@ else
     echo "from $H/$RUN/model.pt's transformer, on all of: $SOURCES"
     OUT="$R/id_model_all"
     initarg=()
+fi
+# LOSS=both / arcface: sub-center ArcFace (reid.py --loss) - its model beside the SupCon one, to compare
+if [ -n "${LOSS:-}" ] && [ "${LOSS}" != "supcon" ]; then
+    OUT="${OUT}_${LOSS}"
+    echo "loss: $LOSS -> $OUT"
 fi
 if [ -z "${DET:-}" ]; then
     DET="$(find "$H" -maxdepth 3 -name det_train_meta.json -path '*/best/*' -printf '%T@ %h\n' 2>/dev/null \
@@ -297,7 +303,7 @@ if [ "${TRAIN:-1}" = "0" ] && [ -f "$OUT/identity.pt" ]; then
 else
     step "Train the identity model ${initarg[*]:-(fresh)}"
     "$PY" "$HERE/reid.py" train --data "$R" --sources $SOURCES --model "$H/$RUN/model.pt" --epochs "${EPOCHS:-30}" \
-        --out "$OUT" "${initarg[@]}"
+        --out "$OUT" --loss "${LOSS:-supcon}" "${initarg[@]}"
 fi
 
 if [ "${MCT:-1}" = "1" ]; then
