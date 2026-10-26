@@ -79,7 +79,8 @@ missing=""
 
 step "Models: the archives in $M, unpacked as the Docker build does"
 mkdir -p "$M"
-for a in "$M"/*.tgz "$M"/*.tar.gz; do
+# and the herd's and the rumination model's archives where the other pod scripts take them (WORK itself)
+for a in "$M"/*.tgz "$M"/*.tar.gz "$WORK"/herd_models_*.tgz "$WORK"/herd_rumination_*.tgz; do
     [ -f "$a" ] || continue
     mark="$M/.unpacked_$(basename "$a")"
     [ -f "$mark" ] && continue
@@ -111,17 +112,29 @@ for f in $IDENTITIES; do
     echo "identity model $(basename "$(dirname "$f")"): $(python3 -c "import json,sys; e=json.load(open(sys.argv[1])); print(e.get('loss', {}))" "$(dirname "$f")/eval.json" 2>/dev/null || echo '(no eval.json)')"
 done
 
-# every /models/... and /data/... file barn.toml names (a model, the detector) must be here
-python3 - "$CONFIG" <<'PYEOF'
+# every /models/... file barn.toml names (a model, the detector) must be here: one not in an archive but
+# where this pod keeps it (WORK/herd/run9/model.pt for /models/herd/run9/model.pt) is linked in
+python3 - "$CONFIG" "$WORK" "$M" <<'PYEOF'
 import os, re, sys
+work, m = sys.argv[2], sys.argv[3]
 gone = []
 for n, line in enumerate(open(sys.argv[1], encoding="utf-8"), 1):
     line = line.split("#", 1)[0]
     for p in re.findall(r'"(/models/[^"]+)"', line):
+        rel = p[len("/models/"):].strip("/")
+        if not os.path.exists(p) and os.path.exists(os.path.join(work, rel)):
+            parts = rel.split("/")
+            for i in range(1, len(parts) + 1):        # the first folder on the way /models lacks
+                sub = "/".join(parts[:i])
+                if not os.path.lexists(os.path.join(m, sub)):
+                    os.symlink(os.path.join(work, sub), os.path.join(m, sub))
+                    print(f"/models/{sub} -> {os.path.join(work, sub)} (this pod's)")
+                    break
         if not os.path.exists(p):
             gone.append(f"  line {n}: {p}")
 if gone:
-    sys.exit("!! barn.toml names models not in /models - upload the archive that has each (docker/models/):\n"
+    sys.exit("!! barn.toml names models neither in /models nor on this pod - upload the archive that has each "
+             f"(docker/models/) to {m}:\n"
              + "\n".join(gone))
 PYEOF
 
