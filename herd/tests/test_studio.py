@@ -164,3 +164,63 @@ def test_server_serves_the_page_and_saves():
         assert len(s["state"]["spots"]) == len(spots) - 1 and s["state"]["spots"][0]["at"]["cam3"] == [0.5, 0.5]
         saved = json.load(open(os.path.join(d, "calib", "points.json")))
         assert len(saved["pairs"]["cam1:cam2"]) == len(spots) - 1             # what autocalib --points reads
+
+
+def _floor_scene(d):
+    """The two cameras of _scene, the floor 800 x 600 with its 4 corners (cam2 sees 3 of them) and spots."""
+    _scene(d)
+    Ha = np.array([[1.2, 0.3, 100], [0.0, 0.9, 250], [0.0, 0.0006, 1.0]])
+    Hb = np.array([[-1.1, 0.2, 1100], [0.1, -0.8, 650], [0.0, -0.0004, 1.0]])
+    seen = lambda H, X, Y: (lambda q: (q[0] / q[2] / 1280, q[1] / q[2] / 720))(H @ [X, Y, 1.0])
+    spots = []
+    for k, (X, Y) in enumerate(((0, 0), (800, 0), (800, 600), (0, 600)), 1):
+        at = {}
+        for cam, H in (("cam1", Ha), ("cam2", Hb)):
+            u, v = seen(H, X, Y)
+            if 0 <= u <= 1 and 0 <= v <= 1:
+                at[cam] = [u, v]
+        spots.append({"id": k, "corner": k, "xy": [X, Y], "at": at})
+    for k, (X, Y) in enumerate(((300, 200), (550, 380), (420, 520), (150, 300)), 5):
+        spots.append({"id": k, "at": {c: list(seen(H, X, Y)) for c, H in (("cam1", Ha), ("cam2", Hb))}})
+    return spots, Ha, Hb
+
+
+def _off(calib, ar, H, pts):
+    """How far (floor units) the plane puts true floor points, seen through the camera's H."""
+    import autocalib
+    f = autocalib.camera_floor(calib, ar)
+    out = []
+    for X, Y in pts:
+        q = H @ [X, Y, 1.0]
+        Xf, Yf, ok = f[0](np.array([q[0] / q[2] / 1280]), np.array([q[1] / q[2] / 720]))
+        out.append(float(np.hypot(Xf[0] - X, Yf[0] - Y)) if ok[0] else np.inf)
+    return max(out)
+
+
+def test_floor_corners_measured_put_the_plan_on_the_floor():
+    with tempfile.TemporaryDirectory() as d:
+        spots, Ha, Hb = _floor_scene(d)
+        assert len(spots[1]["at"]) == 1 and len(spots[0]["at"]) == 2      # F2 only on cam1
+        st = _studio(d)
+        probe = [(100, 100), (700, 500), (400, 300)]
+        # one camera alone: its 4 measured corners
+        r = st.fit({"spots": [s for s in spots if s.get("corner")], "floor": {}, "changed": ["cam1"]})
+        assert set(r["floor"]) == {"cam1"} and r["planes"]["cam1"]["corners"] == 4
+        assert _off(r["floor"]["cam1"], 1280 / 720, Ha, probe) < 2
+        # both: fitted together by 3 corners + 4 spots, the plan put on the 4 measured corners
+        r = st.fit({"spots": spots, "floor": {}})
+        assert r["pairs"]["cam1:cam2"]["ok"] and set(r["floor"]) == {"cam1", "cam2"}
+        assert any("perspective" in n for n in r["notes"])
+        assert _off(r["floor"]["cam1"], 1280 / 720, Ha, probe) < 3 and _off(r["floor"]["cam2"], 1280 / 720, Hb, probe) < 3
+        assert all(max(e.values()) < 3 for e in r["errors"].values())
+        # 2 measured corners: turned, shifted and scaled only - and said so
+        two = [dict(s) for s in spots]
+        for s in two[2:4]:
+            s.pop("xy")
+        r = st.fit({"spots": two, "floor": {}})
+        assert any("only turn, shift and scale" in n for n in r["notes"])
+        # the corners kept through a save (with the pairs autocalib reads)
+        st.save({"cams": {}, "floor": {}, "spots": spots + [{"id": 99, "corner": 5, "at": {}}]})
+        back = st.state()["spots"]
+        assert [s.get("corner") for s in back][:4] == [1, 2, 3, 4] and back[0]["xy"] == [0.0, 0.0]
+        assert any(s["id"] == 99 and s["corner"] == 5 and not s["at"] for s in back)

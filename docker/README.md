@@ -122,6 +122,15 @@ cameras' pictures carried onto it, their masks and the spots. Tools (keys in bra
 
 - **Mask / Exclude / Tracking** (`M` `E` `T`): click round an area, a click on the first corner or Enter
   closes it; drag a corner, double-click an edge for a corner more, right-click a corner to remove it;
+- **Floor** (`O`): the floor itself, the main way to calibrate. Click its corners round its edge on one
+  camera (F1, F2, ...), then the same corners on the others: the next corner that camera has not got is
+  picked for you (ringed where the planes put it, once there are planes); "Not seen here" (`N`) skips it,
+  a double-click on the outline's edge puts a corner between two. Every camera shows the floor's outline
+  (dashed where only the planes put it) and its grid only on the floor. Corners are shared like spots: 5
+  corners or spots in common fit two cameras together. Measured sizes put the plan on the real floor: for
+  4 corners "a rectangle" width x length (cm), or X, Y of any corner (pick one as 0, 0) - 3 measured
+  corners or more make the plan square and in cm, 2 only turn, shift and scale it, and a camera that sees
+  4 measured corners is calibrated on its own;
 - **Spots** (`S`): one spot of the floor on every camera that sees it. Click it on one camera, then the
   same place on the others - once the planes are known, where it should be is ringed (dashed): click
   there. Each spot shows how far (px) it is from where the cameras together put it: green agrees, amber a

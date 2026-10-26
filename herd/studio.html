@@ -7,6 +7,7 @@
 @media (prefers-color-scheme: dark){:root:not([data-theme="light"]){--bg:#121311;--panel:#1b1c1a;--panel2:#232421;--fg:#ecebe6;--mute:#9a9a92;
   --line:#2f312c;--accent:#7fc29c;--accent-fg:#10140f;--warn:#f59e0b;--bad:#f87171;--good:#4ade80;--sel:#60a5fa}}
 *{box-sizing:border-box}html,body{height:100%}
+body{display:flex;flex-direction:column}
 body{margin:0;background:var(--bg);color:var(--fg);font:13px/1.4 system-ui,-apple-system,"Segoe UI",sans-serif}
 button,select,input{font:inherit;color:inherit}
 button{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:4px 9px;cursor:pointer}
@@ -23,7 +24,7 @@ header h1{font-size:15px;margin:0 6px 0 0;white-space:nowrap}
 .group{display:flex;gap:4px;align-items:center;flex-wrap:wrap}
 .sep{width:1px;align-self:stretch;background:var(--line)}
 .spacer{flex:1}
-.app{display:grid;grid-template-columns:210px minmax(0,1fr) 290px;height:calc(100% - 50px);min-height:0}
+.app{display:grid;grid-template-columns:210px minmax(0,1fr) 290px;flex:1;min-height:0}
 aside{background:var(--panel);overflow:auto;padding:10px;min-height:0}
 aside.left{border-right:1px solid var(--line)}aside.right{border-left:1px solid var(--line)}
 aside h3{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--mute);margin:12px 0 6px}
@@ -77,6 +78,7 @@ canvas{display:block;touch-action:none}
     <button data-tool="mask" title="the floor this camera counts">Mask<kbd>M</kbd></button>
     <button data-tool="exclude" title="greyed before the detector">Exclude<kbd>E</kbd></button>
     <button data-tool="tracking_mask" title="where the camera follows cows beyond its mask">Tracking<kbd>T</kbd></button>
+    <button data-tool="floor" title="the floor itself: its corners round the edge, the same corners on every camera that sees them">Floor<kbd>O</kbd></button>
     <button data-tool="spots" title="the same spot of the floor on every camera that sees it">Spots<kbd>S</kbd></button>
     <button data-tool="plane" title="the floor plane: tilt, turn, roll and place it">Plane<kbd>F</kbd></button>
   </div>
@@ -104,7 +106,7 @@ canvas{display:block;touch-action:none}
     <div class="legend">
       <span><i style="background:#3ee07a"></i>mask</span><span><i style="background:#4aa3ff"></i>tracking</span>
       <span><i style="background:#ff4040"></i>exclude</span><span><i style="background:#ffd400"></i>other camera's mask</span>
-      <span><i style="background:#22d3ee"></i>floor grid</span>
+      <span><i style="background:#22d3ee"></i>floor grid</span><span><i style="background:#67e8f9;height:4px"></i>floor outline</span>
     </div>
     <div class="legend">
       <span><b class="good">&#9679;</b>spot agrees</span><span><b class="warn">&#9679;</b>off a little</span><span><b class="bad">&#9679;</b>off</span>
@@ -199,7 +201,9 @@ function fromFloor(m, X, Y) {
 }
 function niceStep(r) { const e = Math.pow(10, Math.floor(Math.log10(r))); for (const m of [1, 2, 2.5, 5, 10]) if (m * e >= r) return m * e; return 10 * e; }
 const pct = (a, q) => a[Math.min(a.length - 1, Math.max(0, Math.floor(q * (a.length - 1))))];
-function floorBox(c, m) {                   // what of the floor a camera sees (its mask / tracking zone when drawn)
+function floorBox(c, m) {                   // what of the floor a camera sees (the floor's outline; else its mask / tracking zone)
+  const fl = floorPoly();
+  if (fl) return [Math.min(...fl.map(p => p[0])), Math.min(...fl.map(p => p[1])), Math.max(...fl.map(p => p[0])), Math.max(...fl.map(p => p[1]))];
   const zone = [...c.mask, ...c.tracking_mask].filter(p => p.length >= 3), xs = [], ys = [];
   for (let i = 0; i < 24; i++) for (let j = 0; j < 24; j++) {
     const u = 0.02 + 0.96 * i / 23, v = 0.02 + 0.96 * j / 23;
@@ -276,7 +280,7 @@ let panes = [0, 1, 2, 3].map(() => ({cam: null, over: "", alpha: 0.5, zoom: 1, o
 let focus = 0, sel = null, cur = null, drag = null, plan = null, planAlpha = 0.75, planHidden = new Set(), planDrag = null;
 const camColor = id => CAMCOL[order.indexOf(id) % CAMCOL.length];
 const spotById = id => spots.find(s => s.id === id);
-const unitsCm = id => S.boxes_cached.includes(id);
+const unitsCm = id => S.boxes_cached.includes(id) || spots.some(s => s.xy);       // measured corners: in cm
 
 async function api(path, body) {
   const r = await fetch(path, body === undefined ? {} : {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(body)});
@@ -366,7 +370,7 @@ function build() {
   refreshOverlays(); camList(); inspector();
 }
 function setFocusCam(id) { panes[focus].cam = id; camList(); inspector(); }
-function setFocus(i) { if (focus === i) return; focus = i; document.querySelectorAll(".pane").forEach((el, k) => el.classList.toggle("focus", k === i)); camList(); inspector(); }
+function setFocus(i) { if (focus === i) return; focus = i; if (tool === "floor") nextCorner(panes[i].cam, false); document.querySelectorAll(".pane").forEach((el, k) => el.classList.toggle("focus", k === i)); camList(); inspector(); }
 function size(i) {
   const p = panes[i], c = cams[p.cam], dpr = window.devicePixelRatio || 1;
   const W = Math.max(50, Math.round((p.view.clientWidth || 600) * p.zoom)), H = Math.round(W * c.h / c.w);
@@ -382,9 +386,26 @@ function zoom(i, f, cx, cy) {
 }
 function drawAll() { if (layout === "plan") return drawPlan(); for (let i = 0; i < +layout; i++) if (panes[i].cv) draw(i); }
 
+// ================================================================== the floor's outline
+// Its corners are spots with a place along the edge (corner 1, 2, ...) and maybe a measured floor point (xy).
+const isCorner = s => s.corner !== undefined && s.corner !== null;
+const corners = () => spots.filter(isCorner).sort((a, b) => a.corner - b.corner);
+const spotName = s => isCorner(s) ? "F" + s.corner : String(s.id);
+function floorPoint(s) { if (s.xy) return s.xy; const f = spotFloor(s); return f ? [f.X, f.Y] : null; }
+function floorPoly() { const cs = corners(); if (cs.length < 3) return null; const pts = cs.map(floorPoint); return pts.every(Boolean) ? pts : null; }
+function nextCorner(id, skip) {             // the floor tool: the next corner this camera has not got yet, selected
+  const cs = corners(); if (!cs.length || !id) return;
+  const cur0 = sel && sel.kind === "spot" ? spotById(sel.id) : null;
+  if (!skip && cur0 && isCorner(cur0) && !cur0.at[id]) return;
+  const start = cur0 && isCorner(cur0) ? cs.indexOf(cur0) : -1;
+  for (let k = 1; k <= cs.length; k++) { const s = cs[(start + k + cs.length) % cs.length]; if (!s.at[id] && (!skip || s !== cur0)) { sel = {kind: "spot", id: s.id}; drawAll(); inspector(); return; } }
+  if (skip) toast(`every corner is on ${id} already`);
+}
+
 // ================================================================== drawing a camera
 function predict(s, id) {                   // where a spot should be on a camera, from the others' planes
   const m = model(cams[id]); if (!m) return null;
+  if (s.xy) { const p = fromFloor(m, ...s.xy); return p && p[0] > -0.2 && p[0] < 1.2 && p[1] > -0.2 && p[1] < 1.2 ? p : null; }
   const pts = [];
   for (const c in s.at) { if (c === id) continue; const mc = model(cams[c]); if (!mc) continue; const q = toFloor(mc, ...s.at[c]); if (q) pts.push(q); }
   if (!pts.length) return null;
@@ -394,13 +415,14 @@ function predict(s, id) {                   // where a spot should be on a camer
 function errColor(e) { return e === undefined ? "#ffffff" : e < 12 ? "#22c55e" : e < 30 ? "#f59e0b" : "#ef4444"; }
 function gridLines(c, m) {
   const b = floorBox(c, m); if (!b) return null;
-  const step = niceStep(Math.max(b[2] - b[0], b[3] - b[1]) / 9), out = [];
+  const fl = floorPoly(), step = niceStep(Math.max(b[2] - b[0], b[3] - b[1]) / 9), out = [];
   const span = (a0, a1) => { const r = []; for (let a = Math.ceil(a0 / step) * step; a <= a1 + 1e-9; a += step) r.push(a); return r; };
   for (const [fixed, a0, a1, r0, r1] of [["x", b[0], b[2], b[1], b[3]], ["y", b[1], b[3], b[0], b[2]]])
     for (const a of span(a0, a1)) {
       const seg = []; let line = [];
       for (let t = 0; t <= 60; t++) {
-        const o = r0 + (r1 - r0) * t / 60, p = fixed === "x" ? fromFloor(m, a, o) : fromFloor(m, o, a);
+        const o = r0 + (r1 - r0) * t / 60, fx = fixed === "x" ? a : o, fy = fixed === "x" ? o : a;
+        const p = fl && !inPoly(fx, fy, fl) ? null : fromFloor(m, fx, fy);
         if (p && p[0] > -0.5 && p[0] < 1.5 && p[1] > -0.5 && p[1] < 1.5) line.push(p); else { if (line.length > 1) seg.push(line); line = []; }
       }
       if (line.length > 1) seg.push(line);
@@ -442,6 +464,29 @@ function draw(i) {
       });
     }
   }
+  // the floor's outline: along the floor from corner to corner (bent by the lens); dashed where it is only
+  // where the planes put it (a corner not clicked on this camera)
+  const cs = corners();
+  if (cs.length >= 2) {
+    const fps = cs.map(floorPoint), n2 = cs.length, closed = n2 >= 3;
+    const edge = (k, fill) => {               // corner k -> k+1 as picture points
+      const a = cs[k], b = cs[(k + 1) % n2], pa = fps[k], pb = fps[(k + 1) % n2], out = [];
+      if (m && pa && pb) { for (let t = 0; t <= 24; t++) { const q = fromFloor(m, pa[0] + (pb[0] - pa[0]) * t / 24, pa[1] + (pb[1] - pa[1]) * t / 24); if (q || fill) out.push(q); } }
+      else if (a.at[c.id] && b.at[c.id]) out.push(a.at[c.id], b.at[c.id]);
+      return {pts: out, placed: !!(a.at[c.id] && b.at[c.id])};
+    };
+    if (m && closed && fps.every(Boolean)) {
+      ctx.beginPath(); let started = false;
+      for (let k = 0; k < n2; k++) edge(k, true).pts.forEach(q => { if (!q) return; if (started) ctx.lineTo(X(q[0]), Y(q[1])); else { ctx.moveTo(X(q[0]), Y(q[1])); started = true; } });
+      ctx.closePath(); ctx.fillStyle = "rgba(103,232,249,0.10)"; ctx.fill();
+    }
+    for (let k = 0; k < (closed ? n2 : n2 - 1); k++) {
+      const e = edge(k, true); if (e.pts.length < 2) continue;
+      ctx.strokeStyle = "#67e8f9"; ctx.lineWidth = 2.5; ctx.setLineDash(e.placed ? [] : [7, 5]); ctx.beginPath(); let on = false;
+      e.pts.forEach(q => { if (!q) { on = false; return; } if (on) ctx.lineTo(X(q[0]), Y(q[1])); else { ctx.moveTo(X(q[0]), Y(q[1])); on = true; } });
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+  }
   // zones
   LAYERS.forEach(l => c[l].forEach((q, k) => {
     const isSel = sel && sel.kind === "poly" && sel.cam === c.id && sel.layer === l && sel.i === k;
@@ -474,9 +519,9 @@ function draw(i) {
     const e = errors[s.id] ? errors[s.id][c.id] : undefined, col = ghost ? "#ffffff" : errColor(e), x = X(at[0]), y = Y(at[1]);
     if (isSel) { ctx.beginPath(); ctx.arc(x, y, 14, 0, 7); ctx.fillStyle = "rgba(96,165,250,0.25)"; ctx.fill(); }
     ctx.setLineDash(ghost ? [3, 3] : []); ctx.strokeStyle = col; ctx.lineWidth = isSel ? 3 : 2.2;
-    ctx.beginPath(); ctx.arc(x, y, 7, 0, 7); ctx.stroke(); ctx.setLineDash([]);
+    ctx.beginPath(); if (isCorner(s)) ctx.rect(x - 6.5, y - 6.5, 13, 13); else ctx.arc(x, y, 7, 0, 7); ctx.stroke(); ctx.setLineDash([]);
     if (!ghost) { ctx.beginPath(); ctx.arc(x, y, 1.5, 0, 7); ctx.fillStyle = col; ctx.fill(); }
-    const t = ghost ? s.id + "?" : String(s.id) + (e !== undefined && e >= 12 ? ` (${Math.round(e)} px)` : "");
+    const t = ghost ? spotName(s) + "?" : spotName(s) + (e !== undefined && e >= 12 ? ` (${Math.round(e)} px)` : "");
     ctx.font = "bold 13px system-ui"; ctx.lineWidth = 3; ctx.strokeStyle = "#000"; ctx.strokeText(t, x + 9, y - 8); ctx.fillStyle = col; ctx.fillText(t, x + 9, y - 8);
   });
   if (cur && cur.pane === i) {
@@ -529,13 +574,23 @@ function hook(i) {
       if (!ed) { toast(`${c.id} has no plane yet: "Start a plane" on the right, or spots`); return; }
       checkpoint(); drag = {kind: "orbit", q0: q, p0: {...ed.p}, moved: false}; cv.setPointerCapture(e.pointerId); return;
     }
-    if (tool === "spots" || tool === "select") {
+    if (tool === "spots" || tool === "select" || tool === "floor") {
       const h = hitSpot(q);
       if (h) {
         sel = {kind: "spot", id: h.s.id}; checkpoint();
         if (h.ghost) h.s.at[c.id] = [+h.ghost[0].toFixed(5), +h.ghost[1].toFixed(5)];
-        drag = {kind: "spot", s: h.s, moved: !!h.ghost}; cv.setPointerCapture(e.pointerId); afterAny(false); return;
+        drag = {kind: "spot", s: h.s, moved: !!h.ghost, next: h.ghost && tool === "floor"}; cv.setPointerCapture(e.pointerId); afterAny(false); return;
       }
+    }
+    if (tool === "floor") {                  // the selected corner put here, or a new corner after the last
+      checkpoint();
+      const s0 = sel && sel.kind === "spot" ? spotById(sel.id) : null;
+      if (s0 && isCorner(s0) && !s0.at[c.id]) { s0.at[c.id] = q.map(v => +v.toFixed(5)); nextCorner(c.id, false); }
+      else {
+        const id = spots.reduce((a, x) => Math.max(a, x.id), 0) + 1, k = spots.filter(isCorner).reduce((a, x) => Math.max(a, x.corner), 0) + 1;
+        spots.push({id, corner: k, at: {[c.id]: q.map(v => +v.toFixed(5))}}); sel = {kind: "spot", id};
+      }
+      spotsEdited([c.id]); return;
     }
     if (tool === "spots") {
       checkpoint();
@@ -566,7 +621,7 @@ function hook(i) {
     const q = pt(e), c = cams[p.cam];
     if (cur && cur.pane === i && !drag) { cur.hover = q; draw(i); }
     if (!drag) {
-      const over = ((tool === "spots" || tool === "select") && hitSpot(q)) || (tool !== "plane" && tool !== "spots" && hitVertex(q, tool in COL ? [tool] : LAYERS));
+      const over = ((tool === "spots" || tool === "select" || tool === "floor") && hitSpot(q)) || (tool !== "plane" && tool !== "spots" && hitVertex(q, tool in COL ? [tool] : LAYERS));
       cv.style.cursor = tool === "plane" ? (model(c) ? "grab" : "not-allowed") : over ? "move" : tool === "select" ? "default" : "crosshair"; return;
     }
     const r = q.map(v => +v.toFixed(5));
@@ -581,12 +636,26 @@ function hook(i) {
   cv.addEventListener("pointerup", () => {
     if (!drag) return;
     const d = drag, c = cams[p.cam]; drag = null;
-    if (d.kind === "spot") { if (d.moved) spotsEdited([c.id]); else { undoStack.pop(); edits--; afterAny(false); } }
+    if (d.kind === "spot") { if (d.moved) { if (d.next) nextCorner(c.id, false); spotsEdited([c.id]); } else { undoStack.pop(); edits--; afterAny(false); } }
     else if (d.kind === "vertex") zonesEdited(c.id);
     else if (d.kind === "orbit") { if (d.moved) planEdited(c.id); else { undoStack.pop(); edits--; status(); } }
   });
-  cv.addEventListener("dblclick", e => {        // a corner more on the selected zone's edge
+  cv.addEventListener("dblclick", e => {        // a corner more on the selected zone's edge, or on the floor's outline
     const q = pt(e), c = cams[p.cam];
+    if (tool === "floor") {
+      const cs = corners(), m = model(c); if (cs.length < 2) return;
+      const img = s => s.at[c.id] || (m && floorPoint(s) ? fromFloor(m, ...floorPoint(s)) : null);
+      let best = -1, bd = 12 / p.W;
+      cs.forEach((a, k) => { if (k === cs.length - 1 && cs.length < 3) return; const pa = img(a), pb = img(cs[(k + 1) % cs.length]);
+        if (pa && pb) { const d = distSeg(q, pa, pb); if (d < bd) { bd = d; best = k; } } });
+      if (best < 0) return;
+      // the click before made a corner at the end: undo it, this one goes between best and best+1
+      undo(); checkpoint();
+      const after = cs[best].corner, id = spots.reduce((a, x) => Math.max(a, x.id), 0) + 1;
+      spots.forEach(x => { if (isCorner(x) && x.corner > after) x.corner++; });
+      spots.push({id, corner: after + 1, at: {[c.id]: q.map(v => +v.toFixed(5))}}); sel = {kind: "spot", id};
+      spotsEdited([c.id]); toast(`corner F${after + 1} between F${after} and the next`); return;
+    }
     if (!(sel && sel.kind === "poly" && sel.cam === c.id)) return;
     const poly = c[sel.layer][sel.i]; let best = -1, bd = 12 / p.W;
     poly.forEach((a, j) => { const d = distSeg(q, a, poly[(j + 1) % poly.length]); if (d < bd) { bd = d; best = j; } });
@@ -606,8 +675,8 @@ function recomputeErrors() {
   spots.forEach(s => {
     const pts = {};
     for (const c in s.at) { if (!cams[c]) continue; const m = model(cams[c]); if (!m) continue; const q = toFloor(m, ...s.at[c]); if (q) pts[c] = q; }
-    const ids = Object.keys(pts); if (ids.length < 2) return;
-    const X = ids.reduce((a, c) => a + pts[c][0], 0) / ids.length, Y = ids.reduce((a, c) => a + pts[c][1], 0) / ids.length, e = {};
+    const ids = Object.keys(pts); if (ids.length < (s.xy ? 1 : 2)) return;
+    const [X, Y] = s.xy || [ids.reduce((a, c) => a + pts[c][0], 0) / ids.length, ids.reduce((a, c) => a + pts[c][1], 0) / ids.length], e = {};
     ids.forEach(c => { const q = fromFloor(model(cams[c]), X, Y); if (q) { const w = cams[c].px_w || cams[c].w; e[c] = Math.hypot((q[0] - s.at[c][0]) * w, (q[1] - s.at[c][1]) * w * cams[c].h / cams[c].w); } });
     errors[s.id] = e;
   });
@@ -707,6 +776,7 @@ function loadPlan() {
 }
 function spotFloor(s) {
   const pts = []; for (const c in s.at) { const m = cams[c] && model(cams[c]); if (!m) continue; const q = toFloor(m, ...s.at[c]); if (q) pts.push({c, q}); }
+  if (s.xy) return {X: s.xy[0], Y: s.xy[1], pts};
   if (!pts.length) return null;
   return {X: pts.reduce((a, p) => a + p.q[0], 0) / pts.length, Y: pts.reduce((a, p) => a + p.q[1], 0) / pts.length, pts};
 }
@@ -755,6 +825,15 @@ function drawPlan() {
     ctx.fillStyle = "#fff"; ctx.fillText(id, mx + 12, my + 16);
     plan.markers.push({id, at: [mx, my], tip});
   });
+  // the floor's outline
+  const cs = corners(), fps = cs.map(floorPoint);
+  if (cs.length >= 2) {
+    ctx.beginPath(); let started = false;
+    fps.forEach(q => { if (!q) return; const [px, py] = P(...q); if (started) ctx.lineTo(px, py); else { ctx.moveTo(px, py); started = true; } });
+    if (cs.length >= 3) { ctx.closePath(); ctx.fillStyle = "rgba(103,232,249,0.12)"; ctx.fill(); }
+    ctx.strokeStyle = "#67e8f9"; ctx.lineWidth = 2.5; ctx.stroke();
+    cs.forEach((sp, k) => { if (!fps[k] || !sp.xy) return; const [px, py] = P(...fps[k]); ctx.fillStyle = "#67e8f9"; ctx.fillRect(px - 5, py - 5, 10, 10); });
+  }
   // the spots: each camera's floor point, the mean ringed
   spots.forEach(s => {
     const f = spotFloor(s); if (!f) return;
@@ -762,7 +841,7 @@ function drawPlan() {
     f.pts.forEach(({c, q}) => { const [px, py] = P(q[0], q[1]); ctx.strokeStyle = camColor(c); ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(mx, my); ctx.lineTo(px, py); ctx.stroke();
       ctx.fillStyle = camColor(c); ctx.beginPath(); ctx.arc(px, py, 3, 0, 7); ctx.fill(); });
     ctx.strokeStyle = isSel ? "#60a5fa" : "#fff"; ctx.lineWidth = isSel ? 3 : 1.5; ctx.beginPath(); ctx.arc(mx, my, isSel ? 9 : 6, 0, 7); ctx.stroke();
-    ctx.font = "bold 12px system-ui"; ctx.lineWidth = 3; ctx.strokeStyle = "#000"; ctx.strokeText(s.id, mx + 8, my - 7); ctx.fillStyle = "#fff"; ctx.fillText(s.id, mx + 8, my - 7);
+    ctx.font = "bold 12px system-ui"; ctx.lineWidth = 3; ctx.strokeStyle = "#000"; ctx.strokeText(spotName(s), mx + 8, my - 7); ctx.fillStyle = "#fff"; ctx.fillText(spotName(s), mx + 8, my - 7);
   });
 }
 
@@ -791,8 +870,12 @@ function inspector() {
       const a = s.at[id], err = e[id];
       return `<div class="row"><b style="color:${camColor(id)};min-width:44px">${id}</b>${a ? `<span>${err === undefined ? "placed" : `<span class="${err < 12 ? "good" : err < 30 ? "warn" : "bad"}">${err.toFixed(0)} px off</span>`}</span>
         <button data-unspot="${id}" title="this spot off ${id}">remove</button>` : `<span class="mute">not on it</span>`}</div>`; }).join("");
-    parts.push(`<div class="card"><h4>Spot ${s.id}</h4>${rows}<div class="row"><button class="danger" id="delspot">Delete spot</button></div>
-      <div class="hint">Tool Spots: click the same spot of the floor on another camera to put it there; where the planes say it should be is ringed (dashed). Drag to move, right-click to take it off a camera.</div></div>`);
+    const unit = "cm";
+    const measured = isCorner(s) ? `<div class="row"><label>measured on the floor</label></div><div class="row"><label>X</label><input type="number" id="cx" value="${s.xy ? s.xy[0] : ""}" step="10" placeholder="${unit}">
+        <label>Y</label><input type="number" id="cy" value="${s.xy ? s.xy[1] : ""}" step="10" placeholder="${unit}">${s.xy ? `<button id="cxy0" title="not measured">clear</button>` : ""}</div>` : "";
+    parts.push(`<div class="card"><h4>${isCorner(s) ? `Floor corner F${s.corner}` : `Spot ${s.id}`}</h4>${rows}${measured}<div class="row"><button class="danger" id="delspot">Delete ${isCorner(s) ? "corner" : "spot"}</button>
+      ${isCorner(s) && tool === "floor" ? `<button id="skipc" title="this corner is not seen on ${esc(panes[focus].cam)}: the next one (N)">Not seen here &rarr; next<kbd>N</kbd></button>` : ""}</div>
+      <div class="hint">${isCorner(s) ? "Click this corner of the floor on another camera to put it there (where the planes say it is, it is ringed). Measured X, Y (any corner as 0, 0) put the plan on the floor's real size." : "Tool Spots: click the same spot of the floor on another camera to put it there; where the planes say it should be is ringed (dashed)."} Drag to move, right-click to take it off a camera.</div></div>`);
   } else if (sel && sel.kind === "poly" && cams[sel.cam] && cams[sel.cam][sel.layer][sel.i]) {
     const poly = cams[sel.cam][sel.layer][sel.i];
     parts.push(`<div class="card"><h4>${sel.cam}: ${NAMES[sel.layer]}</h4><div class="row mute">${poly.length} corners</div>
@@ -804,7 +887,7 @@ function inspector() {
   if (c) {
     const pairs = Object.entries(fitPairs).filter(([k]) => k.split(":").includes(id));
     const pairRows = pairs.map(([k, r]) => `<div><b>${k.replace(":", " &harr; ")}</b><span class="${r.ok ? "good" : "warn"}">${r.ok ? `fitted, ${r.n - (r.left_out || []).length}/${r.n} within ${Math.round(r.median)} px` : `${r.n} in common${r.n < 5 ? " (5 needed)" : " - not fitted"}`}</span></div>`).join("");
-    ed = c.calib ? editOf(c) : null;
+    ed = c.calib && tool === "plane" ? editOf(c) : null;
     let lens = "";
     if (ed) {
       const p = ed.p, deg = v => (v / D2R).toFixed(1);
@@ -830,10 +913,24 @@ function inspector() {
       <div class="row"><label>zones</label><span>${LAYERS.map(l => `${c[l].length} ${NAMES[l]}`).join(", ")}</span></div>
       <div class="pairs">${pairRows || `<div class="hint">No fit yet. 5 spots in common with another camera fit both.</div>`}</div></div>`);
   }
+  { // the floor
+    const cs = corners(), nm = cs.filter(x => x.xy).length, unit = "cm";
+    if (tool === "floor" || cs.length) parts.push(`<div class="card"><h4>Floor</h4>
+      <div class="row">${cs.length ? `${cs.length} corners, ${nm} measured` : `<span class="mute">not drawn yet</span>`}</div>
+      ${cs.length ? `<div class="hint">${cs.map(x => `<b>F${x.corner}</b> ${order.filter(id => x.at[id]).join(", ") || "-"}`).join(" · ")}</div>` : ""}
+      ${cs.length === 4 ? `<div class="row"><label>a rectangle</label><input type="number" id="rw" placeholder="F1-F2" step="10"> &times; <input type="number" id="rl" placeholder="F2-F3" step="10"><span class="mute">${unit}</span><button id="rect">Set</button></div>` : ""}
+      <div class="hint">Tool Floor (O): click the floor's corners round its edge on one camera (F1, F2, ...), then the same corners on the others - the next one missing is picked for you, ringed where the planes say it is; "Not seen here" (N) skips it. Double-click the outline's edge for a corner between two. 5 corners or spots in common fit two cameras together; the floor's measured size (a rectangle, or X, Y of 2 corners or more) puts the plan on it, and 4 measured corners fit a camera alone.</div></div>`);
+  }
   parts.push(`<div class="card"><h4>Saving</h4><div class="hint">Save writes the changed zones, the planes and${linkDist ? ` [mct] link_dist ${linkDist} (now ${S && S.link_dist !== undefined ? S.link_dist : "-"})` : " (after a fit) [mct]"} into <b title="${esc(S ? S.config : "")}">${esc(S ? S.config.split(/[\\/]/).pop() : "barn.toml")}</b> (the old one kept as .bak), the spots into points.json. <kbd>Ctrl+S</kbd></div></div>`);
   parts.push(`<div class="card log"><h4>Messages</h4>${logLines.map(l => `<div class="${l.cls || ""}">${esc(l.t)}</div>`).join("") || `<div class="hint">-</div>`}</div>`);
   el.innerHTML = parts.join("");
   el.querySelectorAll("[data-unspot]").forEach(b => b.onclick = () => { const s = spotById(sel.id); checkpoint(); delete s.at[b.dataset.unspot]; if (!Object.keys(s.at).length) { spots = spots.filter(x => x !== s); sel = null; } spotsEdited([b.dataset.unspot]); });
+  if ($("cx")) { const set = () => { const s = spotById(sel.id), x = $("cx").value, y = $("cy").value; checkpoint();
+      if (x === "" || y === "") delete s.xy; else s.xy = [+x, +y]; spotsEdited(Object.keys(s.at)); }; $("cx").onchange = set; $("cy").onchange = set; }
+  if ($("cxy0")) $("cxy0").onclick = () => { const s = spotById(sel.id); checkpoint(); delete s.xy; spotsEdited(Object.keys(s.at)); };
+  if ($("skipc")) $("skipc").onclick = () => nextCorner(panes[focus].cam, true);
+  if ($("rect")) $("rect").onclick = () => { const W = +$("rw").value, L = +$("rl").value; if (!(W > 0 && L > 0)) { toast("the floor's width and length, please"); return; }
+    checkpoint(); const cs = corners(); [[0, 0], [W, 0], [W, L], [0, L]].forEach((xy, k) => cs[k].xy = xy); spotsEdited(order); toast("F1-F4 measured: the plan on the floor's size"); };
   if ($("delspot")) $("delspot").onclick = () => { const s = spotById(sel.id); checkpoint(); spots = spots.filter(x => x !== s); sel = null; spotsEdited(Object.keys(s.at)); };
   if ($("delpoly")) $("delpoly").onclick = () => { checkpoint(); cams[sel.cam][sel.layer].splice(sel.i, 1); const cid = sel.cam; sel = null; zonesEdited(cid); };
   if (ed) {
@@ -869,7 +966,8 @@ function startPlane(c) {                    // a trapezoid on the lower picture 
 }
 
 // ================================================================== the bars, the keys
-function setTool(t) { tool = t; cur = null; if (t !== "spots" && t !== "select" && sel && sel.kind === "spot") sel = null;
+function setTool(t) { tool = t; cur = null; if (!["spots", "select", "floor"].includes(t) && sel && sel.kind === "spot") sel = null;
+  if (t === "floor" && layout !== "plan") nextCorner(panes[focus].cam, false);
   document.querySelectorAll("[data-tool]").forEach(b => b.classList.toggle("on", b.dataset.tool === tool)); drawAll(); inspector(); }
 document.querySelectorAll("[data-tool]").forEach(b => b.onclick = () => setTool(b.dataset.tool));
 document.querySelectorAll("[data-layout]").forEach(b => b.onclick = () => { layout = b.dataset.layout; cur = null; build(); });
@@ -897,7 +995,8 @@ document.addEventListener("keydown", e => {
   if ((e.ctrlKey || e.metaKey) && k === "y") { e.preventDefault(); redo(); return; }
   if ((e.ctrlKey || e.metaKey) && k === "s") { e.preventDefault(); $("save").click(); return; }
   if (e.ctrlKey || e.metaKey || e.altKey) return;
-  const tools = {v: "select", m: "mask", e: "exclude", t: "tracking_mask", s: "spots", f: "plane"};
+  const tools = {v: "select", m: "mask", e: "exclude", t: "tracking_mask", s: "spots", f: "plane", o: "floor"};
+  if (k === "n" && tool === "floor") { nextCorner(panes[focus].cam, true); return; }
   if (tools[k]) return setTool(tools[k]);
   if (k === "g" || k === "c") { const b = document.querySelector(`[data-toggle="${k === "g" ? "grid" : "cows"}"]`); b.click(); return; }
   if (k === "p") { layout = layout === "plan" ? "2" : "plan"; build(); return; }
