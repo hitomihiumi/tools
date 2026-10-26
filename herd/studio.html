@@ -993,7 +993,8 @@ function inspector() {
         ${edgesRow ? `<div class="row"><label>edges</label>${edgesRow}</div>` : ""}
         ${cs.length === 4 ? `<div class="row"><label>a rectangle</label><input type="number" id="rw" placeholder="${spotName(cs[0])}-${spotName(cs[1])}" step="10"> &times; <input type="number" id="rl" placeholder="${spotName(cs[1])}-${spotName(cs[2])}" step="10"><span class="mute">${unit}</span></div>
           <div class="row"><label>${spotName(cs[0])} at</label><input type="number" id="rx" value="${cs[0].xy ? cs[0].xy[0] : x0}" step="100"><input type="number" id="ry" value="${cs[0].xy ? cs[0].xy[1] : 0}" step="100"><button id="rect">Set</button></div>` : ""}
-        <div class="row"><button id="refine" title="every camera's plane: the measured floor first, then pairs of cameras, then all adjusted together">Fit / Refine all</button></div>
+        <div class="row"><button id="unseen" title="a corner no camera sees (often the near ones, under the cameras): for the rectangle and the edges to it">+ corner no camera sees</button>
+          <button id="refine" title="every camera's plane: the measured floor first, then pairs of cameras, then all adjusted together">Fit / Refine all</button></div>
         <div class="hint">Tool Floor (O): click a floor's corners round its edge on one camera (A1, A2, ...), then the same corners on the others - the next one missing is picked, ringed where the planes say it is; N skips one not seen. Pick an edge (above, or click the outline) and click along it on the pictures where its corners are out of sight. Measured corners or points (a rectangle, or X, Y) put the plan on the real floor: a camera with 8 equations (2 per measured corner or point, 1 per edge point) gets its plane alone, the others follow through shared spots, and Refine adjusts all together - also a camera set roughly by hand (tool Plane) that shares only a thin strip.</div></div>`);
     }
   }
@@ -1013,6 +1014,11 @@ function inspector() {
   if ($("newfloor")) $("newfloor").onclick = () => { curFloor = Math.max(0, ...floorIds()) + 1; sel = null; setTool("floor"); afterAny(false);
     toast(`floor ${floorName(curFloor)}: click its corners round the edge`); };
   el.querySelectorAll("[data-edge]").forEach(b => b.onclick = () => { const [a, bb] = b.dataset.edge.split(":").map(Number); sel = {kind: "edge", a, b: bb}; setTool("floor"); afterAny(false); });
+  if ($("unseen")) $("unseen").onclick = () => {
+    const fl = floorIds(), cf = fl.includes(curFloor) ? curFloor : (fl[0] || curFloor); checkpoint();
+    const id = spots.reduce((a, x) => Math.max(a, x.id), 0) + 1, k = corners(cf).reduce((a, x) => Math.max(a, x.corner), 0) + 1;
+    spots.push({id, floor: cf, corner: k, at: {}}); sel = {kind: "spot", id}; curFloor = cf; afterAny(false);
+    toast(`corner ${spotName(spotById(id))}: on no camera - measured (the rectangle) it still fixes the floor and its edges`); };
   if ($("refine")) $("refine").onclick = () => { toast("fitting every camera..."); fit(order); };
   if ($("endedge")) $("endedge").onclick = () => { sel = null; afterAny(false); };
   if ($("epset")) $("epset").onclick = () => {      // a post on the edge, measured along it: a measured spot
