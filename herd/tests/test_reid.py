@@ -84,9 +84,13 @@ def test_identity_training_knows_a_cow_on_another_day():
         # sub-center ArcFace (+ SupCon): learns as well, the head only while training; the loss kept in the model
         torch.manual_seed(0)
         reid.main(["train", "--data", d, "--sources", "multicam", "--model", mp, "--epochs", "6", "--P", "16",
-                   "--patience", "6", "--loss", "both", "--out", os.path.join(d, "id_model_arc")])
+                   "--patience", "6", "--loss", "both", "--arc-w", "0.3", "--pick", "other_day",
+                   "--out", os.path.join(d, "id_model_arc")])
         ev3 = json.load(open(os.path.join(d, "id_model_arc", "eval.json")))
         assert ev3["after"]["other_day_top1"] > 0.6, ev3
+        assert ev3["loss"]["pick"] == "other_day" and ev3["loss"]["arc_w"] == 0.3
+        hist = [json.loads(l) for l in open(os.path.join(d, "id_model_arc", "history.jsonl"))]
+        assert ev3["after"]["other_day_top1"] == max(h["other_day_top1"] for h in hist)   # kept by --pick
         ck = torch.load(os.path.join(d, "id_model_arc", "identity.pt"), weights_only=False)
         assert ck["loss"]["loss"] == "both" and ck["loss"]["arc_k"] == 3
         assert not any(k.startswith("w") and v.shape[0] == 15 * 3 for k, v in ck["state"].items())   # no centres saved

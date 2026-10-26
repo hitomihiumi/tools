@@ -1103,6 +1103,11 @@ def reid_scores(split, fp, qfp=None, qmax=None, qmean=None):
     return res, rows
 
 
+# the metric train keeps the best epoch by (--pick)
+PICK = {"score": "score", "moment": "moment_cross_cam_top1", "other_camera": "other_camera_top1",
+        "other_day": "other_day_top1"}
+
+
 def evaluate(model, split, moments=None):
     fp, qmax, qmean = embed(model, split)
     m, rows = reid_scores(split, fp, qmax=qmax, qmean=qmean)
@@ -1218,6 +1223,7 @@ def cmd_train(args):
     os.makedirs(args.out, exist_ok=True)
     best, best_state, best_m, since = -1.0, None, None, 0
     hist = open(os.path.join(args.out, "history.jsonl"), "w", encoding="utf-8")
+    pick = PICK[args.pick]
     for epoch in range(args.epochs):
         model.train()
         losses = []
@@ -1253,8 +1259,8 @@ def cmd_train(args):
               f"{m.get('other_day_top1', 0):.1%}, another camera {m.get('other_camera_top1', 0):.1%}, one frame "
               f"{m.get('frame_other_day_top1', 0):.1%}{mm_line(m)}", flush=True)
         since += 1
-        if m["score"] > best:
-            best, best_m, since = m["score"], dict(m, epoch=epoch + 1), 0
+        if m.get(pick, 0.0) > best:
+            best, best_m, since = m.get(pick, 0.0), dict(m, epoch=epoch + 1), 0
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
         if since >= args.patience:
             break
@@ -1264,7 +1270,7 @@ def cmd_train(args):
     ab = fit_abstain(rows, args.max_error, os.path.join(args.out, "abstain.json"))
     th = calibrate(model, va, mo_va)
     write_json(os.path.join(args.out, "thresholds.json"), th)
-    loss = {"loss": args.loss, "temperature": args.temperature,
+    loss = {"loss": args.loss, "temperature": args.temperature, "pick": args.pick,
             **({"arc_s": args.arc_s, "arc_m": args.arc_m, "arc_k": args.arc_k, "arc_w": args.arc_w}
                if args.loss != "supcon" else {})}
     torch.save({"in_dim": base.in_dim, "kw": {k: v for k, v in base.kw.items() if k != "frame_id"},
@@ -1389,6 +1395,9 @@ def main(argv=None):
                    "seconds (a cow from two cameras at once; 0: off)")
     t.add_argument("--moments", type=int, default=8, help="MmCows seconds a step for that loss")
     t.add_argument("--patience", type=int, default=6)
+    t.add_argument("--pick", choices=sorted(PICK), default="score",
+                   help="keep the epoch best by: score (the mean), moment (frame against frame at one second across "
+                        "cameras - what the tracker asks), other_camera, other_day")
     t.add_argument("--max-error", type=float, default=0.01, help="the NaN model's error budget")
     args = p.parse_args(argv)
     if args.cmd == "train" and args.out is None:
