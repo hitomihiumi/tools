@@ -82,16 +82,40 @@ mkdir -p "$M"
 # and the herd's and the rumination model's archives where the other pod scripts take them (WORK itself)
 for a in "$M"/*.tgz "$M"/*.tar.gz "$WORK"/herd_models_*.tgz "$WORK"/herd_rumination_*.tgz; do
     [ -f "$a" ] || continue
+    case "$(basename "$a")" in herd_reid_*) continue ;; esac       # identity models: below, each apart
     mark="$M/.unpacked_$(basename "$a")"
     [ -f "$mark" ] && continue
+    gzip -t "$a" 2>/dev/null || { echo "!! $(basename "$a") is cut short (its upload not finished?): skipped - upload it again"; continue; }
     echo "unpacking $(basename "$a")"
     tar -xzf "$a" -C "$M"
     touch "$mark"
 done
-for d in "$WORK"/reid/id_model_all*/; do                    # identity models trained on this pod
+# the identity models as links in M/reid: this pod's (WORK/reid/id_model_all*) under their own names, each
+# herd_reid_*.tgz unpacked apart (never over this pod's) and beside them - its date added where the name is taken
+rm -rf "$M/reid"
+mkdir -p "$M/reid"
+for d in "$WORK"/reid/id_model_all*/; do
     [ -f "$d/identity.pt" ] || continue
-    n="$(basename "$d")"
-    [ -e "$M/reid/$n" ] || { mkdir -p "$M/reid"; ln -s "${d%/}" "$M/reid/$n"; echo "this pod's $n"; }
+    ln -s "${d%/}" "$M/reid/$(basename "$d")"
+    echo "this pod's $(basename "$d")"
+done
+for a in "$M"/herd_reid_*.tgz; do
+    [ -f "$a" ] || continue
+    case "$(basename "$a")" in herd_reid_feat_*) continue ;; esac  # frame vectors, no model
+    U="$M/.reid/$(basename "$a" .tgz)"
+    if [ ! -d "$U" ]; then
+        gzip -t "$a" 2>/dev/null || { echo "!! $(basename "$a") is cut short (its upload not finished?): skipped - upload it again"; continue; }
+        rm -rf "$U.part" && mkdir -p "$U.part"
+        tar -xzf "$a" -C "$U.part"
+        mv "$U.part" "$U"
+    fi
+    stamp="$(basename "$a" .tgz)"; stamp="${stamp#herd_reid_}"
+    while IFS= read -r f; do
+        n="$(basename "$(dirname "$f")")"
+        [ -e "$M/reid/$n" ] && n="${n}_$stamp"
+        ln -s "$(dirname "$f")" "$M/reid/$n"
+        echo "$(basename "$a")'s $n"
+    done < <(find "$U" -name identity.pt)
 done
 for p in /models /data; do
     t="$M"; [ "$p" = /data ] && t="$D"
