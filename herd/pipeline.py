@@ -926,6 +926,12 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
         if status is not None:
             status["interrupted"] = True
     shared.save()
+    st = dict(getattr(cams[0].glob, "stats", None) or {}) if cams and getattr(cams[0], "glob", None) else {}
+    if cfg["mct"].get("enabled") and cfg["mct"].get("mode") == "link":
+        print(f"[run] [mct] tracks joined across cameras {st.get('linked', 0)}, taken apart again "
+              f"{st.get('unlinked', 0)} (a joined cow counted by both cameras at once for unlink_s: masks that "
+              f"overlap?), joins refused {st.get('link_refused', 0)}; seconds two cows were each other's nearest "
+              f"but another cow within link_margin {st.get('near_but_next_cow_close', 0)}", flush=True)
     return {c.id: dict(c.stats) for c in cams}
 
 

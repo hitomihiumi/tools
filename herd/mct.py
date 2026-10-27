@@ -925,6 +925,7 @@ class TrackletLinker:
                                 col = np.delete(D[:, y], x)
                                 others = np.concatenate([row, col])
                                 if others.size and others.min() < D[x, y] + self.margin:
+                                    self.stats["near_but_next_cow_close"] += 1
                                     continue
                             k = self._key(ids[ca][x], ids[cb][y])
                             self.near[k] += 1
