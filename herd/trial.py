@@ -154,6 +154,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
                                 and frames[k]["cam"] in cams])
     co, cam_co = collections.Counter(), collections.defaultdict(collections.Counter)
     n = collections.Counter()                      # (cam, what) -> boxes
+    seen_as = collections.defaultdict(list)        # your id -> [(cam, ts, its cow)]: one cow on two cameras
     for file, lab in labels.items():
         f = frames.get(file)
         if lab.get("status") != "done" or not f or f["cam"] not in cams:
@@ -185,6 +186,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
             if pred[j][1]:
                 co[(truth[i][1], pred[j][1])] += 1
                 cam_co[cam][(truth[i][1], pred[j][1])] += 1
+                seen_as[truth[i][1]].append((cam, f["ts"], pred[j][1]))
     allc = sorted({c for c, _ in n})
     tot = lambda what: sum(n[(c, what)] for c in allc)
     out = {"all": idf1(co, tot("your_boxes"), tot("its_named_boxes")), "cameras": {}}
@@ -204,10 +206,37 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     out["merged"] = {p: dict(cnt.most_common()) for p, cnt in by_pred.items() if len(big(cnt)) > 1}
     out["split"] = {t: dict(cnt.most_common()) for t, cnt in by_true.items() if len(big(cnt)) > 1}
     out["your_cows"], out["its_cows"] = len(by_true), len(by_pred)
+    out["cross_camera"] = cross_camera(seen_as)
     out["clock_shift_s"] = shift
     if page_dir and out["merged"]:
         out["same_cow_page"] = same_cow_page(page_dir, boxes_dir, labels, frames, out["merged"])
     return out
+
+
+def cross_camera(seen_as, min_boxes=3, at_once_s=1.0):
+    """Your cows scored on two cameras or more: did the system give each the same cow on all of them? By cow (its
+    cow most often on each camera, from min_boxes of that camera's boxes) and by moment (your cow in two
+    cameras' frames within at_once_s: the same cow of its on both)."""
+    cows, same = {}, 0
+    for t, items in sorted(seen_as.items()):
+        per = collections.defaultdict(collections.Counter)
+        for cam, _, p in items:
+            per[cam][p] += 1
+        top = {cam: cnt.most_common(1)[0] + (sum(cnt.values()),) for cam, cnt in per.items()
+               if sum(cnt.values()) >= min_boxes}
+        if len(top) < 2:
+            continue
+        one = len({p for p, _, _ in top.values()}) == 1
+        same += one
+        cows[t] = {"same": one, "cameras": {cam: {"its": p, "boxes": k, "of": m} for cam, (p, k, m) in sorted(top.items())}}
+    pairs = agree = 0
+    for t, items in seen_as.items():
+        for (ca, ta, pa), (cb, tb, pb) in itertools.combinations(items, 2):
+            if ca != cb and abs(ta - tb) <= at_once_s:
+                pairs += 1
+                agree += pa == pb
+    return {"cows_on_two_cameras": len(cows), "same_cow_on_all": same, "cows": cows,
+            "moments": pairs, "moments_same_cow": agree}
 
 
 def same_cow_page(out, boxes_dir, labels, frames, merged, per_cam=2):
@@ -390,11 +419,39 @@ def print_score(sc):
           f"{a['idr']:.1%}: of your boxes, the right cow)")
     for c, r in sorted(sc["cameras"].items()):
         print(f"  {c}: IDF1 {r['idf1']:.1%} (IDP {r['idp']:.1%}, IDR {r['idr']:.1%}) on {r['your_boxes']} boxes")
+    x = sc.get("cross_camera")
+    if x and x["cows_on_two_cameras"]:
+        print(f"  your cows scored on two cameras or more: {x['cows_on_two_cameras']}; the same cow of its on all of "
+              f"them: {x['same_cow_on_all']}" + (f"; at one moment on two cameras: the same cow {x['moments_same_cow']} "
+                                                f"of {x['moments']} times" if x["moments"] else ""))
+        for t, r in x["cows"].items():
+            if not r["same"]:
+                print(f"    your {t}: " + ", ".join(f"{c} {v['its']} ({v['boxes']}/{v['of']})" for c, v in r["cameras"].items()))
+    elif x is not None:
+        print("  none of your cows scored on two cameras (each camera counts its own floor: --overlap lets the "
+              "masks share it)")
     print(f"  its cows: {sc['its_cows']} for your {sc['your_cows']}; one of its cows on several of yours (merged): "
           f"{len(sc['merged'])}; one of yours under several of its (split): {len(sc['split'])}")
     if sc.get("same_cow_page"):
         print(f"  one cow two names? {sc['same_cow_page']} - your names side by side: say which are one cow, save "
               "labels.json, score again with it")
+
+
+def overlap(cfg):
+    """--overlap: each camera's mask its tracking_mask (the masks share floor), and the two rules that make a cow
+    counted by two cameras at once two cows - [identity] counted_apart_s (never one cow in the gallery) and [mct]
+    unlink_s (a cross-camera join undone) - off."""
+    grown = []
+    for cam in cfg["cameras"]:
+        if cam.get("tracking_mask"):
+            cam["mask"] = cam["tracking_mask"]
+            grown.append(cam["id"])
+    cfg["identity"]["counted_apart_s"] = 0
+    cfg["mct"]["unlink_s"] = 0
+    print(f"[trial] --overlap: {', '.join(grown) or 'no camera'} count their whole tracking_mask; a cow counted by "
+          "two cameras at once may be one (identity.counted_apart_s 0, mct.unlink_s 0) - an experiment, its cows "
+          "on shared floor are counted twice", flush=True)
+    return cfg
 
 
 def main(argv=None):
@@ -410,11 +467,15 @@ def main(argv=None):
     p.add_argument("--labels", default=None, help="their labels.json with cow ids: the second pass scored (IDF1)")
     p.add_argument("--score-only", action="store_true", help="score the trial already in --out, play nothing")
     p.add_argument("--cameras", nargs="*", default=None, help="score these cameras only (one id across them)")
+    p.add_argument("--overlap", action="store_true",
+                   help="an experiment: every camera counts its whole tracking_mask (masks share floor) and a cow "
+                        "counted by two cameras at once may be one cow - does one cow get one id on both? "
+                        "Never for a barn: shared floor counts its cows twice")
     args = p.parse_args(argv)
     if args.score_only:
         if not (args.boxes and args.labels):
             p.error("--score-only needs --boxes and --labels")
-        cfg = load_config(args.config)
+        cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
         out = os.path.abspath(args.out.rstrip("\\"))
         sc = score(os.path.join(out, "pass2", "herd.sqlite"), cfg, args.boxes, args.labels, page_dir=out,
                    cameras=args.cameras)
@@ -429,7 +490,7 @@ def main(argv=None):
     import gallery as gallery_mod
     import show_ids
     from store import Store
-    cfg = load_config(args.config)
+    cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
     tz = dt.timezone(dt.timedelta(hours=cfg["farm"]["timezone_offset_hours"]))
     recs, bad = recordings(args.videos, [c["id"] for c in cfg["cameras"]], cfg["farm"]["timezone_offset_hours"])
     if not recs:

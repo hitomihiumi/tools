@@ -379,6 +379,17 @@ The second scores a rehearsal already made. The log and `trial/score.json` give:
 Only the boxes a camera counts (its mask) are scored. Use the labels.json with the ids as the gallery
 page saved them (the same cow one id on every camera).
 
+**Does one cow get one id on two cameras?** The score says it for every cow of yours it scored on two
+cameras: the same cow of its on all of them or not (and at one moment on two cameras, how often the same).
+With masks that share no floor your cows are rarely scored on two cameras. `--overlap` is an experiment
+for that: each camera counts its whole `tracking_mask`, and the two rules that make a cow counted by two
+cameras at once two cows (`[identity] counted_apart_s`, `[mct] unlink_s`) are off. Never for a barn: on
+shared floor its cows are counted twice.
+
+```bash
+docker compose run --rm herd trial --overlap --config /data/barn.toml --videos /data/rec_fixed --out /data/trial_overlap --boxes /data/boxes --labels /data/labels.json
+```
+
 **Several identity models, one rehearsal each, on a pod** (`herd/trial_pod.sh`): which identity model
 is best on your own cows. Upload to the pod's `/workspace`:
 

@@ -750,6 +750,29 @@ def test_trial_scored_against_your_ids():
         assert all(os.path.exists(os.path.join(d, c["src"])) for x in data["cards"][0]["ids"] for c in x["crops"])
 
 
+def test_trial_cross_camera_and_overlap():
+    """Your cow on two cameras: the same cow of its on both or not, by cow and by moment; --overlap grows each
+    mask to its tracking_mask and turns off the two rules that make two cameras' counts two cows."""
+    import copy as _copy
+    import trial
+    from common import DEFAULTS
+    seen = {"4": [("cam1", 100.0, "P1"), ("cam1", 105.0, "P1"), ("cam1", 110.0, "P1"),
+                  ("cam2", 100.2, "P1"), ("cam2", 105.0, "P1"), ("cam2", 110.0, "P1")],
+            "7": [("cam1", 100.0, "P2"), ("cam1", 105.0, "P2"), ("cam1", 110.0, "P2"),
+                  ("cam2", 100.0, "P3"), ("cam2", 105.0, "P3"), ("cam2", 120.0, "P3")],
+            "9": [("cam1", 100.0, "P4")] * 5}
+    x = trial.cross_camera(seen)
+    assert x["cows_on_two_cameras"] == 2 and x["same_cow_on_all"] == 1
+    assert x["cows"]["4"]["same"] and not x["cows"]["7"]["same"] and "9" not in x["cows"]
+    assert x["moments"] == 5 and x["moments_same_cow"] == 3            # 4 at 100/105/110, 7 at 100/105
+    cfg = _copy.deepcopy(DEFAULTS)
+    cfg["cameras"] = [{"id": "cam1", "mask": [[0, 0], [0.5, 0], [0.5, 1]], "tracking_mask": [[0, 0], [1, 0], [1, 1]]},
+                      {"id": "cam2", "mask": [[0.5, 0], [1, 0], [1, 1]]}]
+    trial.overlap(cfg)
+    assert cfg["cameras"][0]["mask"] == [[0, 0], [1, 0], [1, 1]] and cfg["cameras"][1]["mask"] == [[0.5, 0], [1, 0], [1, 1]]
+    assert cfg["identity"]["counted_apart_s"] == 0 and cfg["mct"]["unlink_s"] == 0
+
+
 def test_trial_score_finds_frames_cut_with_another_time_zone():
     """Frames cut when timezone_offset_hours was one more: an hour off the run - found and scored."""
     import trial

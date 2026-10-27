@@ -20,7 +20,8 @@
 #
 # Knobs: WORK=/workspace  CONFIG=barn.toml  VIDEOS=rec_fixed  BOXES=boxes  LABELS=labels.json (all in WORK/data)
 #        IDENTITIES="<identity.pt> ..." (default: every WORK/models/reid/*/identity.pt)  AGAIN=1 (run every
-#        model again)  SHOW=1 (keep each trial's show_<cam>/ pages and videos in the export too)
+#        model again)  OVERLAP=1 (trial --overlap: the masks share floor - does one cow get one id on two cameras?
+#        -> trial_<model>_overlap)  SHOW=1 (keep each trial's show_<cam>/ pages and videos in the export too)
 
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +50,7 @@ if [ -z "${HERD_TRIAL_IN_TMUX:-}" ]; then
     fi
     mkdir -p "$D"
     knobs=""
-    for v in WORK CONFIG VIDEOS BOXES LABELS IDENTITIES AGAIN SHOW; do
+    for v in WORK CONFIG VIDEOS BOXES LABELS IDENTITIES AGAIN SHOW OVERLAP; do
         [ -n "${!v+x}" ] && knobs+="$v=$(printf '%q' "${!v}") "
     done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
@@ -172,7 +173,7 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader || true
 
 names=()
 for f in $IDENTITIES; do
-    n="$(basename "$(dirname "$f")")"
+    n="$(basename "$(dirname "$f")")${OVERLAP:+_overlap}"
     names+=("$n")
     out="$D/trial_$n"
     ident="$(readlink -f "$f")"
@@ -185,7 +186,7 @@ for f in $IDENTITIES; do
         fi
         if [ -f "$out/trial.json" ] && [ -f "$out/pass2/herd.sqlite" ]; then   # played, the scoring stopped
             step "$n: played already - scored again"
-            "$PY" "$HERE/herd.py" trial --score-only --config "$out/barn.toml" --out "$out" --boxes "$BOXES" --labels "$LABELS" \
+            "$PY" "$HERE/herd.py" trial --score-only --config "$out/barn.toml" --out "$out" --boxes "$BOXES" --labels "$LABELS" ${OVERLAP:+--overlap} \
                 || echo "!! $n: scoring stopped (above)"
             continue
         fi
@@ -208,7 +209,7 @@ text = re.sub(r'://[^/"@\s]+@', "://", text)                 # no camera passwor
 open(dst, "w", encoding="utf-8").write(text)
 print(f"[model] identity = \"{ident}\"   (was \"{m.group(1)}\")")
 PYEOF
-    "$PY" "$HERE/herd.py" trial --config "$cfg" --videos "$VIDEOS" --out "$out" --boxes "$BOXES" --labels "$LABELS" \
+    "$PY" "$HERE/herd.py" trial --config "$cfg" --videos "$VIDEOS" --out "$out" --boxes "$BOXES" --labels "$LABELS" ${OVERLAP:+--overlap} \
         || echo "!! $n: the trial stopped (above) - on to the next model; run again to finish it"
 done
 
