@@ -501,7 +501,7 @@ label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
   font-size: 11px; line-height: 16px; padding: 0 4px; border-radius: 3px; }
 .box.extra span { top: auto; bottom: -18px; }
 .right { --c: var(--right); } .wrong { --c: var(--wrong); } .missed { --c: var(--missed); }
-.nocow { --c: var(--nocow); } .extra { --c: var(--extra); border-width: 1px; border-style: dotted; }
+.nocow { --c: var(--nocow); } .extra { --c: var(--extra); } .box.extra { border-width: 1px; border-style: dotted; }
 #insp { margin: 0 16px 24px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
 #insp:empty { display: none; }
 .top { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
@@ -513,7 +513,11 @@ h3 { font-size: 13px; color: var(--muted); font-weight: normal; margin: 12px 0 4
 .strip figure { margin: 0; flex: none; text-align: center; font-size: 11px; color: var(--muted); cursor: pointer; }
 .crop { border: 3px solid var(--c, var(--line)); border-radius: 4px; background-color: var(--line);
   background-repeat: no-repeat; }
-.strip figure.here .crop { outline: 2px solid var(--fg); outline-offset: 1px; }
+.shot { position: relative; background: var(--line); border-radius: 4px; overflow: hidden; flex: none; }
+.shot img { display: block; width: 100%; height: 100%; object-fit: fill; }
+.shot .mark { position: absolute; border: 3px solid var(--c, var(--accent)); border-radius: 2px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, .38); }
+.strip figure.here .crop, .strip figure.here .shot { outline: 3px solid var(--fg); outline-offset: 1px; }
 .cam { font-weight: 600; color: var(--fg); font-size: 12px; margin-top: 4px; }
 </style></head><body>
 <header><h1>Boxes</h1>
@@ -522,6 +526,7 @@ h3 { font-size: 13px; color: var(--muted); font-weight: normal; margin: 12px 0 4
   <select id="cow"><option value="">all your cows</option></select>
   <label><input type="checkbox" id="errs"> moments with a mistake (E)</label>
   <label><input type="checkbox" id="extra" checked> its boxes you did not name</label>
+  <label><input type="checkbox" id="zoom"> close-ups (Z)</label>
 </header>
 <div class="legend">
   <span><i style="background:var(--right)"></i>the right cow</span><span><i style="background:var(--wrong)"></i>another cow</span>
@@ -554,7 +559,7 @@ function clock(ts) {
   const d = new Date((ts + DATA.tz * 3600) * 1000);
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
-let shown = new Set(CAMS), cow = "", errs = false, extra = true, sel = null, m = 0;
+let shown = new Set(CAMS), cow = "", errs = false, extra = true, zoom = false, sel = null, m = 0;
 try { const s = JSON.parse(localStorage.getItem("boxes-cams") || "null"); if (s) shown = new Set(s.filter(c => CAMS.includes(c))); } catch (e) {}
 if (!shown.size) shown = new Set(CAMS);
 const save = () => { try { localStorage.setItem("boxes-cams", JSON.stringify([...shown])); } catch (e) {} };
@@ -616,12 +621,19 @@ function render() {
   document.getElementById("cams").innerHTML = CAMS.map(c => `<button data-cam="${c}" class="${shown.has(c) ? "on" : ""}">${c}</button>`).join(" ");
   inspect();
 }
-function strip(items, H) {
+function shot(f, b, W, st) {                        // the whole frame, the box marked, the rest darker
+  return `<div class="shot ${st || ""}" style="width:${W.toFixed(0)}px;aspect-ratio:${f.w}/${f.h}">` +
+    `<img src="${f.src}" alt="${f.cam}" loading="lazy" onerror="this.style.visibility='hidden'">` +
+    `<div class="mark" style="left:${b[0] * 100}%;top:${b[1] * 100}%;width:${(b[2] - b[0]) * 100}%;height:${(b[3] - b[1]) * 100}%"></div></div>`;
+}
+const view = (f, b, big, st) => zoom ? crop(f, b, big ? 220 : 110)
+  : shot(f, b, big ? Math.min(760, window.innerWidth - 64) : Math.min(300, window.innerWidth - 64), st);
+function strip(items) {
   const by = {};
   items.forEach(x => (by[x.f.cam] = by[x.f.cam] || []).push(x));
   return Object.keys(by).sort().map(c => `<div class="cam">${c} · ${by[c].length}</div><div class="strip">` +
     by[c].map(x => `<figure class="${x.here ? "here" : ""} ${x.st}" data-fi="${x.fi}" data-kind="${x.kind}" data-k="${x.k}">` +
-      `${crop(x.f, x.b, H)}<figcaption>${clock(x.f.ts)}<br>${x.cap}</figcaption></figure>`).join("") + `</div>`).join("");
+      `${view(x.f, x.b, false, x.st)}<figcaption>${clock(x.f.ts)}<br>${x.cap}</figcaption></figure>`).join("") + `</div>`).join("");
 }
 function inspect() {
   const box = document.getElementById("insp");
@@ -653,8 +665,9 @@ function inspect() {
                    cap: yk === undefined ? "not yours" : "your " + g.mine[yk][4] });
     }); });
   }
-  box.innerHTML = `<div class="top">${crop(f, b, 220)}<div class="facts">${facts}</div></div>` +
-    (title ? `<h3>${title}</h3>` + strip(items, 110) : "");
+  const st0 = sel.kind === "mine" ? status(f, sel.k) : "extra";
+  box.innerHTML = `<div class="top">${view(f, b, true, st0)}<div class="facts">${facts}</div></div>` +
+    (title ? `<h3>${title}</h3>` + strip(items) : "");
 }
 document.addEventListener("click", e => {
   const t = e.target.closest("[data-fi]");
@@ -678,11 +691,13 @@ document.getElementById("next").onclick = () => go(1);
 sel_.onchange = () => { cow = sel_.value; sel = null; go(0); };
 document.getElementById("errs").onchange = e => { errs = e.target.checked; go(0); };
 document.getElementById("extra").onchange = e => { extra = e.target.checked; render(); };
+document.getElementById("zoom").onchange = e => { zoom = e.target.checked; inspect(); };
 document.addEventListener("keydown", e => {
   if (e.target.tagName === "SELECT") return;
   if (e.key === "ArrowLeft") go(-1);
   else if (e.key === "ArrowRight") go(1);
   else if (e.key === "Escape") { sel = null; render(); }
+  else if (e.key === "z" || e.key === "Z") { const x = document.getElementById("zoom"); x.checked = !x.checked; zoom = x.checked; inspect(); }
   else if (e.key === "e" || e.key === "E") { const x = document.getElementById("errs"); x.checked = !x.checked; errs = x.checked; go(0); }
 });
 render();

@@ -384,8 +384,10 @@ it again for a trial already made). Each labelled moment shows its cameras side 
 with your ids and the cow the system gave each: green the right cow, red another, orange not found,
 violet found without a cow, grey dotted its boxes you did not name, dashed outside the camera's mask (not
 scored). ←/→ go through the moments, E keeps only those with a mistake, the cameras switch on and off,
-and "your cow" keeps the moments with her. Click a box: it large, and that cow of yours (or its cow) as
-crops from every camera and moment, the other side's name under each; a crop takes you to its moment. The
+and "your cow" keeps the moments with her. Click a box: its whole frame large with the box marked (the
+rest darker), and that cow of yours (or its cow) in every camera's frames at every moment, the box marked
+and the other side's name under each; a frame takes you to its moment. Z (close-ups) shows the boxes cut out
+instead. The
 frames are read from `boxes/frames/` where they are, so open the page on the computer that has them.
 
 **Does one cow get one id on two cameras?** The score says it for every cow of yours it scored on two
