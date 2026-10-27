@@ -422,6 +422,8 @@ def test_fix_videos_first_or_last_minutes_same_stretch_on_every_camera(monkeypat
     assert cp[cp.index("-ss") + 1] == "10.000" and cp[cp.index("-t") + 1] == "5.000"
     assert fix_videos.camera_of("x/cam1_2026.ts", ["cam1", "cam10"]) == "cam1"
     assert fix_videos.camera_of("cam10_2026.ts", ["cam1"]) is None
+    assert fix_videos.camera_of("Cam_1 2026-10-27 12-00-00.ts", ["cam1"]) == "cam1"
+    assert fix_videos.camera_of("CAMERA01_x.TS", ["cam1"]) == "cam1"
 
 
 def test_fix_videos_command():

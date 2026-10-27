@@ -133,8 +133,15 @@ def stretch(files, minutes, first=False):
 
 
 def camera_of(rel, cams):
-    return next((c for c in sorted(cams, key=len, reverse=True)
-                 if re.search(rf"(?<![A-Za-z0-9]){re.escape(c)}(?![A-Za-z0-9])", rel)), None)
+    """The camera id a file's path names: the id standing alone (cam1 in cam1_2026-..., not in cam10), any
+    case, and for an id ending in a number also its usual spellings (Cam_1, camera1, CAM-01)."""
+    for c in sorted(cams, key=len, reverse=True):
+        if re.search(rf"(?i)(?<![a-z0-9]){re.escape(c)}(?![a-z0-9])", rel):
+            return c
+        m = re.fullmatch(r"([A-Za-z]+)[_ -]?0*(\d+)", c)
+        if m and re.search(rf"(?i)(?<![a-z0-9]){re.escape(m.group(1))}[a-z]*[_ -]?0*{m.group(2)}(?![0-9])", rel):
+            return c
+    return None
 
 
 def check(path):
@@ -190,18 +197,23 @@ def main(argv=None):
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg is not installed (the Docker image has it; on a server: apt install ffmpeg)")
     src_dir, out_dir = os.path.abspath(args.videos.rstrip("\\")), os.path.abspath(args.out.rstrip("\\"))
-    todo = []
+    todo, seen, other = [], [], []
     for d, _, fs in os.walk(src_dir):
         if os.path.abspath(d).startswith(out_dir):
             continue
         for f in sorted(fs):
-            if f.lower().endswith(VIDEO_EXT) and ".part." not in f:
-                src = os.path.join(d, f)
-                cam = camera_of(os.path.relpath(src, src_dir), args.cameras) if args.cameras else None
-                if args.cameras and cam is None:
-                    continue
-                dst = os.path.join(out_dir, os.path.relpath(d, src_dir), os.path.splitext(f)[0] + ".mp4")
-                todo.append((src, dst, cam or "all"))
+            if ".part." in f:
+                continue
+            if not f.lower().endswith(VIDEO_EXT):
+                other.append(f)
+                continue
+            src = os.path.join(d, f)
+            seen.append(os.path.relpath(src, src_dir))
+            cam = camera_of(os.path.relpath(src, src_dir), args.cameras) if args.cameras else None
+            if args.cameras and cam is None:
+                continue
+            dst = os.path.join(out_dir, os.path.relpath(d, src_dir), os.path.splitext(f)[0] + ".mp4")
+            todo.append((src, dst, cam or "all"))
     cuts = {}
     if minutes and todo:
         if not args.cameras:                      # every camera on its own: the id before the date in the name
@@ -226,7 +238,16 @@ def main(argv=None):
         ready.append((src, dst))
     todo = ready
     if not todo:
-        print(f"[fix] nothing to convert under {src_dir}")
+        if not seen:
+            print(f"[fix] no video under {src_dir} ({', '.join(VIDEO_EXT)})" +
+                  (f"; there are {len(other)} other files, e.g. {', '.join(sorted(other)[:5])}" if other else
+                   " - is the folder in docker/data/ (it is /data in the container)?"))
+        elif args.cameras and not any(camera_of(x, args.cameras) for x in seen):
+            print(f"[fix] {len(seen)} videos under {src_dir}, none of them named by a camera of "
+                  f"{' '.join(args.cameras)}, e.g. {', '.join(seen[:5])} - rename them (cam1_2026-10-27_12-00-00.ts) "
+                  "or leave --cameras out")
+        else:
+            print(f"[fix] nothing to convert under {src_dir} (all of it in {out_dir} already: --force does it again)")
         return 0
     print(f"[fix] {len(todo)} recordings -> {out_dir} ({'re-wrapped' if args.copy else 'encoded again, H.264'}, "
           f"{args.jobs} at once)", flush=True)
