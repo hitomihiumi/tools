@@ -669,8 +669,9 @@ def apply_config(path, calib, link_dist, shared=(), backup=True):
         m = re.search(r'(?m)^id\s*=\s*"([^"]+)"', b)
         cam = m.group(1) if m else None
         if cam in calib:
-            b = re.sub(r"(?m)^(floor_points|distortion|aspect)\s*=.*\n", "", b)
-            add = "".join(f"{k} = {toml_value(calib[cam][k])}\n" for k in ("floor_points", "distortion", "aspect"))
+            keys = [k for k in ("floor_points", "distortion", "aspect", "floor_at") if k in calib[cam]]
+            b = re.sub(rf"(?m)^({'|'.join(keys)})\s*=.*\n", "", b)
+            add = "".join(f"{k} = {toml_value(calib[cam][k])}\n" for k in keys)
             b = b.rstrip("\n") + "\n" + add + "\n"
         out.append(b)
     text = "".join(out)

@@ -262,7 +262,9 @@ def floor_mapper(cam, mct):
     back to the plane at the cow's body height - body_height_lying / _standing, mixed by p(lying) -
     since a lying cow's centre is much lower than a standing one's. floor_points [[u, v, X, Y], ...]
     (>= 4, u v in 0-1 of the frame, X Y measured on the floor): a floor homography, applied to the
-    box's bottom centre (where a cow touches the floor, as seen from above-and-aside)."""
+    box's bottom centre (where a cow touches the floor, as seen from above-and-aside) - or, with
+    floor_at = "centre", to the box's centre (herd.py crosscam: two cameras facing each other see a cow's
+    two sides, whose bottoms lie apart; their centres agree better)."""
     import numpy as np
     if cam.get("proj_mat"):
         P = np.asarray(cam["proj_mat"], float).reshape(3, 4)
@@ -280,9 +282,10 @@ def floor_mapper(cam, mct):
         k, ar = cam.get("distortion") or 0.0, cam.get("aspect") or 16 / 9      # herd.py autocalib writes both
         und = (lambda u, v: undistort(u, v, k, ar)) if k else (lambda u, v: (u, v))
         Hinv = homography([und(u, v) for u, v, _, _ in pts], [(x, y) for _, _, x, y in pts])
+        at = 1.0 if cam.get("floor_at", "bottom") == "bottom" else 0.5      # how far down the box
 
         def g(box, p_lying=0.5):
-            q = Hinv @ np.array([*und((box[0] + box[2]) / 2, box[3]), 1.0])
+            q = Hinv @ np.array([*und((box[0] + box[2]) / 2, box[1] + at * (box[3] - box[1])), 1.0])
             return (float(q[0] / q[2]), float(q[1] / q[2]))
         return g
     return None

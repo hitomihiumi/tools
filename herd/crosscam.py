@@ -12,9 +12,9 @@ Your labels give it with no measuring: a cow of yours on two cameras at one mome
   2. the mapping (RANSAC) and its check moment by moment: fitted without that moment, its cows on the
      first camera put onto the second and matched one to one by distance - the right cow how often, beside
      the chance of a guess. Fitted twice, on the boxes' bottom centres and on their centres
-  3. OUT/crosscam.json; --apply (one of the two calibrated, [mct] floor_points): the other camera's
-     floor_points onto its floor, from the bottom centres (what the run maps), so [mct] link joins them -
-     barn.toml.bak kept
+  3. OUT/crosscam.json; --apply (one of the two calibrated, floor_points; both: --onto names the one to
+     keep): the other camera's floor_points onto its floor, by the better of the two points (floor_at on
+     both cameras says which the run then maps), so [mct] link joins them - barn.toml.bak kept
 """
 
 from __future__ import annotations
@@ -115,7 +115,7 @@ def ransac(src, dst, rng, iters=1000, thr=RANSAC_THR):
     return H, inl
 
 
-def check(mos, cam_a, cam_b, where, seed=0):
+def check(mos, cam_a, cam_b, where, seed=0, gate=GATE):
     """Each moment matched by the mapping fitted without it -> the counts and the misses by distance."""
     from scipy.optimize import linear_sum_assignment
     per = [pairs_of(mo, cam_a, cam_b, where) for mo in mos]
@@ -135,7 +135,7 @@ def check(mos, cam_a, cam_b, where, seed=0):
         P = apply_h(H, A)
         D = np.hypot(P[:, None, 0] - np.asarray(B)[None, :, 0], P[:, None, 1] - np.asarray(B)[None, :, 1])
         r, c = linear_sum_assignment(D)
-        got = {i: j for i, j in zip(r, c) if D[i, j] <= GATE}
+        got = {i: j for i, j in zip(r, c) if D[i, j] <= gate}
         idb = [i for i, _, _, _ in mo["b"]]
         for i, (cid, _, _, _) in enumerate(mo["a"]):
             if cid not in idb:
@@ -153,30 +153,32 @@ def check(mos, cam_a, cam_b, where, seed=0):
             "by_cow": {c: dict(v) for c, v in sorted(cows.items())}}
 
 
-def onto(cfg, a, b, H_ab, mos):
-    """b's floor_points on a's floor: points of b where your cows stood, through H (b -> a) onto a's frame and
-    a's calibration -> [[u, v, X, Y]] of b (its own frame, as clicked)."""
+def onto(cfg, ref, oth, H, mos, where):
+    """oth's floor_points on ref's floor: points of oth where your cows stood, through H (oth -> ref) onto ref's
+    frame and ref's calibration -> ([[u, v, X, Y]] of oth, as clicked, its lens). mos: oth's moments with ref
+    ("a" oth, "b" ref). With where = "centre" the points are the boxes' centres, read on ref's floor as
+    its centres are (floor_at = "centre" on both)."""
     from autocalib import camera_floor, distort
     cams = {c["id"]: c for c in cfg["cameras"]}
-    fa = camera_floor(cams[a])
-    _, _, w, h = next(x for mo in mos for x in mo["b"])
-    kb, arb = lens(cams[b], w, h)
-    _, _, wa, ha = next(x for mo in mos for x in mo["a"])
-    ka, ara = lens(cams[a], wa, ha)
-    raw = np.array([((x[0] + x[2]) / 2, x[3]) for mo in mos for _, x, _, _ in mo["b"]])
+    fr = camera_floor(cams[ref])
+    _, _, w, h = next(x for mo in mos for x in mo["a"])
+    ko, aro = lens(cams[oth], w, h)
+    _, _, wr, hr = next(x for mo in mos for x in mo["b"])
+    kr, arr = lens(cams[ref], wr, hr)
+    raw = np.array([((x[0] + x[2]) / 2, x[3] if where == "bottom" else (x[1] + x[3]) / 2)
+                    for mo in mos for _, x, _, _ in mo["a"]])
     us = np.quantile(raw[:, 0], [0.1, 0.5, 0.9])
     vs = np.quantile(raw[:, 1], [0.1, 0.5, 0.9])
-    grid = [(u, v) for v in vs for u in us]
-    Hba = np.linalg.inv(H_ab)
     out = []
-    for u, v in grid:
-        ub, vb = undistort(u, v, kb, arb) if kb else (u, v)
-        q = apply_h(Hba, [(ub * arb, vb)])[0]
-        ua, va = distort(q[0] / ara, q[1], ka, ara)
-        X, Y, ok = fa[0](np.array([ua]), np.array([va]))
-        if bool(ok[0]) and np.isfinite(X[0]) and np.isfinite(Y[0]):
-            out.append([round(float(u), 4), round(float(v), 4), round(float(X[0]), 1), round(float(Y[0]), 1)])
-    return out, kb, arb
+    for v in vs:
+        for u in us:
+            uo, vo = undistort(u, v, ko, aro) if ko else (u, v)
+            q = apply_h(H, [(uo * aro, vo)])[0]
+            ur, vr = distort(q[0] / arr, q[1], kr, arr)
+            X, Y, ok = fr[0](np.array([ur]), np.array([vr]))
+            if bool(ok[0]) and np.isfinite(X[0]) and np.isfinite(Y[0]):
+                out.append([round(float(u), 4), round(float(v), 4), round(float(X[0]), 1), round(float(Y[0]), 1)])
+    return out, ko, aro
 
 
 def main(argv=None):
@@ -189,6 +191,11 @@ def main(argv=None):
                    help="these two (again for more pairs); default [mct] neighbours, else every two")
     p.add_argument("--apply", action="store_true",
                    help="the uncalibrated camera of each pair onto the calibrated one's floor in barn.toml")
+    p.add_argument("--gate", type=float, default=GATE,
+                   help="a cow put further than this (frame heights) from every box of the other camera matches none")
+    p.add_argument("--onto", default=None,
+                   help="with --apply, both of a pair calibrated: the camera the other is put onto (its own "
+                        "floor_points replaced)")
     args = p.parse_args(argv)
     from box_dataset import read_labels
     cfg = load_config(args.config)
@@ -211,7 +218,7 @@ def main(argv=None):
             src = [q for mo in mos for q in pairs_of(mo, cams[a], cams[b], where)[0]]
             dst = [q for mo in mos for q in pairs_of(mo, cams[a], cams[b], where)[1]]
             H, inl = ransac(src, dst, random.Random(0))
-            r[where] = dict(check(mos, cams[a], cams[b], where), inliers=int(inl.sum()) if inl is not None else 0,
+            r[where] = dict(check(mos, cams[a], cams[b], where, gate=args.gate), inliers=int(inl.sum()) if inl is not None else 0,
                             H=H.tolist() if H is not None else None)
         best = max(("bottom", "centre"), key=lambda w: r[w]["right"])
         r["best"] = best
@@ -232,32 +239,29 @@ def main(argv=None):
                 f"{c} {v.get('right', 0)}/{sum(v.values())}" for c, v in sorted(bad, key=lambda kv: kv[1].get('right', 0) - sum(kv[1].values()))[:12]))
         if args.apply:
             fa, fb = bool(cams[a].get("floor_points")), bool(cams[b].get("floor_points"))
-            ref, oth, H = (a, b, r["bottom"]["H"]) if fa else (b, a, None)
-            if not (fa or fb):
-                print(f"  --apply: neither {a} nor {b} has floor_points - calibrate one (studio), then again")
+            ref = args.onto if args.onto in (a, b) else (a if fa and not fb else b if fb and not fa else None)
+            if ref is None or not cams[ref].get("floor_points"):
+                print("  --apply: " + (f"neither {a} nor {b} has floor_points - calibrate one (studio), then again"
+                                        if not (fa or fb) else
+                                        f"{a} and {b} both calibrated - --onto {a} (or {b}): the other is put onto it"))
                 continue
-            if fa and fb:
-                print(f"  --apply: {a} and {b} both calibrated - left as they are (take floor_points out of the "
-                      "one to put onto the other, then again)")
-                continue
-            if H is None:                              # b calibrated: fit the other way, a onto b
-                mos_r = moments(cfg, frames, labels, b, a)
-                src = [q for mo in mos_r for q in pairs_of(mo, cams[b], cams[a], "bottom")[0]]
-                dst = [q for mo in mos_r for q in pairs_of(mo, cams[b], cams[a], "bottom")[1]]
-                Hr, _ = ransac(src, dst, random.Random(0))
-                H, use = (Hr.tolist() if Hr is not None else None), mos_r
-            else:
-                use = mos
+            oth = b if ref == a else a
+            mos_o = moments(cfg, frames, labels, oth, ref)
+            src = [q for mo in mos_o for q in pairs_of(mo, cams[oth], cams[ref], best)[0]]
+            dst = [q for mo in mos_o for q in pairs_of(mo, cams[oth], cams[ref], best)[1]]
+            H, _ = ransac(src, dst, random.Random(0))
             if H is None:
-                print("  --apply: no mapping from the bottom centres")
+                print("  --apply: no mapping")
                 continue
-            pts, k, ar = onto(cfg, ref, oth, np.asarray(H), use)
+            pts, k, ar = onto(cfg, ref, oth, H, mos_o, best)
             if len(pts) < 4:
                 print(f"  --apply: {oth}'s points do not land on {ref}'s floor")
                 continue
-            calib[oth] = {"floor_points": pts, "distortion": k, "aspect": ar}
+            calib[oth] = {"floor_points": pts, "distortion": k, "aspect": ar, "floor_at": best}
+            calib.setdefault(ref, {})["floor_at"] = best
             shared.append((a, b))
-            print(f"  --apply: {oth} onto {ref}'s floor ({len(pts)} points)")
+            print(f"  --apply: {oth} onto {ref}'s floor ({len(pts)} points, by the boxes' {best}s"
+                  + ("; its own calibration replaced" if cams[oth].get("floor_points") else "") + ")")
     out = args.out or os.path.dirname(os.path.abspath(os.path.join(args.boxes, "frames.json")))
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "crosscam.json"), "w", encoding="utf-8") as fh:

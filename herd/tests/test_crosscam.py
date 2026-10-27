@@ -72,6 +72,41 @@ def test_crosscam_learns_where_she_stands_and_puts_the_other_camera_on_the_floor
         assert np.median(err) < 40, np.median(err)                     # cm, on a 20 x 10 m floor
 
 
+def test_crosscam_onto_a_camera_when_both_are_calibrated():
+    """Both calibrated: --apply alone leaves them; --onto cam1 puts cam2 on cam1's floor, floor_at on both."""
+    import crosscam
+    from common import floor_mapper, load_config
+    with tempfile.TemporaryDirectory() as d:
+        pos = _scene(d)
+        path = os.path.join(d, "barn.toml")
+        text = open(path).read().rstrip("\n") + "\nfloor_points = [[0.1, 0.5, 0, 0], [0.9, 0.5, 100, 0], [0.9, 0.9, 100, 100], [0.1, 0.9, 0, 100]]\n"
+        open(path, "w").write(text)
+        args = ["--config", path, "--boxes", os.path.join(d, "boxes"), "--labels", os.path.join(d, "labels.json"), "--apply"]
+        crosscam.main(args)
+        assert not os.path.exists(path + ".bak")                         # both calibrated: untouched
+        crosscam.main(args + ["--onto", "cam1"])
+        best = json.load(open(os.path.join(d, "boxes", "crosscam.json")))["cam1->cam2"]["best"]
+        cfg = load_config(path)
+        cams = {c["id"]: c for c in cfg["cameras"]}
+        assert cams["cam1"]["floor_at"] == cams["cam2"]["floor_at"] == best
+        assert len(cams["cam2"]["floor_points"]) >= 4 and cams["cam2"]["floor_points"][0][2] != 0
+        lab = json.load(open(os.path.join(d, "labels.json")))["frames"]
+        last = max((k for k in lab if k.startswith("frames/cam2/")), key=lambda k: int(k.split("/")[-1][:-4]))
+        f1, f2 = floor_mapper(cams["cam1"], cfg["mct"]), floor_mapper(cams["cam2"], cfg["mct"])
+        last1 = last.replace("cam2", "cam1")
+        b1 = {bx[4]: bx[:4] for bx in lab[last1]["boxes"]}
+        err = [np.hypot(*(np.array(f2(bx[:4])) - np.array(f1(b1[bx[4]])))) for bx in lab[last]["boxes"] if bx[4] in b1]
+        assert len(err) > 5 and np.median(err) < 40, np.median(err)    # one cow, one place on both
+
+
+def test_floor_at_centre_reads_the_box_middle():
+    from common import DEFAULTS, floor_mapper
+    cam = {"floor_points": [[0, 0, 0, 0], [1, 0, 100, 0], [1, 1, 100, 100], [0, 1, 0, 100]]}
+    assert np.allclose(floor_mapper(cam, DEFAULTS["mct"])([0.2, 0.2, 0.4, 0.6]), (30, 60))
+    cam["floor_at"] = "centre"
+    assert np.allclose(floor_mapper(cam, DEFAULTS["mct"])([0.2, 0.2, 0.4, 0.6]), (30, 40))
+
+
 def test_crosscam_without_labels_on_both_says_so(capsys):
     import crosscam
     with tempfile.TemporaryDirectory() as d:
