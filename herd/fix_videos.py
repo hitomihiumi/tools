@@ -6,6 +6,11 @@ tools read them wrong (one camera's clock standing still, frames missing, decode
 
     python herd/herd.py fix-videos --videos /srv/herd/rec --out /srv/herd/rec_fixed
     python herd/herd.py fix-videos --videos rec --out rec_fixed --fps 25 --copy    # only re-wrap, no encode
+    python herd/herd.py fix-videos --videos rec --out rec_last10 --cameras cam1 cam2 --last 10
+
+--last N: only the last N minutes, the same stretch of time on every camera (it ends where the camera that
+stopped first stopped); each file named by its new start (the time in its name moved on), so the tools
+put the cameras side by side as before. --cameras: only these cameras' files.
 
 Then use --videos /srv/herd/rec_fixed with barn video / boxes frames / zones page.
 """
@@ -14,7 +19,9 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures as cf
+import datetime as dt
 import json
+import re
 import os
 import shutil
 import subprocess
@@ -23,7 +30,7 @@ import time
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from common import VIDEO_EXT  # noqa: E402
+from common import _STAMP, VIDEO_EXT  # noqa: E402
 
 
 def stated_fps(path):
@@ -46,13 +53,81 @@ def stated_fps(path):
     return None
 
 
-def command(src, dst, fps, copy=False, crf=20):
+def command(src, dst, fps, copy=False, crf=20, cut=None):
+    """cut (start s, length s) of the file's own time line, its first frame 0."""
     head = ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
             "-err_detect", "ignore_err", "-fflags", "+genpts+discardcorrupt", "-i", src, "-map", "0:v:0", "-an"]
     if copy:                                     # the stream as it is, in a new container with new time stamps
-        return head + ["-c:v", "copy", "-fps_mode", "passthrough", "-movflags", "+faststart", dst]
-    return head + ["-vf", f"setpts=PTS-STARTPTS,fps={fps}", "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
+        part = ["-ss", f"{cut[0]:.3f}", "-t", f"{cut[1]:.3f}"] if cut else []   # from a keyframe on: not exact
+        return head + part + ["-c:v", "copy", "-fps_mode", "passthrough", "-movflags", "+faststart", dst]
+    vf = f"setpts=PTS-STARTPTS,fps={fps}"
+    if cut:                                      # on the clean time line, frame-exact
+        vf += f",trim=start={cut[0]:.3f}:duration={cut[1]:.3f},setpts=PTS-STARTPTS"
+    return head + ["-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", str(crf),
                    "-pix_fmt", "yuv420p", "-movflags", "+faststart", dst]
+
+
+def duration(path):
+    """The file's length in s (ffprobe, else as the tools read it)."""
+    try:
+        out = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", path],
+                             capture_output=True, text=True, timeout=120).stdout
+        d = float(json.loads(out)["format"]["duration"])
+        if d > 0:
+            return d
+    except (OSError, subprocess.SubprocessError, ValueError, KeyError):
+        pass
+    return check(path)[1]
+
+
+def stamp(name):
+    """The local time in a file's name -> (datetime, the match), or (None, None)."""
+    m = _STAMP.search(name)
+    if not m:
+        return None, None
+    try:
+        return dt.datetime(*map(int, m.groups())), m
+    except ValueError:
+        return None, None
+
+
+def restamp(name, shift_s):
+    """The name with its time moved on by shift_s (the same digits' layout: 2026-10-20_06-00-00)."""
+    t, m = stamp(name)
+    if t is None:
+        return name
+    new = (t + dt.timedelta(seconds=round(shift_s))).strftime("%Y-%m-%d_%H-%M-%S")
+    return name[:m.start()] + new + name[m.end():]
+
+
+def last_minutes(files, minutes, cams):
+    """[(src, dst, camera)] -> ([(src, dst renamed, (start, length))], the window, what each camera covers):
+    the last `minutes` before the first camera stopped, the same stretch of time for all."""
+    spans = []
+    for src, dst, cam in files:
+        t, _ = stamp(os.path.basename(src))
+        if t is None:
+            sys.exit(f"[fix] --last: no date and time in the name of {src} (e.g. cam1_2026-10-20_06-00-00.ts)")
+        d = duration(src)
+        spans.append((src, dst, cam, t.replace(tzinfo=dt.timezone.utc).timestamp(), d))   # the name's clock
+    ends = {}
+    for _, _, cam, t0, d in spans:
+        ends[cam] = max(ends.get(cam, 0.0), t0 + d)
+    end = min(ends.values())
+    start = end - minutes * 60.0
+    out, cover = [], {c: 0.0 for c in ends}
+    for src, dst, cam, t0, d in spans:
+        a, b = max(0.0, start - t0), min(d, end - t0)
+        if b - a < 1.0:
+            continue
+        cover[cam] += b - a
+        out.append((src, os.path.join(os.path.dirname(dst), restamp(os.path.basename(dst), a)), (a, b - a)))
+    return out, (start, end), cover
+
+
+def camera_of(rel, cams):
+    return next((c for c in sorted(cams, key=len, reverse=True)
+                 if re.search(rf"(?<![A-Za-z0-9]){re.escape(c)}(?![A-Za-z0-9])", rel)), None)
 
 
 def check(path):
@@ -65,11 +140,11 @@ def check(path):
     return n, (n / fps if fps else 0.0)
 
 
-def one(src, dst, fps, copy, crf):
+def one(src, dst, fps, copy, crf, cut=None):
     t0 = time.time()
     rate = fps or stated_fps(src) or 25.0
     part = dst[:-4] + ".part.mp4"
-    r = subprocess.run(command(src, part, rate, copy, crf), capture_output=True, text=True)
+    r = subprocess.run(command(src, part, rate, copy, crf, cut), capture_output=True, text=True)
     if r.returncode != 0 or not os.path.exists(part) or os.path.getsize(part) == 0:
         if os.path.exists(part):
             os.remove(part)
@@ -92,7 +167,13 @@ def main(argv=None):
     p.add_argument("--crf", type=int, default=20, help="x264 quality (lower = better, bigger; 18-23)")
     p.add_argument("--jobs", type=int, default=2, help="files at once")
     p.add_argument("--force", action="store_true", help="convert again files already in --out")
+    p.add_argument("--cameras", nargs="*", default=None, help="only these cameras' files (cam1 cam2: the id in the path)")
+    p.add_argument("--last", type=float, default=None,
+                   help="only the last this many minutes, the same stretch on every camera; files named by their "
+                        "new start")
     args = p.parse_args(argv)
+    if args.last and args.copy:                  # a copied stream starts at a keyframe: seconds off, names wrong
+        p.error("--last cuts frame-exact only when the video is encoded again: leave --copy out")
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg is not installed (the Docker image has it; on a server: apt install ffmpeg)")
     src_dir, out_dir = os.path.abspath(args.videos.rstrip("\\")), os.path.abspath(args.out.rstrip("\\"))
@@ -103,12 +184,34 @@ def main(argv=None):
         for f in sorted(fs):
             if f.lower().endswith(VIDEO_EXT) and ".part." not in f:
                 src = os.path.join(d, f)
-                dst = os.path.join(out_dir, os.path.relpath(d, src_dir), os.path.splitext(f)[0] + ".mp4")
-                if os.path.exists(dst) and not args.force:
-                    print(f"[fix] {os.path.relpath(dst, out_dir)}: there already", flush=True)
+                cam = camera_of(os.path.relpath(src, src_dir), args.cameras) if args.cameras else None
+                if args.cameras and cam is None:
                     continue
-                os.makedirs(os.path.dirname(dst), exist_ok=True)
-                todo.append((src, dst))
+                dst = os.path.join(out_dir, os.path.relpath(d, src_dir), os.path.splitext(f)[0] + ".mp4")
+                todo.append((src, dst, cam or "all"))
+    cuts = {}
+    if args.last and todo:
+        if not args.cameras:                      # every camera on its own: the id before the date in the name
+            todo = [(s, d, re.split(r"[_ .-]", os.path.basename(s))[0]) for s, d, _ in todo]
+        kept, (w0, w1), cover = last_minutes(todo, args.last, {c for _, _, c in todo})
+        fmt = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        print(f"[fix] the last {args.last:g} min: {fmt(w0)} - {fmt(w1)} (the times in the names), the same on every "
+              "camera", flush=True)
+        for c, secs in sorted(cover.items()):
+            print(f"[fix]   {c}: {secs / 60:.1f} min of it" + ("" if secs >= 0.95 * (w1 - w0) else
+                  "  !! its recording does not cover the whole stretch"), flush=True)
+        cuts = {dst: cut for _, dst, cut in kept}
+        todo = [(src, dst) for src, dst, _ in kept]
+    else:
+        todo = [(src, dst) for src, dst, _ in todo]
+    ready = []
+    for src, dst in todo:
+        if os.path.exists(dst) and not args.force:
+            print(f"[fix] {os.path.relpath(dst, out_dir)}: there already", flush=True)
+            continue
+        os.makedirs(os.path.dirname(dst), exist_ok=True)
+        ready.append((src, dst))
+    todo = ready
     if not todo:
         print(f"[fix] nothing to convert under {src_dir}")
         return 0
@@ -116,7 +219,7 @@ def main(argv=None):
           f"{args.jobs} at once)", flush=True)
     bad = 0
     with cf.ThreadPoolExecutor(max(1, args.jobs)) as ex:
-        for msg in ex.map(lambda t: one(t[0], t[1], args.fps, args.copy, args.crf), todo):
+        for msg in ex.map(lambda t: one(t[0], t[1], args.fps, args.copy, args.crf, cuts.get(t[1])), todo):
             bad += msg.startswith("!!")
             print(f"[fix] {msg}", flush=True)
     print(f"[fix] done -> use --videos {out_dir}" + (f"; {bad} failed" if bad else ""))

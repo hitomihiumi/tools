@@ -400,6 +400,25 @@ def test_file_frames_on_the_recordings_own_clock():
         assert all(b > a for a, b in zip(ts, ts[1:]))
 
 
+def test_fix_videos_last_minutes_same_stretch_on_every_camera(monkeypatch):
+    """--last: the last minutes before the first camera stopped, one stretch for all; names moved on."""
+    import fix_videos
+    lengths = {"cam1_2026-10-27_12-00-00.ts": 1800.0, "cam2_2026-10-27_12-00-05.ts": 1780.0}
+    monkeypatch.setattr(fix_videos, "duration", lambda p: lengths[os.path.basename(p)])
+    files = [(f"/r/{n}", f"/o/{n[:-3]}.mp4", n[:4]) for n in lengths]
+    kept, (a, b), cover = fix_videos.last_minutes(files, 10, {"cam1", "cam2"})
+    assert b - a == 600 and all(abs(v - 600) < 1e-6 for v in cover.values())
+    got = {os.path.basename(d): cut for _, d, cut in kept}
+    # cam2 stopped first (12:29:45): the stretch 12:19:45 - 12:29:45 on both
+    assert got == {"cam1_2026-10-27_12-19-45.mp4": (1185.0, 600.0), "cam2_2026-10-27_12-19-45.mp4": (1180.0, 600.0)}
+    vf = fix_videos.command("in.ts", "out.mp4", 25.0, cut=(1185.0, 600.0))
+    assert "trim=start=1185.000:duration=600.000" in vf[vf.index("-vf") + 1]
+    cp = fix_videos.command("in.ts", "out.mp4", 25.0, copy=True, cut=(10.0, 5.0))
+    assert cp[cp.index("-ss") + 1] == "10.000" and cp[cp.index("-t") + 1] == "5.000"
+    assert fix_videos.camera_of("x/cam1_2026.ts", ["cam1", "cam10"]) == "cam1"
+    assert fix_videos.camera_of("cam10_2026.ts", ["cam1"]) is None
+
+
 def test_fix_videos_command():
     import fix_videos
     enc = fix_videos.command("in.mkv", "out.mp4", 25.0)

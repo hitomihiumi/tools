@@ -219,6 +219,17 @@ docker compose run --rm herd fix-videos --videos /data/rec --out /data/rec_fixed
 `--copy` only re-wraps the stream (fast; enough when just the container is broken). Then pass
 `--videos /data/rec_fixed` to the commands below (and to `zones page`).
 
+A stretch of a long recording, for a smaller set (`.ts` and the other formats alike):
+
+```bash
+docker compose run --rm herd fix-videos --videos /data/rec_new --out /data/rec_last10 --cameras cam1 cam2 --last 10
+```
+
+`--cameras`: only these cameras' files. `--last 10`: the last 10 minutes, the same stretch of time on
+every camera - it ends where the camera that stopped first stopped - each file named by its new start
+(the time in its name moved on), so the tools still put the cameras side by side. Frame-exact, so not
+with `--copy`.
+
 **Naming the cows** (`herd/SETUP.md` section 11):
 
 ```bash
