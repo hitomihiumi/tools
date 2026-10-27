@@ -222,13 +222,13 @@ docker compose run --rm herd fix-videos --videos /data/rec --out /data/rec_fixed
 A stretch of a long recording, for a smaller set (`.ts` and the other formats alike):
 
 ```bash
-docker compose run --rm herd fix-videos --videos /data/rec_new --out /data/rec_last10 --cameras cam1 cam2 --last 10
+docker compose run --rm herd fix-videos --videos /data/rec_new --out /data/rec_first10 --cameras cam1 cam2 --first 10
 ```
 
-`--cameras`: only these cameras' files. `--last 10`: the last 10 minutes, the same stretch of time on
-every camera - it ends where the camera that stopped first stopped - each file named by its new start
-(the time in its name moved on), so the tools still put the cameras side by side. Frame-exact, so not
-with `--copy`.
+`--cameras`: only these cameras' files. `--first 10` / `--last 10`: the first / last 10 minutes, the
+same stretch of time on every camera - it starts where the camera that started last started / ends where
+the camera that stopped first stopped - each file named by its new start (the time in its name moved
+on), so the tools still put the cameras side by side. Frame-exact, so not with `--copy`.
 
 **Naming the cows** (`herd/SETUP.md` section 11):
 

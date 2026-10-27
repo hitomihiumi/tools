@@ -6,11 +6,12 @@ tools read them wrong (one camera's clock standing still, frames missing, decode
 
     python herd/herd.py fix-videos --videos /srv/herd/rec --out /srv/herd/rec_fixed
     python herd/herd.py fix-videos --videos rec --out rec_fixed --fps 25 --copy    # only re-wrap, no encode
-    python herd/herd.py fix-videos --videos rec --out rec_last10 --cameras cam1 cam2 --last 10
+    python herd/herd.py fix-videos --videos rec --out rec_first10 --cameras cam1 cam2 --first 10
 
---last N: only the last N minutes, the same stretch of time on every camera (it ends where the camera that
-stopped first stopped); each file named by its new start (the time in its name moved on), so the tools
-put the cameras side by side as before. --cameras: only these cameras' files.
+--first N / --last N: only the first / last N minutes, the same stretch of time on every camera (it starts
+where the camera that started last started / ends where the camera that stopped first stopped); each file
+named by its new start (the time in its name moved on), so the tools put the cameras side by side as
+before. --cameras: only these cameras' files.
 
 Then use --videos /srv/herd/rec_fixed with barn video / boxes frames / zones page.
 """
@@ -100,21 +101,27 @@ def restamp(name, shift_s):
     return name[:m.start()] + new + name[m.end():]
 
 
-def last_minutes(files, minutes, cams):
+def stretch(files, minutes, first=False):
     """[(src, dst, camera)] -> ([(src, dst renamed, (start, length))], the window, what each camera covers):
-    the last `minutes` before the first camera stopped, the same stretch of time for all."""
+    the last `minutes` before the first camera stopped (first: the first after the last camera started),
+    the same stretch of time for all."""
     spans = []
     for src, dst, cam in files:
         t, _ = stamp(os.path.basename(src))
         if t is None:
-            sys.exit(f"[fix] --last: no date and time in the name of {src} (e.g. cam1_2026-10-20_06-00-00.ts)")
+            sys.exit(f"[fix] --first / --last: no date and time in the name of {src} (e.g. cam1_2026-10-20_06-00-00.ts)")
         d = duration(src)
         spans.append((src, dst, cam, t.replace(tzinfo=dt.timezone.utc).timestamp(), d))   # the name's clock
-    ends = {}
+    ends, starts = {}, {}
     for _, _, cam, t0, d in spans:
         ends[cam] = max(ends.get(cam, 0.0), t0 + d)
-    end = min(ends.values())
-    start = end - minutes * 60.0
+        starts[cam] = min(starts.get(cam, t0), t0)
+    if first:
+        start = max(starts.values())
+        end = start + minutes * 60.0
+    else:
+        end = min(ends.values())
+        start = end - minutes * 60.0
     out, cover = [], {c: 0.0 for c in ends}
     for src, dst, cam, t0, d in spans:
         a, b = max(0.0, start - t0), min(d, end - t0)
@@ -168,12 +175,18 @@ def main(argv=None):
     p.add_argument("--jobs", type=int, default=2, help="files at once")
     p.add_argument("--force", action="store_true", help="convert again files already in --out")
     p.add_argument("--cameras", nargs="*", default=None, help="only these cameras' files (cam1 cam2: the id in the path)")
+    p.add_argument("--first", type=float, default=None,
+                   help="only the first this many minutes, the same stretch on every camera; files named by their "
+                        "new start")
     p.add_argument("--last", type=float, default=None,
                    help="only the last this many minutes, the same stretch on every camera; files named by their "
                         "new start")
     args = p.parse_args(argv)
-    if args.last and args.copy:                  # a copied stream starts at a keyframe: seconds off, names wrong
-        p.error("--last cuts frame-exact only when the video is encoded again: leave --copy out")
+    if args.first and args.last:
+        p.error("--first or --last, not both")
+    minutes = args.first or args.last
+    if minutes and args.copy:                    # a copied stream starts at a keyframe: seconds off, names wrong
+        p.error("--first / --last cut frame-exact only when the video is encoded again: leave --copy out")
     if not shutil.which("ffmpeg"):
         sys.exit("ffmpeg is not installed (the Docker image has it; on a server: apt install ffmpeg)")
     src_dir, out_dir = os.path.abspath(args.videos.rstrip("\\")), os.path.abspath(args.out.rstrip("\\"))
@@ -190,12 +203,12 @@ def main(argv=None):
                 dst = os.path.join(out_dir, os.path.relpath(d, src_dir), os.path.splitext(f)[0] + ".mp4")
                 todo.append((src, dst, cam or "all"))
     cuts = {}
-    if args.last and todo:
+    if minutes and todo:
         if not args.cameras:                      # every camera on its own: the id before the date in the name
             todo = [(s, d, re.split(r"[_ .-]", os.path.basename(s))[0]) for s, d, _ in todo]
-        kept, (w0, w1), cover = last_minutes(todo, args.last, {c for _, _, c in todo})
+        kept, (w0, w1), cover = stretch(todo, minutes, first=bool(args.first))
         fmt = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[fix] the last {args.last:g} min: {fmt(w0)} - {fmt(w1)} (the times in the names), the same on every "
+        print(f"[fix] the {'first' if args.first else 'last'} {minutes:g} min: {fmt(w0)} - {fmt(w1)} (the times in the names), the same on every "
               "camera", flush=True)
         for c, secs in sorted(cover.items()):
             print(f"[fix]   {c}: {secs / 60:.1f} min of it" + ("" if secs >= 0.95 * (w1 - w0) else
