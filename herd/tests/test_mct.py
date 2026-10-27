@@ -748,6 +748,13 @@ def test_trial_scored_against_your_ids():
         data = json.loads(html.split("const DATA = ", 1)[1].split(";\n", 1)[0])
         assert [x["id"] for x in data["cards"][0]["ids"]] == ["4", "7"] and len(data["labels"]["frames"]) == 5
         assert all(os.path.exists(os.path.join(d, c["src"])) for x in data["cards"][0]["ids"] for c in x["crops"])
+        # every moment box by box: the frames read where they are, the one outside the mask kept (not scored)
+        page = open(sc["boxes_page"], encoding="utf-8").read()
+        bd = json.loads(page.split("const DATA = ", 1)[1].split(";\n", 1)[0])
+        assert len(bd["frames"]) == 4 and bd["mapping"] == sc["all"]["mapping"]
+        f0 = bd["frames"][0]
+        assert os.path.exists(os.path.join(d, f0["src"])) and [b[5] for b in f0["mine"]] == [True, True, False]
+        assert sorted(map(tuple, f0["hit"])) == [(0, 0), (1, 1)]
 
 
 def test_trial_cross_camera_and_overlap():

@@ -379,6 +379,15 @@ The second scores a rehearsal already made. The log and `trial/score.json` give:
 Only the boxes a camera counts (its mask) are scored. Use the labels.json with the ids as the gallery
 page saved them (the same cow one id on every camera).
 
+**Box by box, every camera at once:** `trial/boxes.html` (written with the score; `--score-only` writes
+it again for a trial already made). Each labelled moment shows its cameras side by side, your boxes
+with your ids and the cow the system gave each: green the right cow, red another, orange not found,
+violet found without a cow, grey dotted its boxes you did not name, dashed outside the camera's mask (not
+scored). ←/→ go through the moments, E keeps only those with a mistake, the cameras switch on and off,
+and "your cow" keeps the moments with her. Click a box: it large, and that cow of yours (or its cow) as
+crops from every camera and moment, the other side's name under each; a crop takes you to its moment. The
+frames are read from `boxes/frames/` where they are, so open the page on the computer that has them.
+
 **Does one cow get one id on two cameras?** The score says it for every cow of yours it scored on two
 cameras: the same cow of its on all of them or not (and at one moment on two cameras, how often the same).
 With masks that share no floor your cows are rarely scored on two cameras. `--overlap` is an experiment

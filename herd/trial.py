@@ -143,7 +143,6 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     import report
     from box_dataset import read_labels
     from common import in_zone
-    from scipy.optimize import linear_sum_assignment
     from store import Store
     store = Store(store_path)
     tm = report.track_map(store)
@@ -155,15 +154,16 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     co, cam_co = collections.Counter(), collections.defaultdict(collections.Counter)
     n = collections.Counter()                      # (cam, what) -> boxes
     seen_as = collections.defaultdict(list)        # your id -> [(cam, ts, its cow)]: one cow on two cameras
+    view = []                                      # every frame played: your boxes and its, for boxes.html
     for file, lab in labels.items():
         f = frames.get(file)
         if lab.get("status") != "done" or not f or f["cam"] not in cams:
             continue
         f = dict(f, ts=f["ts"] + shift)
         cam = f["cam"]
-        truth = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
+        named = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
                  and str(b[4]).strip().lower() != "x"]
-        truth = [t for t in truth if in_zone(t[0], cams[cam], f.get("w", 1920), f.get("h", 1080))]
+        truth = [t for t in named if in_zone(t[0], cams[cam], f.get("w", 1920), f.get("h", 1080))]
         rows = store.query("SELECT track, ts, x1, y1, x2, y2 FROM seconds WHERE cam = ? AND ts BETWEEN ? AND ?",
                            (cam, f["ts"] - max_dt, f["ts"] + max_dt))
         if not rows:
@@ -172,14 +172,13 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         n[(cam, "frames")] += 1
         sec = min({r[1] for r in rows}, key=lambda t: abs(t - f["ts"]))
         pred = [(list(r[2:6]), tm.get(r[0])) for r in rows if r[1] == sec]
+        view.append({"cam": cam, "ts": f["ts"], "file": file, "w": f.get("w", 1920), "h": f.get("h", 1080),
+                     "mine": [[*map(float, b), i, (b, i) in truth] for b, i in named],   # [.., scored: in its mask]
+                     "its": [[*map(float, r[2:6]), tm.get(r[0]), r[0]] for r in rows if r[1] == sec],
+                     "hit": match([b for b, _ in named], [b for b, _ in pred], min_iou)})
         n[(cam, "your_boxes")] += len(truth)
         n[(cam, "its_named_boxes")] += sum(1 for _, cow in pred if cow)
-        if truth and pred:
-            M = np.array([[iou(t[0], q[0]) for q in pred] for t in truth])
-            r, c = linear_sum_assignment(-M)
-            hit = [(i, j) for i, j in zip(r, c) if M[i, j] >= min_iou]
-        else:
-            hit = []
+        hit = match([b for b, _ in truth], [b for b, _ in pred], min_iou)
         n[(cam, "found")] += len(hit)
         n[(cam, "found_with_a_cow")] += sum(1 for _, j in hit if pred[j][1])
         for i, j in hit:
@@ -210,7 +209,33 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     out["clock_shift_s"] = shift
     if page_dir and out["merged"]:
         out["same_cow_page"] = same_cow_page(page_dir, boxes_dir, labels, frames, out["merged"])
+    if page_dir and view:
+        out["boxes_page"] = boxes_page(page_dir, boxes_dir, view, out["all"]["mapping"],
+                                       cfg["farm"].get("timezone_offset_hours", 0))
     return out
+
+
+def match(mine, its, min_iou):
+    """Your boxes against its at one moment, one to one by overlap -> [(your index, its index)]."""
+    from scipy.optimize import linear_sum_assignment
+    if not mine or not its:
+        return []
+    M = np.array([[iou(a, b) for b in its] for a in mine])
+    r, c = linear_sum_assignment(-M)
+    return [(int(i), int(j)) for i, j in zip(r, c) if M[i, j] >= min_iou]
+
+
+def boxes_page(out, boxes_dir, view, mapping, tz_hours=0):
+    """OUT/boxes.html: every labelled moment with all its cameras side by side - your boxes with your ids and
+    the cow the system gave each (right / another cow / not found / no cow) - and any box, or any cow of
+    yours, as crops from every camera and moment. The frames are read where they are (boxes/frames/...)."""
+    rel = lambda file: os.path.relpath(os.path.join(boxes_dir, file), out).replace(os.sep, "/")
+    frames = [dict(v, src=rel(v["file"])) for v in sorted(view, key=lambda v: (v["ts"], v["cam"]))]
+    data = {"frames": frames, "mapping": mapping, "tz": tz_hours}
+    path = os.path.join(out, "boxes.html")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(BOXES_PAGE.replace("__DATA__", json.dumps(data).replace("</", "<\\/")))
+    return path
 
 
 def cross_camera(seen_as, min_boxes=3, at_once_s=1.0):
@@ -432,9 +457,237 @@ def print_score(sc):
               "masks share it)")
     print(f"  its cows: {sc['its_cows']} for your {sc['your_cows']}; one of its cows on several of yours (merged): "
           f"{len(sc['merged'])}; one of yours under several of its (split): {len(sc['split'])}")
+    if sc.get("boxes_page"):
+        print(f"  every moment, all cameras, box by box: {sc['boxes_page']}")
     if sc.get("same_cow_page"):
         print(f"  one cow two names? {sc['same_cow_page']} - your names side by side: say which are one cow, save "
               "labels.json, score again with it")
+
+
+BOXES_PAGE = r"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boxes, every camera</title>
+<style>
+:root { --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --line: #d9d9d4; --card: #fff; --accent: #c2410c;
+  --right: #15803d; --wrong: #dc2626; --missed: #d97706; --nocow: #7c3aed; --extra: #64748b; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #34342f;
+  --card: #1f1f1d; --accent: #fb923c; --right: #4ade80; --wrong: #f87171; --missed: #fbbf24; --nocow: #a78bfa;
+  --extra: #94a3b8; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line);
+  padding: 8px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 16px; margin: 0 6px 0 0; }
+button, select { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card); color: var(--fg); cursor: pointer; }
+button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+#when { min-width: 150px; text-align: center; font-variant-numeric: tabular-nums; }
+.legend { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 12px; padding: 6px 16px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+#grid { display: grid; gap: 10px; padding: 10px 16px; grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); }
+@media (max-width: 760px) { #grid { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.ph { padding: 4px 8px; display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+.ph b { color: var(--fg); }
+.frame { position: relative; background: var(--line); }
+.frame img { display: block; width: 100%; height: 100%; object-fit: fill; }
+.none { padding: 40px 10px; text-align: center; color: var(--muted); }
+.box { position: absolute; border: 2px solid var(--c); border-radius: 2px; cursor: pointer; }
+.box.out { border-style: dashed; opacity: .55; }
+.box.dim { opacity: .18; }
+.box.sel { box-shadow: 0 0 0 3px var(--fg); z-index: 3; }
+.box span { position: absolute; left: -2px; top: -18px; white-space: nowrap; background: var(--c); color: var(--bg);
+  font-size: 11px; line-height: 16px; padding: 0 4px; border-radius: 3px; }
+.box.extra span { top: auto; bottom: -18px; }
+.right { --c: var(--right); } .wrong { --c: var(--wrong); } .missed { --c: var(--missed); }
+.nocow { --c: var(--nocow); } .extra { --c: var(--extra); border-width: 1px; border-style: dotted; }
+#insp { margin: 0 16px 24px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+#insp:empty { display: none; }
+.top { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+.facts { line-height: 1.7; }
+.facts b { font-size: 16px; }
+.facts .note { color: var(--muted); }
+h3 { font-size: 13px; color: var(--muted); font-weight: normal; margin: 12px 0 4px; }
+.strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
+.strip figure { margin: 0; flex: none; text-align: center; font-size: 11px; color: var(--muted); cursor: pointer; }
+.crop { border: 3px solid var(--c, var(--line)); border-radius: 4px; background-color: var(--line);
+  background-repeat: no-repeat; }
+.strip figure.here .crop { outline: 2px solid var(--fg); outline-offset: 1px; }
+.cam { font-weight: 600; color: var(--fg); font-size: 12px; margin-top: 4px; }
+</style></head><body>
+<header><h1>Boxes</h1>
+  <button id="prev" title="Left arrow">&#9664;</button><span id="when"></span><button id="next" title="Right arrow">&#9654;</button>
+  <span id="cams"></span>
+  <select id="cow"><option value="">all your cows</option></select>
+  <label><input type="checkbox" id="errs"> moments with a mistake (E)</label>
+  <label><input type="checkbox" id="extra" checked> its boxes you did not name</label>
+</header>
+<div class="legend">
+  <span><i style="background:var(--right)"></i>the right cow</span><span><i style="background:var(--wrong)"></i>another cow</span>
+  <span><i style="background:var(--missed)"></i>not found</span><span><i style="background:var(--nocow)"></i>found, no cow</span>
+  <span><i style="background:var(--extra)"></i>its box, not yours</span><span>dashed: outside this camera's mask (not scored)</span>
+  <span>Click a box: it from every camera and moment.</span>
+</div>
+<div id="grid"></div>
+<section id="insp"></section>
+<script>
+const DATA = __DATA__;
+const F = DATA.frames, MAP = DATA.mapping;
+const CAMS = [...new Set(F.map(f => f.cam))].sort();
+const moments = [];                                  // frames of the cameras within 1.5 s: one moment
+F.forEach((f, i) => {
+  const last = moments[moments.length - 1];
+  if (last && f.ts - last.ts <= 1.5 && !(f.cam in last.at)) last.at[f.cam] = i;
+  else moments.push({ ts: f.ts, at: { [f.cam]: i } });
+});
+const hitOf = f => { const m = {}, t = {}; f.hit.forEach(([i, j]) => { m[i] = j; t[j] = i; }); return [m, t]; };
+function status(f, k) {                              // your box k of frame f
+  const [m] = hitOf(f), j = m[k], id = f.mine[k][4];
+  if (j === undefined) return "missed";
+  const c = f.its[j][4];
+  if (!c) return "nocow";
+  return c === MAP[id] ? "right" : "wrong";
+}
+const pad = n => String(n).padStart(2, "0");
+function clock(ts) {
+  const d = new Date((ts + DATA.tz * 3600) * 1000);
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+let shown = new Set(CAMS), cow = "", errs = false, extra = true, sel = null, m = 0;
+try { const s = JSON.parse(localStorage.getItem("boxes-cams") || "null"); if (s) shown = new Set(s.filter(c => CAMS.includes(c))); } catch (e) {}
+if (!shown.size) shown = new Set(CAMS);
+const save = () => { try { localStorage.setItem("boxes-cams", JSON.stringify([...shown])); } catch (e) {} };
+const ids = [...new Set(F.flatMap(f => f.mine.map(b => b[4])))].sort((a, b) => (+a - +b) || a.localeCompare(b));
+const sel_ = document.getElementById("cow");
+ids.forEach(i => sel_.insertAdjacentHTML("beforeend", `<option value="${i}">your cow ${i}${MAP[i] ? " (its " + MAP[i] + ")" : ""}</option>`));
+function wanted(mo) {
+  const fs = Object.entries(mo.at).filter(([c]) => shown.has(c)).map(([, i]) => F[i]);
+  if (cow && !fs.some(f => f.mine.some(b => b[4] === cow))) return false;
+  if (errs && !fs.some(f => f.mine.some((b, k) => b[5] && (!cow || b[4] === cow) && status(f, k) !== "right"))) return false;
+  return fs.length > 0;
+}
+const list = () => moments.map((mo, i) => i).filter(i => wanted(moments[i]));
+function go(d) {
+  const l = list();
+  if (!l.length) return;
+  let p = l.indexOf(m);
+  if (p < 0) p = l.findIndex(i => i > m), p = p < 0 ? l.length - 1 : p, d = 0;
+  m = l[Math.max(0, Math.min(l.length - 1, p + d))];
+  render();
+}
+function crop(f, b, H) {
+  const bw = Math.max(1e-3, b[2] - b[0]), bh = Math.max(1e-3, b[3] - b[1]);
+  let W = H * (bw * f.w) / (bh * f.h);
+  if (W > 2 * H) W = 2 * H;
+  const gw = W / bw, gh = gw * f.h / f.w, h = bh * gh;
+  return `<div class="crop" style="width:${W.toFixed(0)}px;height:${h.toFixed(0)}px;background-image:url('${f.src}');` +
+    `background-size:${gw.toFixed(1)}px ${gh.toFixed(1)}px;background-position:${(-b[0] * gw).toFixed(1)}px ${(-b[1] * gh).toFixed(1)}px"></div>`;
+}
+function boxEl(f, fi, b, kind, k, st) {
+  const [x1, y1, x2, y2] = b;
+  const isSel = sel && sel.fi === fi && sel.kind === kind && sel.k === k;
+  const dim = cow && !(kind === "mine" ? b[4] === cow : false) && !isSel;
+  let lab;
+  if (kind === "mine") {
+    const [mm] = hitOf(f), j = mm[k], c = j === undefined ? null : f.its[j][4];
+    lab = st === "right" ? `${b[4]} = ${c}` : st === "wrong" ? `${b[4]}: ${c}` : st === "missed" ? `${b[4]}: not found` : `${b[4]}: no cow`;
+  } else lab = b[4] || "no cow";
+  return `<div class="box ${st} ${kind === "mine" && !b[5] ? "out" : ""} ${dim ? "dim" : ""} ${isSel ? "sel" : ""}"
+    data-fi="${fi}" data-kind="${kind}" data-k="${k}"
+    style="left:${x1 * 100}%;top:${y1 * 100}%;width:${(x2 - x1) * 100}%;height:${(y2 - y1) * 100}%"><span>${lab}</span></div>`;
+}
+function render() {
+  const mo = moments[m];
+  document.getElementById("when").textContent = mo ? `${clock(mo.ts)}  (${list().indexOf(m) + 1}/${list().length})` : "";
+  const cams = CAMS.filter(c => shown.has(c));
+  const grid = document.getElementById("grid");
+  grid.style.setProperty("--cols", cams.length > 2 ? 2 : cams.length);
+  grid.innerHTML = cams.map(c => {
+    const fi = mo ? mo.at[c] : undefined;
+    if (fi === undefined) return `<div class="panel"><div class="ph"><b>${c}</b></div><div class="none">no labelled frame at this moment</div></div>`;
+    const f = F[fi], [, taken] = hitOf(f);
+    let html = f.mine.map((b, k) => boxEl(f, fi, b, "mine", k, status(f, k))).join("");
+    if (extra) html += f.its.map((b, j) => taken[j] === undefined ? boxEl(f, fi, b, "its", j, "extra") : "").join("");
+    const bad = f.mine.filter((b, k) => b[5] && status(f, k) !== "right").length;
+    return `<div class="panel"><div class="ph"><b>${c}</b><span>${clock(f.ts)} · ${f.mine.length} yours, ${bad} not right · ${f.file}</span></div>
+      <div class="frame" style="aspect-ratio:${f.w}/${f.h}"><img src="${f.src}" alt="${c}" onerror="this.style.visibility='hidden'">${html}</div></div>`;
+  }).join("");
+  document.getElementById("cams").innerHTML = CAMS.map(c => `<button data-cam="${c}" class="${shown.has(c) ? "on" : ""}">${c}</button>`).join(" ");
+  inspect();
+}
+function strip(items, H) {
+  const by = {};
+  items.forEach(x => (by[x.f.cam] = by[x.f.cam] || []).push(x));
+  return Object.keys(by).sort().map(c => `<div class="cam">${c} · ${by[c].length}</div><div class="strip">` +
+    by[c].map(x => `<figure class="${x.here ? "here" : ""} ${x.st}" data-fi="${x.fi}" data-kind="${x.kind}" data-k="${x.k}">` +
+      `${crop(x.f, x.b, H)}<figcaption>${clock(x.f.ts)}<br>${x.cap}</figcaption></figure>`).join("") + `</div>`).join("");
+}
+function inspect() {
+  const box = document.getElementById("insp");
+  if (!sel) { box.innerHTML = ""; return; }
+  const f = F[sel.fi], b = (sel.kind === "mine" ? f.mine : f.its)[sel.k];
+  if (!b) { box.innerHTML = ""; return; }
+  let facts, items = [], title;
+  if (sel.kind === "mine") {
+    const st = status(f, sel.k), [mm] = hitOf(f), j = mm[sel.k], c = j === undefined ? null : f.its[j][4];
+    const words = { right: "the right cow", wrong: "another cow", missed: "not found", nocow: "found, no cow" }[st];
+    facts = `<b>your ${b[4]}</b> → its <b>${c || "—"}</b> <span class="${st}" style="color:var(--c)">${words}</span><br>
+      ${MAP[b[4]] ? `<span class="note">your ${b[4]} is its ${MAP[b[4]]} overall</span><br>` : ""}
+      ${f.cam} · ${clock(f.ts)}${j !== undefined ? ` · track ${f.its[j][5]}` : ""}${b[5] ? "" : `<br><span class="note">outside ${f.cam}'s mask: not scored</span>`}`;
+    title = `Your cow ${b[4]}, every camera and moment (its cow under each)`;
+    F.forEach((g, fi) => g.mine.forEach((x, k) => {
+      if (x[4] !== b[4]) return;
+      const s = status(g, k), [gm] = hitOf(g), gj = gm[k];
+      items.push({ f: g, fi, b: x, kind: "mine", k, st: s, here: fi === sel.fi && k === sel.k,
+                   cap: gj === undefined ? "not found" : (g.its[gj][4] || "no cow") });
+    }));
+  } else {
+    facts = `<b>its ${b[4] || "box without a cow"}</b> <span class="note">(no box of yours here)</span><br>${f.cam} · ${clock(f.ts)} · track ${b[5]}`;
+    title = b[4] ? `Its cow ${b[4]}, every camera and moment (your name under each)` : "";
+    if (b[4]) F.forEach((g, fi) => { const [, gt] = hitOf(g); g.its.forEach((x, j) => {
+      if (x[4] !== b[4]) return;
+      const yk = gt[j];
+      items.push({ f: g, fi, b: x, kind: yk === undefined ? "its" : "mine", k: yk === undefined ? j : yk,
+                   st: yk === undefined ? "extra" : status(g, yk), here: fi === sel.fi && j === sel.k,
+                   cap: yk === undefined ? "not yours" : "your " + g.mine[yk][4] });
+    }); });
+  }
+  box.innerHTML = `<div class="top">${crop(f, b, 220)}<div class="facts">${facts}</div></div>` +
+    (title ? `<h3>${title}</h3>` + strip(items, 110) : "");
+}
+document.addEventListener("click", e => {
+  const t = e.target.closest("[data-fi]");
+  if (t) {
+    sel = { fi: +t.dataset.fi, kind: t.dataset.kind, k: +t.dataset.k };
+    const mi = moments.findIndex(mo => Object.values(mo.at).includes(sel.fi));
+    if (mi >= 0) m = mi;
+    if (!shown.has(F[sel.fi].cam)) { shown.add(F[sel.fi].cam); save(); }
+    render();
+    return;
+  }
+  const c = e.target.closest("[data-cam]");
+  if (c) {
+    shown.has(c.dataset.cam) ? shown.delete(c.dataset.cam) : shown.add(c.dataset.cam);
+    if (!shown.size) shown.add(c.dataset.cam);
+    save(); render();
+  }
+});
+document.getElementById("prev").onclick = () => go(-1);
+document.getElementById("next").onclick = () => go(1);
+sel_.onchange = () => { cow = sel_.value; sel = null; go(0); };
+document.getElementById("errs").onchange = e => { errs = e.target.checked; go(0); };
+document.getElementById("extra").onchange = e => { extra = e.target.checked; render(); };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key === "ArrowLeft") go(-1);
+  else if (e.key === "ArrowRight") go(1);
+  else if (e.key === "Escape") { sel = null; render(); }
+  else if (e.key === "e" || e.key === "E") { const x = document.getElementById("errs"); x.checked = !x.checked; errs = x.checked; go(0); }
+});
+render();
+</script></body></html>
+"""
 
 
 def overlap(cfg):
