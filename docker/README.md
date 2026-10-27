@@ -379,6 +379,21 @@ The second scores a rehearsal already made. The log and `trial/score.json` give:
 Only the boxes a camera counts (its mask) are scored. Use the labels.json with the ids as the gallery
 page saved them (the same cow one id on every camera).
 
+**Which cow on the neighbour camera is she, by where she stands** (`crosscam`). The cameras do not move,
+so what surrounds a cow in one frame says where on the floor she is; your labels (one cow, one id on
+every camera) show where that place is in the neighbour's frame. It learns that mapping from them -
+nothing measured - and checks it honestly: each labelled moment is left out, the mapping fitted on the
+rest, and that moment's cows put onto the other camera and matched by distance:
+
+```bash
+docker compose run --rm herd crosscam --config /data/barn.toml --boxes /data/boxes --labels /data/labels.json
+```
+
+Per pair of neighbours: the right cow how often (beside a guess), from the boxes' bottom centres and from
+their centres, the cows it missed, and `boxes/crosscam.json`. `--apply`, when one of the two is
+calibrated and the other not: the other gets floor_points on its floor (barn.toml.bak kept), so
+`[mct] link` joins the two cameras' tracks by it.
+
 **Box by box, every camera at once:** `trial/boxes.html` (written with the score; `--score-only` writes
 it again for a trial already made). Each labelled moment shows its cameras side by side, your boxes
 with your ids and the cow the system gave each: green the right cow, red another, orange not found,

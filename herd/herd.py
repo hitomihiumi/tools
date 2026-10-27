@@ -38,6 +38,8 @@ A dress rehearsal on recordings (two passes: the gallery fills, then who is who,
     herd.py trial --config barn.toml --videos DIR --out D [--boxes B --labels L]   (L: your ids -> IDF1)
 Cameras sharing floor calibrated by the cows moving in both (nothing measured; then [mct] link):
     herd.py autocalib --config barn.toml --store D/pass2/herd.sqlite --videos DIR --out C [--apply]
+    herd.py crosscam --config barn.toml --boxes B --labels L [--apply]   (which cow on the neighbour camera,
+        by where she stands: learnt from your ids, checked moment by moment)
 The models on the barn's own labels (nothing trained on them):
     herd.py check --config barn.toml [--det herd_det_barn_X.tgz] [--ids herd_barn_ids_X.tgz]
 Cow boxes on the barn's cameras (detector training):
@@ -138,6 +140,9 @@ def main():
     if cmd == "trial":
         import trial
         return trial.main(argv)
+    if cmd == "crosscam":
+        import crosscam
+        return crosscam.main(argv)
     if cmd == "check":
         import check
         return check.main(argv)
