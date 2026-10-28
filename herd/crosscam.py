@@ -94,6 +94,21 @@ def apply_h(H, pts):
     return p[:, :2] / w[:, None]
 
 
+def sym(H, A, B):
+    """Each pair's miss, half on each camera's picture: a cow far from one camera is small on its picture and
+    large on the other's, so a miss counted on one picture alone weighs her by where she happens to lie."""
+    Hi = np.linalg.inv(H)
+    return 0.5 * (np.hypot(*(apply_h(H, A) - B).T) + np.hypot(*(apply_h(Hi, B) - A).T))
+
+
+def sym_matrix(H, A, B):
+    """Every a against every b: the half-and-half miss."""
+    Hi = np.linalg.inv(H)
+    P, Q = apply_h(H, A), apply_h(Hi, B)
+    return 0.5 * (np.hypot(P[:, None, 0] - B[None, :, 0], P[:, None, 1] - B[None, :, 1]) +
+                  np.hypot(A[:, None, 0] - Q[None, :, 0], A[:, None, 1] - Q[None, :, 1]))
+
+
 def ransac(src, dst, rng, iters=1000, thr=RANSAC_THR):
     """H (src -> dst) from the pairs most of which agree, refitted on them -> (H, inliers) or (None, None)."""
     src, dst = np.asarray(src, float), np.asarray(dst, float)
@@ -107,18 +122,64 @@ def ransac(src, dst, rng, iters=1000, thr=RANSAC_THR):
             H = homography(src[s], dst[s])
         except np.linalg.LinAlgError:
             continue
-        if not np.all(np.isfinite(H)):
+        if not np.all(np.isfinite(H)) or abs(np.linalg.det(H)) < 1e-12:
             continue
-        inl = np.hypot(*(apply_h(H, src) - dst).T) < thr
+        inl = sym(H, src, dst) < thr
         if best is None or inl.sum() > best.sum():
             best = inl
     if best is None or best.sum() < MIN_PAIRS:
         return None, None
     H = homography(src[best], dst[best])
-    inl = np.hypot(*(apply_h(H, src) - dst).T) < thr
+    inl = sym(H, src, dst) < thr
     if inl.sum() >= MIN_PAIRS:
         H = homography(src[inl], dst[inl])
     return H, inl
+
+
+def fit_planes(src, dst, rng, most=3, iters=1000):
+    """Up to `most` mappings, each the one most of the pairs left agree on (the bedding and the alley lie at
+    other heights; a lens's bend the one plane cannot follow) -> {"Hs", "src", "lab"}: each pair's plane by
+    its least miss (-1: none), what knn() reads a new point's plane from - the planes of the pairs nearest
+    it on the first camera."""
+    src, dst = np.asarray(src, float), np.asarray(dst, float)
+    left, Hs = np.arange(len(src)), []
+    while len(Hs) < most and len(left) >= MIN_PAIRS * 2:
+        H, inl = ransac(src[left], dst[left], rng, iters=iters)
+        if H is None or inl.sum() < max(MIN_PAIRS * 2, 0.1 * len(src)):
+            break
+        Hs.append(H)
+        left = left[~inl]
+    if not Hs:
+        return None
+    E = np.stack([sym(H, src, dst) for H in Hs], 1)
+    lab = np.where(E.min(1) < RANSAC_THR, E.argmin(1), -1)
+    return {"Hs": Hs, "src": src, "lab": lab}
+
+
+def knn(model, A, k=7):
+    """The plane of each point of the first camera: most of its k nearest pairs' (one plane: 0)."""
+    if len(model["Hs"]) == 1:
+        return np.zeros(len(A), int)
+    S, lab = model["src"][model["lab"] >= 0], model["lab"][model["lab"] >= 0]
+    out = []
+    for a in np.asarray(A, float):
+        near = lab[np.argsort(np.hypot(*(S - a).T))[:k]]
+        out.append(np.bincount(near, minlength=len(model["Hs"])).argmax() if len(near) else 0)
+    return np.asarray(out, int)
+
+
+def fit_model(src, dst, rng, planes=1, iters=1000):
+    if planes == 1:
+        H, inl = ransac(src, dst, rng, iters=iters)
+        return None if H is None else {"Hs": [H], "src": np.asarray(src, float), "lab": np.zeros(len(src), int)}
+    return fit_planes(src, dst, rng, planes, iters)
+
+
+def costs(model, A, B):
+    """Every a against every b, each a by its own plane's mapping."""
+    A, B = np.asarray(A, float), np.asarray(B, float)
+    pl = knn(model, A)
+    return np.stack([sym_matrix(model["Hs"][p], A[i:i + 1], B)[0] for i, p in enumerate(pl)])
 
 
 def fit_lens(mos, cam_a, cam_b, where, keep=(), iters=300):
@@ -137,7 +198,7 @@ def fit_lens(mos, cam_a, cam_b, where, keep=(), iters=300):
             H, inl = ransac(src, dst, rng, iters=iters)
             if H is None:
                 continue
-            e = np.hypot(*(apply_h(H, src) - np.asarray(dst)).T)
+            e = sym(H, np.asarray(src, float), np.asarray(dst, float))
             cost = float(np.minimum(e, RANSAC_THR) ** 2 @ np.ones(len(e))) / len(e)    # truncated: far pairs cap
             score = (-round(cost, 7), ka == ka0 and kb == kb0)
             if best is None or score > best[0]:
@@ -147,7 +208,7 @@ def fit_lens(mos, cam_a, cam_b, where, keep=(), iters=300):
     return best[1], best[2], best[3]
 
 
-def check(mos, cam_a, cam_b, where, seed=0, gate=GATE):
+def check(mos, cam_a, cam_b, where, seed=0, gate=GATE, planes=1):
     """Each moment matched by the mapping fitted without it -> the counts and the misses by distance."""
     from scipy.optimize import linear_sum_assignment
     per = [pairs_of(mo, cam_a, cam_b, where) for mo in mos]
@@ -157,16 +218,15 @@ def check(mos, cam_a, cam_b, where, seed=0, gate=GATE):
     for k, mo in enumerate(mos):
         src = [p for j, (pa, _) in enumerate(per) if j != k for p in pa]
         dst = [p for j, (_, pb) in enumerate(per) if j != k for p in pb]
-        H, _ = ransac(src, dst, random.Random(seed + k))
-        if H is None:
+        model = fit_model(src, dst, random.Random(seed + k), planes, iters=500)
+        if model is None:
             n["not_fitted"] += 1
             continue
         A = [point(box, cam_a, w, h, where) for _, box, w, h in mo["a"]]
         B = [point(box, cam_b, w, h, where) for _, box, w, h in mo["b"]]
         if not A or not B:
             continue
-        P = apply_h(H, A)
-        D = np.hypot(P[:, None, 0] - np.asarray(B)[None, :, 0], P[:, None, 1] - np.asarray(B)[None, :, 1])
+        D = costs(model, A, B)
         r, c = linear_sum_assignment(D)
         got = {i: j for i, j in zip(r, c) if D[i, j] <= gate}
         idb = [i for i, _, _, _ in mo["b"]]
@@ -189,7 +249,7 @@ def check(mos, cam_a, cam_b, where, seed=0, gate=GATE):
             "lands_on": {c: dict(v.most_common(3)) for c, v in sorted(lands.items())}}
 
 
-def picture(path, boxes_dir, mos, cam_a, cam_b, H, where):
+def picture(path, boxes_dir, mos, cam_a, cam_b, model, where):
     """Side by side: the first camera's frame with your cows' points, the second's with where the mapping put
     each (hollow) and where you named her (filled), joined by a line - green near, orange, red far."""
     from PIL import Image, ImageDraw
@@ -222,7 +282,8 @@ def picture(path, boxes_dir, mos, cam_a, cam_b, H, where):
             continue
         ib = {i for i, _, _, _ in mo["b"]}
         ids = [i for i, _, _, _ in mo["a"] if i in ib]             # pairs_of's order
-        P = apply_h(H, pa)
+        pl = knn(model, pa)
+        P = np.stack([apply_h(model["Hs"][p], [q])[0] for p, q in zip(pl, pa)])
         for cid, qa, qp, qb in zip(ids, pa, P, pb):
             e = float(np.hypot(*(qp - np.asarray(qb))))
             col = (60, 200, 90) if e < 0.03 else (240, 160, 40) if e < 0.08 else (230, 60, 60)
@@ -284,6 +345,8 @@ def main(argv=None):
                    help="the uncalibrated camera of each pair onto the calibrated one's floor in barn.toml")
     p.add_argument("--gate", type=float, default=GATE,
                    help="a cow put further than this (frame heights) from every box of the other camera matches none")
+    p.add_argument("--planes", type=int, default=3,
+                   help="also try this many floor planes, each pair on the one it fits (1: one plane only)")
     p.add_argument("--onto", default=None,
                    help="with --apply, both of a pair calibrated: the camera the other is put onto (its own "
                         "floor_points replaced)")
@@ -316,6 +379,12 @@ def main(argv=None):
             H, inl = ransac(src, dst, random.Random(0))
             r[where] = dict(check(mos, ca, cb, where, gate=args.gate), inliers=int(inl.sum()) if inl is not None else 0,
                             H=H.tolist() if H is not None else None, lens={a: ka, b: kb})
+            many = fit_planes(src, dst, random.Random(0), args.planes)
+            if args.planes > 1 and many is not None and len(many["Hs"]) > 1:
+                r[where + "_planes"] = dict(check(mos, ca, cb, where, gate=args.gate, planes=args.planes),
+                                            planes=len(many["Hs"]), Hs=[h.tolist() for h in many["Hs"]],
+                                            share=[float(np.mean(many["lab"] == i)) for i in range(len(many["Hs"]))])
+                fitted[where + "_planes"] = (ca, cb, many)
         best = max(("bottom", "centre"), key=lambda w: r[w]["right"])
         r["best"] = best
         report[f"{a}->{b}"] = r
@@ -326,11 +395,16 @@ def main(argv=None):
             if not y["cows"]:
                 print(f"  {where:6}: no mapping")
                 continue
+            z = r.get(where + "_planes")
             ls = ", ".join(f"{c} {y['lens'][c]:g}" + ("" if y["lens"][c] == k0[c] else f" (config {k0[c]:g})")
                            for c in (a, b))
             print(f"  {where:6}: the right cow {y['right'] / y['cows']:.0%} (another {y['wrong'] / y['cows']:.0%}, none near "
                   f"{y['none'] / y['cows']:.0%}) of {y['cows']}, a guess {y['chance']:.0%}; median miss "
                   f"{y['median_miss']:.1%} of the frame height; {y['inliers']} of {npairs} pairs agree; lens {ls}")
+            if z and z["cows"]:
+                print(f"  {'':6}  in {z['planes']} planes (" + ", ".join(f"{x:.0%}" for x in z["share"]) +
+                      f" of the pairs): the right cow {z['right'] / z['cows']:.0%} (another {z['wrong'] / z['cows']:.0%}, "
+                      f"none near {z['none'] / z['cows']:.0%})")
         bad = [(c, v) for c, v in x["by_cow"].items() if v.get("right", 0) < sum(v.values())]
         if bad:
             print("  cows it missed (" + best + "): " + ", ".join(
@@ -344,8 +418,12 @@ def main(argv=None):
         out_dir = args.out or os.path.dirname(os.path.abspath(os.path.join(args.boxes, "frames.json")))
         os.makedirs(out_dir, exist_ok=True)
         if x.get("H"):
-            pic = picture(os.path.join(out_dir, f"crosscam_{a}_{b}.jpg"), args.boxes, mos, *fitted[best],
-                          np.asarray(x["H"]), best)
+            many = r.get(best + "_planes")
+            if many and many["right"] > x["right"]:                # the picture of the better of the two
+                ca, cb, model = fitted[best + "_planes"]
+            else:
+                (ca, cb), model = fitted[best], {"Hs": [np.asarray(x["H"])]}
+            pic = picture(os.path.join(out_dir, f"crosscam_{a}_{b}.jpg"), args.boxes, mos, ca, cb, model, best)
             print(f"  where each was put: {pic}")
         if args.apply:
             fa, fb = bool(cams[a].get("floor_points")), bool(cams[b].get("floor_points"))

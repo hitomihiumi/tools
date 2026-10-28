@@ -9,7 +9,7 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 
-def _scene(d, n_cows=14, n_moments=24, noise=0.004, seed=1, k2=0.0):
+def _scene(d, n_cows=14, n_moments=24, noise=0.004, seed=1, k2=0.0, alley=False):
     """Two cameras over one 20 x 10 m floor, facing each other; lying cows that mostly stay, a few that
     walk; your ids on both cameras' frames at the same moments. k2: cam2's lens bends (the config says 0)."""
     from autocalib import distort
@@ -32,7 +32,7 @@ def _scene(d, n_cows=14, n_moments=24, noise=0.004, seed=1, k2=0.0):
             file = f"frames/{cam}/{m}.jpg"
             boxes = []
             for i, (X, Y) in enumerate(pos):
-                u, v = proj(H, X, Y)
+                u, v = proj(H, X, Y + (500 if alley and cam == "cam2" and X > 1100 else 0))   # another level
                 if cam == "cam2" and k2:
                     u, v = (float(x) for x in distort(u, v, k2, 1920 / 1080))
                 u, v = u + rng.normal(0, noise), v + rng.normal(0, noise)
@@ -107,6 +107,20 @@ def test_crosscam_finds_the_lens_and_names_swapped_between_cameras(capsys):
         err = [np.hypot(*(np.array(f(bx[:4])) - pos[int(bx[4]) - 1])) for bx in lab["frames"][last]["boxes"]
                if bx[4] not in ("3", "5")]
         assert np.median(err) < 40, np.median(err)
+
+
+def test_crosscam_two_floor_levels_want_two_planes(capsys):
+    """Half the pen at another level (seen by cam2 shifted): one plane fits one half, two fit both."""
+    import crosscam
+    with tempfile.TemporaryDirectory() as d:
+        _scene(d, n_cows=30, alley=True, seed=3)
+        crosscam.main(["--config", os.path.join(d, "barn.toml"), "--boxes", os.path.join(d, "boxes"),
+                       "--labels", os.path.join(d, "labels.json"), "--planes", "2", "--gate", "0.06"])
+        r = json.load(open(os.path.join(d, "boxes", "crosscam.json")))["cam1->cam2"]
+        one, two = r["bottom"], r["bottom_planes"]
+        assert two["planes"] == 2 and two["right"] / two["cows"] > 0.9, two
+        assert two["right"] > one["right"] + 0.1 * one["cows"], (one, two)
+        assert "in 2 planes" in capsys.readouterr().out
 
 
 def test_crosscam_onto_a_camera_when_both_are_calibrated():

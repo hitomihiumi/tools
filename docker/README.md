@@ -404,7 +404,11 @@ Per pair of neighbours: the right cow how often (beside a guess), from the boxes
 their centres, each lens's distortion as the pairs show it (the config's may be off), the cows it missed,
 your cows put again and again where another of yours is (one cow under two names on the two cameras, or
 two names swapped: check them in `ids.html`), `boxes/crosscam_<a>_<b>.jpg` - where each cow was put on
-the second camera against where you named her, the far ones red and named - and `boxes/crosscam.json`. `--apply`, when one of the two is
+the second camera against where you named her, the far ones red and named - and `boxes/crosscam.json`.
+Misses count half on each camera's picture (a cow far from one camera is small on it and large on the
+other's). `--planes 3` (the default) also tries up to three floor planes, each pair on the one it fits
+best - the bedding, the alley and a lens one plane cannot follow - and says how well that matches; `--apply`
+still writes one plane. `--apply`, when one of the two is
 calibrated and the other not: the other gets floor_points on its floor (barn.toml.bak kept), so
 `[mct] link` joins the two cameras' tracks by it. Both calibrated: `--apply --onto cam1` keeps cam1's
 and replaces the other's. It maps by the better of the two points, and writes `floor_at = "centre"`
