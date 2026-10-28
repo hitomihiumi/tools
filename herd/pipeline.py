@@ -928,6 +928,16 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
     shared.save()
     st = dict(getattr(cams[0].glob, "stats", None) or {}) if cams and getattr(cams[0], "glob", None) else {}
     if cfg["mct"].get("enabled") and cfg["mct"].get("mode") == "link":
+        near = list(getattr(getattr(cams[0].glob, "ft", None), "nearest", []) or []) if cams else []
+        if near:
+            q = np.percentile(near, [10, 50, 90])
+            print(f"[run] [mct] two cameras' cows each other's nearest on the floor {len(near)} times: "
+                  f"{q[0]:.0f} / {q[1]:.0f} / {q[2]:.0f} apart (10th / 50th / 90th percentile), "
+                  f"{np.mean(np.asarray(near) <= cfg['mct'].get('link_dist', 120)):.0%} within link_dist "
+                  f"{cfg['mct'].get('link_dist', 120):g}", flush=True)
+        elif cams:
+            print("[run] [mct] two cameras' cows never seen at one second on one floor: no camera pair to join "
+                  "(floor_points on both, [mct] disjoint, tracking_mask)", flush=True)
         print(f"[run] [mct] tracks joined across cameras {st.get('linked', 0)}, taken apart again "
               f"{st.get('unlinked', 0)} (a joined cow counted by both cameras at once for unlink_s: masks that "
               f"overlap?), joins refused {st.get('link_refused', 0)}; seconds two cows were each other's nearest "

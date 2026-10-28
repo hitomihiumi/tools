@@ -721,6 +721,7 @@ class TrackletLinker:
         self.both_counted = collections.Counter()              # (root, track a, track b) -> seconds
         self.never = set()                                     # track pairs that are two cows
         self.warned = set()                                    # places already said (_near_note)
+        self.nearest = collections.deque(maxlen=20000)         # floor distance of each mutual-nearest pair (said)
 
     def _by_look(self, ts, per_cam, ids):
         """Neighbours without a floor mapping: a cow camera x sees beyond its mask against the cows camera y
@@ -919,6 +920,8 @@ class TrackletLinker:
                         continue
                     bx, by = D.argmin(1), D.argmin(0)
                     for x, y in enumerate(bx):
+                        if by[y] == x:
+                            self.nearest.append(float(D[x, y]))
                         if by[y] == x and D[x, y] <= self.dist:
                             if self.margin:
                                 row = np.delete(D[x], y)
