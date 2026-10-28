@@ -9,9 +9,10 @@ import numpy as np
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), ".."))
 
 
-def _scene(d, n_cows=14, n_moments=24, noise=0.004, seed=1):
+def _scene(d, n_cows=14, n_moments=24, noise=0.004, seed=1, k2=0.0):
     """Two cameras over one 20 x 10 m floor, facing each other; lying cows that mostly stay, a few that
-    walk; your ids on both cameras' frames at the same moments."""
+    walk; your ids on both cameras' frames at the same moments. k2: cam2's lens bends (the config says 0)."""
+    from autocalib import distort
     from common import homography
     rng = np.random.default_rng(seed)
     floor = [(0, 0), (2000, 0), (2000, 1000), (0, 1000)]
@@ -32,6 +33,8 @@ def _scene(d, n_cows=14, n_moments=24, noise=0.004, seed=1):
             boxes = []
             for i, (X, Y) in enumerate(pos):
                 u, v = proj(H, X, Y)
+                if cam == "cam2" and k2:
+                    u, v = (float(x) for x in distort(u, v, k2, 1920 / 1080))
                 u, v = u + rng.normal(0, noise), v + rng.normal(0, noise)
                 if 0.02 < u < 0.98 and 0.05 < v < 0.99:
                     boxes.append([u - 0.05, v - 0.12, u + 0.05, v, str(i + 1)])
@@ -70,6 +73,40 @@ def test_crosscam_learns_where_she_stands_and_puts_the_other_camera_on_the_floor
         last = max((k for k in lab if k.startswith("frames/cam2/")), key=lambda k: int(k.split("/")[-1][:-4]))
         err = [np.hypot(*(np.array(f(bx[:4])) - pos[int(bx[4]) - 1])) for bx in lab[last]["boxes"]]
         assert np.median(err) < 40, np.median(err)                     # cm, on a 20 x 10 m floor
+
+
+def test_crosscam_finds_the_lens_and_names_swapped_between_cameras(capsys):
+    """cam2's lens bends more than the config says: found from the pairs; two cows whose names are swapped
+    on cam2 are said; the picture of where each was put is drawn; --apply writes the lens found."""
+    import crosscam
+    from common import floor_mapper, load_config
+    with tempfile.TemporaryDirectory() as d:
+        pos = _scene(d, k2=-0.3)
+        path = os.path.join(d, "labels.json")
+        lab = json.load(open(path))
+        for k, v in lab["frames"].items():
+            if k.startswith("frames/cam2/"):
+                for b in v["boxes"]:
+                    b[4] = {"3": "5", "5": "3"}.get(b[4], b[4])
+        json.dump(lab, open(path, "w"))
+        crosscam.main(["--config", os.path.join(d, "barn.toml"), "--boxes", os.path.join(d, "boxes"),
+                       "--labels", path, "--apply"])
+        out = capsys.readouterr().out
+        r = json.load(open(os.path.join(d, "boxes", "crosscam.json")))["cam1->cam2"]
+        b = r["bottom"]
+        # a homography takes up part of a lens's bend: found near it, not the config's 0
+        assert abs(b["lens"]["cam2"] + 0.3) <= 0.1 + 1e-9 and abs(b["lens"]["cam1"]) <= 0.1 + 1e-9, b["lens"]
+        assert b["right"] / b["cows"] > 0.8, b
+        assert "your 3 on cam2 where your 5 is" in out and "your 5 on cam2 where your 3 is" in out, out
+        assert os.path.exists(os.path.join(d, "boxes", "crosscam_cam1_cam2.jpg"))
+        cfg = load_config(os.path.join(d, "barn.toml"))
+        cam2 = next(c for c in cfg["cameras"] if c["id"] == "cam2")
+        assert abs(cam2["distortion"] + 0.3) <= 0.1 + 1e-9
+        f = floor_mapper(cam2, cfg["mct"])
+        last = max((k for k in lab["frames"] if k.startswith("frames/cam2/")), key=lambda k: int(k.split("/")[-1][:-4]))
+        err = [np.hypot(*(np.array(f(bx[:4])) - pos[int(bx[4]) - 1])) for bx in lab["frames"][last]["boxes"]
+               if bx[4] not in ("3", "5")]
+        assert np.median(err) < 40, np.median(err)
 
 
 def test_crosscam_onto_a_camera_when_both_are_calibrated():

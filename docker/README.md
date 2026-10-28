@@ -401,7 +401,10 @@ docker compose run --rm herd crosscam --config /data/barn.toml --boxes /data/box
 ```
 
 Per pair of neighbours: the right cow how often (beside a guess), from the boxes' bottom centres and from
-their centres, the cows it missed, and `boxes/crosscam.json`. `--apply`, when one of the two is
+their centres, each lens's distortion as the pairs show it (the config's may be off), the cows it missed,
+your cows put again and again where another of yours is (one cow under two names on the two cameras, or
+two names swapped: check them in `ids.html`), `boxes/crosscam_<a>_<b>.jpg` - where each cow was put on
+the second camera against where you named her, the far ones red and named - and `boxes/crosscam.json`. `--apply`, when one of the two is
 calibrated and the other not: the other gets floor_points on its floor (barn.toml.bak kept), so
 `[mct] link` joins the two cameras' tracks by it. Both calibrated: `--apply --onto cam1` keeps cam1's
 and replaces the other's. It maps by the better of the two points, and writes `floor_at = "centre"`
