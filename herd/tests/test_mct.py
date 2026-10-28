@@ -757,6 +757,25 @@ def test_trial_scored_against_your_ids():
         assert sorted(map(tuple, f0["hit"])) == [(0, 0), (1, 1)]
 
 
+def test_trial_says_why_a_track_has_no_cow():
+    import report
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        s = Store(os.path.join(d, "s.sqlite"))
+        s.seconds([("cam1", t, 100.0 + k, 0.1, 0.1, 0.2, 0.2, "lying", "none", 0.9)
+                   for t in ("named", "short", "unsure", "split") for k in range(5)])
+        b = lambda tr, st, cow, ts: s.burst(("cam1", tr, ts, st, cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        for k in range(3):
+            b("named", "confirmed", "P1", 100.0 + k)
+            b("unsure", "tentative", "P2", 100.0 + k)
+        b("split", "confirmed", "P1", 100.0)
+        b("split", "confirmed", "P3", 101.0)
+        why = trial.unnamed(s, report.track_map(s))
+        assert set(why) == {"short", "unsure", "split"}
+        assert "no burst" in why["short"] and "none sure" in why["unsure"] and "split" in why["split"]
+
+
 def test_trial_cross_camera_and_overlap():
     """Your cow on two cameras: the same cow of its on both or not, by cow and by moment; --overlap grows each
     mask to its tracking_mask and turns off the two rules that make two cameras' counts two cows."""

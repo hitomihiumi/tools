@@ -418,7 +418,7 @@ the frame height): how far from every box of the other camera a cow may land and
 **Box by box, every camera at once:** `trial/boxes.html` (written with the score; `--score-only` writes
 it again for a trial already made). Each labelled moment shows its cameras side by side, your boxes
 with your ids and the cow the system gave each: green the right cow, red another, orange not found,
-violet found without a cow, grey dotted its boxes you did not name, dashed outside the camera's mask (not
+violet found but given no name (a click says why: no burst on that short track, none sure enough, or split between cows), grey dotted its boxes you did not name, dashed outside the camera's mask (not
 scored). ←/→ go through the moments, E keeps only those with a mistake, the cameras switch on and off,
 and "your cow" keeps the moments with her. Click a box: its whole frame large with the box marked (the
 rest darker), and that cow of yours (or its cow) in every camera's frames at every moment, the box marked

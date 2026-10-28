@@ -211,7 +211,31 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         out["same_cow_page"] = same_cow_page(page_dir, boxes_dir, labels, frames, out["merged"])
     if page_dir and view:
         out["boxes_page"] = boxes_page(page_dir, boxes_dir, view, out["all"]["mapping"],
-                                       cfg["farm"].get("timezone_offset_hours", 0))
+                                       cfg["farm"].get("timezone_offset_hours", 0), unnamed(store, tm))
+    return out
+
+
+def unnamed(store, tm):
+    """Why a track has no cow: {track: words} for every track report.track_map left without one."""
+    secs = dict(store.query("SELECT track, COUNT(*) FROM seconds GROUP BY track"))
+    states, cows = collections.defaultdict(collections.Counter), collections.defaultdict(collections.Counter)
+    for t, st, cow in store.query("SELECT track, state, cow FROM bursts"):
+        states[t][st] += 1
+        if st == "confirmed":
+            cows[t][cow] += 1
+    out = {}
+    for t, n in secs.items():
+        if t in tm:
+            continue
+        if cows[t]:
+            out[t] = (f"its sure bursts split between cows ({', '.join(f'{c} {k}' for c, k in cows[t].most_common(3))}) - "
+                      "none has two thirds")
+        elif states[t]:
+            out[t] = (f"{sum(states[t].values())} bursts, none sure enough to name her "
+                      f"({', '.join(f'{k} {v}' for k, v in states[t].items())})")
+        else:
+            out[t] = (f"no burst on this track ({n} s long): a burst comes once a minute, while she is in this "
+                      "camera's mask")
     return out
 
 
@@ -225,13 +249,14 @@ def match(mine, its, min_iou):
     return [(int(i), int(j)) for i, j in zip(r, c) if M[i, j] >= min_iou]
 
 
-def boxes_page(out, boxes_dir, view, mapping, tz_hours=0):
+def boxes_page(out, boxes_dir, view, mapping, tz_hours=0, why=None):
     """OUT/boxes.html: every labelled moment with all its cameras side by side - your boxes with your ids and
-    the cow the system gave each (right / another cow / not found / no cow) - and any box, or any cow of
+    the cow the system gave each (right / another cow / not found / no name given) - and any box, or any cow of
     yours, as crops from every camera and moment. The frames are read where they are (boxes/frames/...)."""
     rel = lambda file: os.path.relpath(os.path.join(boxes_dir, file), out).replace(os.sep, "/")
     frames = [dict(v, src=rel(v["file"])) for v in sorted(view, key=lambda v: (v["ts"], v["cam"]))]
-    data = {"frames": frames, "mapping": mapping, "tz": tz_hours}
+    tracks = {b[5] for v in view for b in v["its"] if not b[4]}
+    data = {"frames": frames, "mapping": mapping, "tz": tz_hours, "why": {t: w for t, w in (why or {}).items() if t in tracks}}
     path = os.path.join(out, "boxes.html")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(BOXES_PAGE.replace("__DATA__", json.dumps(data).replace("</", "<\\/")))
@@ -530,7 +555,7 @@ h3 { font-size: 13px; color: var(--muted); font-weight: normal; margin: 12px 0 4
 </header>
 <div class="legend">
   <span><i style="background:var(--right)"></i>the right cow</span><span><i style="background:var(--wrong)"></i>another cow</span>
-  <span><i style="background:var(--missed)"></i>not found</span><span><i style="background:var(--nocow)"></i>found, no cow</span>
+  <span><i style="background:var(--missed)"></i>not found</span><span><i style="background:var(--nocow)"></i>found, no name given (a cow all the same)</span>
   <span><i style="background:var(--extra)"></i>its box, not yours</span><span>dashed: outside this camera's mask (not scored)</span>
   <span>Click a box: it from every camera and moment.</span>
 </div>
@@ -596,8 +621,8 @@ function boxEl(f, fi, b, kind, k, st) {
   let lab;
   if (kind === "mine") {
     const [mm] = hitOf(f), j = mm[k], c = j === undefined ? null : f.its[j][4];
-    lab = st === "right" ? `${b[4]} = ${c}` : st === "wrong" ? `${b[4]}: ${c}` : st === "missed" ? `${b[4]}: not found` : `${b[4]}: no cow`;
-  } else lab = b[4] || "no cow";
+    lab = st === "right" ? `${b[4]} = ${c}` : st === "wrong" ? `${b[4]}: ${c}` : st === "missed" ? `${b[4]}: not found` : `${b[4]}: no name`;
+  } else lab = b[4] || "no name";
   return `<div class="box ${st} ${kind === "mine" && !b[5] ? "out" : ""} ${dim ? "dim" : ""} ${isSel ? "sel" : ""}"
     data-fi="${fi}" data-kind="${kind}" data-k="${k}"
     style="left:${x1 * 100}%;top:${y1 * 100}%;width:${(x2 - x1) * 100}%;height:${(y2 - y1) * 100}%"><span>${lab}</span></div>`;
@@ -643,19 +668,21 @@ function inspect() {
   let facts, items = [], title;
   if (sel.kind === "mine") {
     const st = status(f, sel.k), [mm] = hitOf(f), j = mm[sel.k], c = j === undefined ? null : f.its[j][4];
-    const words = { right: "the right cow", wrong: "another cow", missed: "not found", nocow: "found, no cow" }[st];
+    const words = { right: "the right cow", wrong: "another cow", missed: "not found", nocow: "found, no name given" }[st];
     facts = `<b>your ${b[4]}</b> → its <b>${c || "—"}</b> <span class="${st}" style="color:var(--c)">${words}</span><br>
       ${MAP[b[4]] ? `<span class="note">your ${b[4]} is its ${MAP[b[4]]} overall</span><br>` : ""}
-      ${f.cam} · ${clock(f.ts)}${j !== undefined ? ` · track ${f.its[j][5]}` : ""}${b[5] ? "" : `<br><span class="note">outside ${f.cam}'s mask: not scored</span>`}`;
+      ${f.cam} · ${clock(f.ts)}${j !== undefined ? ` · track ${f.its[j][5]}` : ""}${b[5] ? "" : `<br><span class="note">outside ${f.cam}'s mask: not scored</span>`}
+      ${st === "nocow" && (DATA.why || {})[f.its[j][5]] ? `<br><span class="note">no name: ${DATA.why[f.its[j][5]]}</span>` : ""}`;
     title = `Your cow ${b[4]}, every camera and moment (its cow under each)`;
     F.forEach((g, fi) => g.mine.forEach((x, k) => {
       if (x[4] !== b[4]) return;
       const s = status(g, k), [gm] = hitOf(g), gj = gm[k];
       items.push({ f: g, fi, b: x, kind: "mine", k, st: s, here: fi === sel.fi && k === sel.k,
-                   cap: gj === undefined ? "not found" : (g.its[gj][4] || "no cow") });
+                   cap: gj === undefined ? "not found" : (g.its[gj][4] || "no name") });
     }));
   } else {
-    facts = `<b>its ${b[4] || "box without a cow"}</b> <span class="note">(no box of yours here)</span><br>${f.cam} · ${clock(f.ts)} · track ${b[5]}`;
+    facts = `<b>its ${b[4] || "box, no name given"}</b> <span class="note">(no box of yours here)</span><br>${f.cam} · ${clock(f.ts)} · track ${b[5]}` +
+      (!b[4] && (DATA.why || {})[b[5]] ? `<br><span class="note">no name: ${DATA.why[b[5]]}</span>` : "");
     title = b[4] ? `Its cow ${b[4]}, every camera and moment (your name under each)` : "";
     if (b[4]) F.forEach((g, fi) => { const [, gt] = hitOf(g); g.its.forEach((x, j) => {
       if (x[4] !== b[4]) return;
