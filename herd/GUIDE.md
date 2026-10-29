@@ -415,16 +415,23 @@ minutes on any computer, not a pod). 30 min, 3 seeds:
 
 | rule | IDF1 both cameras | cow on both at once, one track | track purity |
 |---|---|---|---|
-| `link_share` (the default) | 0.611 | 27.0% | 93.7% |
-| `link_vote = 2` | 0.652 | 50.3% | 93.3% |
-| **`link_rule = "llr"`** | **0.684** | **71.7%** | 92.1% |
-| `llr` + `link_learn_offset` | 0.680 | 67.3% | 91.5% |
+| `link_share` (the default) | 0.613 | 28.7% | 93.6% |
+| `link_vote = 2` | 0.638 | 42.4% | 93.2% |
+| **`link_rule = "llr"`** | **0.683** | **70.1%** | 91.8% |
+| `llr` + `link_learn_offset` | 0.681 | 68.1% | 91.1% |
 
 The joins it makes wrong are mostly two neighbours the bend swaps (each cow of the pair nearer the
 other's point than her own, for minutes): place alone cannot tell them; the look can, once the identity
 model tells cows apart across views. Learning the bend did not help here (it learns from joins already
 made, wrong ones included) - it stays off. `mct_eval` scores `+llr`, `+llr+learn`, `~bent80+llr` and
 `~bent80+llr+learn` on MmCows; the barn's verdict is `trial` with `link_rule = "llr"` on your labels.
+
+How far to trust these numbers: a 30-minute run makes only ~20-25 joins across the two cameras, and
+one wrong join of two long-lying cows moves IDF1 by a few points - the same rule on the same seeds
+moved by up to ~0.07 when only the noise of the run changed (a camera's frames 1.5 s late: two wrong
+joins of 25 fewer). Differences of a few hundredths here are noise; the large ones (the joined share,
+the camera's tracker below) are not. All runs: `mct_sim` with a deterministic noise, the commands as
+given.
 
 **One cow under two names, made one by where she stood (`cow_merge_llr`).** Each camera's
 gallery names a cow by the side it sees, so a cow that walks from one camera's floor to the
@@ -439,7 +446,7 @@ their prototypes and fingerprints (`Gallery.merge`), the store aliases the old n
 (`cow_aliases`; the reports follow, `store.unalias_cow` undoes it), the night's event says
 `merged_by_place`. In `mct_sim` (30 min, 3 seeds, each camera naming its own side perfectly) it
 made 32 of the 106 cows seen by both cameras one name and put 2 names into another cow (at 60 / 30:
-36 cows, 3 wrong) - the hours a cow spends in the overlap are what it needs, so it grows with the days.
+39 cows, 3 wrong) - the hours a cow spends in the overlap are what it needs, so it grows with the days.
 Identity within one camera's view is the easy part (one side, another
 day: 96%); which of one camera's names is which of the other's is a slowly changing
 one-to-one match, learnt from hours of place, not from one look.
@@ -478,15 +485,15 @@ the seconds, gone in the rest). 30 min, 3 seeds, `link_rule = "llr"` in all:
 
 | camera tracker | IDF1 both cameras | IDF1 within a camera | track purity |
 |---|---|---|---|
-| IoU (as before) | 0.460 | 0.528 | 85.4% |
-| `kalman` | 0.518 | 0.588 | 89.3% |
-| `low_score = 0.2` | 0.579 | 0.662 | 81.6% |
-| **both** | **0.661** | **0.753** | 84.7% |
+| IoU (as before) | 0.462 | 0.528 | 86.2% |
+| `kalman` | 0.522 | 0.586 | 89.4% |
+| `low_score = 0.2` | 0.576 | 0.666 | 81.4% |
+| **both** | **0.672** | **0.756** | 85.4% |
 
-(`link_share`, the default joining, with the IoU tracker: 0.424 / 0.529.) Purity counts only the
+(`link_share`, the default joining, with the IoU tracker: 0.428 / 0.527.) Purity counts only the
 boxes a track kept: with `low_score` it keeps the hard ones too, which IDF1 counted as missed
 before. With no cow fading but every walk twice as fast (`--speed 2`, 20 min) `kalman` neither helps
-nor harms (IDF1 0.793 without, 0.789 with): it matters where tracks break. Its box is matched by the
+nor harms (IDF1 0.797 without, 0.793 with): it matters where tracks break. Its box is matched by the
 better of where her speed puts her and where she was - a cow stopping short of the guess keeps her
 track. Both are off by default; try them in `trial` on your labels and keep what raises IDF1.
 
@@ -501,9 +508,13 @@ tracks joined, or both walking and each other's nearest within 3 x `link_dist`) 
 camera's floor path, within `lag_max_s`, that lays it on the other's, using only her moments in
 motion; summed over every such walk per camera pair. The run says at the end, e.g. "cam2's frames
 come +1.4 s late against cam1's (37 times a cow walked on both; ...): time_offset_s = -1.4 on cam2",
-and keeps it as the event `clocks`. In `mct_sim.py --lag` (camera b late by 1.5 / 0 / -0.8 s, 20 min,
-`kalman` on - without it walking tracks break and nothing is measured) it said 1.7 / 0.3 / -0.4: a
-few tenths of a second off in 20 minutes, so it is only said from 0.5 s.
+and keeps it as the event `clocks`. In `mct_sim.py --lag L --rules llr+kalman` (30 min, 3 seeds; without
+`kalman` walking tracks break at 1 fps and nothing is measured), 13-44 walks a run: camera b late by 0 s
+was measured +0.4 / -0.6 / +0.6, by 1.5 s +1.5 / +1.5 / +2.7, by 3 s +2.8 / +2.4 / +3.0 - right to about half
+a second in half an hour, so it is said only from 0.5 s, and its numbers (walks, how sharp) are worth a
+look before it goes into barn.toml; hours of a barn give it many more walks. In that made-up barn the
+cows lying in the overlap make nearly all the joins, so a lag barely changed IDF1 there; walking cows
+crossing from one camera's floor to the other's - where one cow gets two names - are what it is for.
 
 **Neighbours on floor plans of their own** (each calibrated alone, placed apart: the studio's planes,
 autocalib's groups kept apart) never meet by place: such a pair in `neighbours` is joined by look in
