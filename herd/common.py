@@ -48,7 +48,10 @@ DEFAULTS = {
     # where it is expected), or a cow lying still at her place; they never start a track (mct_sim.py --detector)
     "tracker": {"iou": 0.3, "max_age_s": 5, "still_s": 60.0, "still_long_s": 300.0, "still_iou": 0.5,
                 "still_contain": 0.8, "still_for_s": 30.0, "still_moved": 0.3,
-                "kalman": False, "low_score": 0.0, "low_iou": 0.5},
+                "kalman": False, "low_score": 0.0, "low_iou": 0.5,
+                # kind: "own" (this tracker) or a library's - "bytetrack", "botsort", "ocsort", "sort" (libtrack.py,
+                # Roboflow's trackers): lost tracks kept lib_lost_s, an id after lib_min_frames updates
+                "kind": "own", "lib_lost_s": 30.0, "lib_min_frames": 1},
     "identity": {"prototypes_per_cow": 6, "history_days": 7, "max_error": 0.01,
                  "new_cow_similarity": 0.55, "new_cow_min_bursts": 20, "retire_after_hours": 48,
                  # the herd's size (0: no limit): at it, no new ids are made - unknown bursts wait in the pool

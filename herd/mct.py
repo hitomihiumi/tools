@@ -821,6 +821,9 @@ class TrackletLinker:
                     cameras=[{k: v for k, v in c.items() if k not in ("proj_mat", "floor_points")}
                              for c in cfg["cameras"]])
         self.cam_tracker = GlobalTracker(solo, None, None)
+        if cfg["tracker"].get("kind", "own") != "own":         # a library's tracker per camera (libtrack.py)
+            from libtrack import LibCamTrackers
+            self.cam_tracker = LibCamTrackers(cfg)
         self.floor = {c["id"]: floor_mapper(c, m) for c in cfg["cameras"]}
         self.dist = m.get("link_dist", 120.0)
         self.disjoint = {frozenset(p) for p in m.get("disjoint", [])}   # no floor shared: never compared

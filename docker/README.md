@@ -585,6 +585,22 @@ kalman = true        # a walking cow's box looked for where her speed puts it
 low_score = 0.2      # boxes the detector is unsure of (under [detector] threshold) keep a cow's track, never start one
 ```
 
+**A library's tracker instead of this one (test branch `claude/relaxed-hypatia-j4d7aa-libtrack`).** Each camera
+can be tracked by ByteTrack, BoT-SORT or OC-SORT from Roboflow's `trackers` (Apache-2.0, in the image on this
+branch) instead of the system's own tracker - to see on your own labels which follows your cows better:
+
+```toml
+[tracker]
+kind = "bytetrack"   # "own" (the system's) | "bytetrack" | "botsort" | "ocsort"
+lib_lost_s = 30      # a lost track kept this long (s)
+low_score = 0.1      # unsure boxes handed in: ByteTrack's and BoT-SORT's second round needs them
+```
+
+With `[mct]` it needs `mode = "link"`. `trial --relink` cannot show it (it keeps each camera's tracks): play a
+`trial` per tracker into its own `--out` and compare their scores (IDF1 per camera, and boxes.html). What the
+libraries do not have: a cow lying still for minutes waited for at her place, the frame id, the late reacquire;
+BoT-SORT here has no ReID model of its own and no camera-motion compensation (the cameras do not move).
+
 **One clock.** Joining compares two cameras at the same second. Turn on time sync in every camera's web page
 (PTP if it has it, else NTP, against the same server as this computer). A camera's stream may still come late:
 the end of a `trial` (and of a live run) says it, e.g. `cam2's frames come +1.4 s late against cam1's ...:

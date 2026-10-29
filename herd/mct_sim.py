@@ -290,6 +290,10 @@ RULES = [
     ("llr+kalman", {"mode": "link", "link_rule": "llr", "_tracker": {"kalman": True}}),
     ("llr+low", {"mode": "link", "link_rule": "llr", "_tracker": {"low_score": 0.2}}),
     ("llr+kalman+low", {"mode": "link", "link_rule": "llr", "_tracker": {"kalman": True, "low_score": 0.2}}),
+    # a library's tracker per camera instead of this one (libtrack.py: Roboflow's trackers), unsure boxes handed in
+    ("llr+bytetrack", {"mode": "link", "link_rule": "llr", "_tracker": {"kind": "bytetrack", "low_score": 0.2}}),
+    ("llr+botsort", {"mode": "link", "link_rule": "llr", "_tracker": {"kind": "botsort", "low_score": 0.2}}),
+    ("llr+ocsort", {"mode": "link", "link_rule": "llr", "_tracker": {"kind": "ocsort", "low_score": 0.2}}),
 ]
 
 

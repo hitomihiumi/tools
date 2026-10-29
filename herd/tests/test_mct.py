@@ -1400,3 +1400,39 @@ def test_boxes_page_shows_one_cow_joined_across_cameras():
         assert bd["joined"] == {"a1": 1}
         cam2 = next(f for f in bd["frames"] if f["cam"] == "cam2")
         assert sorted(b[6] for b in cam2["its"]) == ["a1", "b2"]
+
+
+# ------------------------------------------------------------------ a library's tracker (libtrack.py, test branch)
+
+def test_library_trackers_keep_a_cow_and_start_no_track_from_an_unsure_box():
+    """[tracker] kind bytetrack / botsort / ocsort: a cow keeps her id, an unsure box where no cow was starts none;
+    a cow whose box turns unsure keeps her track (ByteTrack's second round)."""
+    import trackers  # noqa: F401  (Roboflow's trackers, Apache-2.0)
+    import libtrack
+    box = lambda x: [x, 0.4, x + 0.1, 0.5]
+    for kind in ("bytetrack", "botsort", "ocsort"):
+        cfg = _cfg()
+        cfg["tracker"]["kind"] = kind
+        t = libtrack.LibTracker("cam1", cfg)
+        t.update(0.0, [box(0.2)])                          # a new track: its id from the next frame on
+        first = {tid for tid, _ in t.update(1.0, [box(0.21)])}
+        for k in range(2, 6):
+            got = t.update(float(k), [box(0.2 + 0.01 * k)] if k < 3 else [], low=[box(0.7)] + ([box(0.2 + 0.01 * k)] if k >= 3 else []))
+            assert {tid for tid, _ in got} <= first, (kind, k, got)
+        assert len(first) == 1
+
+
+def test_linker_with_a_library_tracker_per_camera():
+    """TrackletLinker with [tracker] kind = "bytetrack": each camera tracked by the library, joined as before."""
+    import trackers  # noqa: F401
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0)
+    cfg["tracker"]["kind"] = "bytetrack"
+    lk = mct.TrackletLinker(cfg)
+    for k in range(60):
+        out = lk.update_all(float(k), {c: [{"box": box(x)} for x in (0.3, 0.6)] for c in ("a", "b")})
+    assert out["a"] == out["b"] and len(set(out["a"])) == 2 and out["a"][0].startswith("a-bytetrack-")

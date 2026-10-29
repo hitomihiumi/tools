@@ -407,6 +407,9 @@ class Camera:
         self.tracker = Tracker(self.id, tk["iou"], tk["max_age_s"], tk.get("still_s", 0.0), tk.get("still_iou", 0.5),
                                tk.get("still_contain", 0.8), tk.get("still_for_s", 30.0), tk.get("still_moved", 0.3),
                                tk.get("still_long_s", 0.0), tk.get("kalman", False), tk.get("low_iou", 0.5))
+        if tk.get("kind", "own") != "own":                     # a library's tracker instead (libtrack.py)
+            from libtrack import LibTracker
+            self.tracker = LibTracker(self.id, cfg)
         self.next_second = start_ts
         # track_fps above fps: the detector and the tracker also on frames between the seconds (a cow that
         # walks moves more than her box in a second at 1 fps, and her track breaks); only the seconds
@@ -1026,6 +1029,9 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
     if cfg["mct"]["enabled"]:
         from mct import FloorTracker, FusedSeconds, GlobalTracker, TrackletLinker
         mode = cfg["mct"].get("mode")
+        if cfg["tracker"].get("kind", "own") != "own" and mode != "link":
+            print(f"[run] [mct] !! [tracker] kind = \"{cfg['tracker']['kind']}\" works with mode = \"link\" (or without "
+                  f"[mct]); mode = \"{mode}\" tracks with its own tracker", flush=True)
         if mode != "link" and cfg["mct"].get("link_rule", "near") != "near":
             print(f"[run] [mct] !! link_rule = \"{cfg['mct']['link_rule']}\" but mode = \"{mode}\": the link_* settings "
                   "and the night's merge by place work only with mode = \"link\"", flush=True)

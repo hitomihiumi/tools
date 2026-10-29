@@ -370,7 +370,9 @@ def run_tracker(dets, kind, mct_over=None, mats=None):
     got, links = {}, set()
     cfg = copy.deepcopy(DEFAULTS)
     cfg["cameras"] = [{"id": c, "mask": []} for c in cams]
-    cfg["mct"].update(mct_over or {})
+    over = dict(mct_over or {})
+    cfg["tracker"].update(over.pop("_tracker", {}))           # a library's tracker per camera (libtrack.py)
+    cfg["mct"].update(over)
     if kind == "mct":
         cfg["mct"]["neighbours"] = [[a, b] for i, a in enumerate(cams) for b in cams[i + 1:]]
     if kind in ("geo", "fused", "link", "link-final"):
@@ -432,8 +434,10 @@ def _run_fused(dets, cfg, co, kind="fused"):
         out = ft.update_all(float(ts), per)
         for c, ids in out.items():
             for j, g in enumerate(ids):
-                got[(c, ts, j)] = g
-            links.update(co.add(ids, [d["box"] for d in per[c]]))
+                if g is not None:                  # None: a box no track took (a library's tracker, unconfirmed)
+                    got[(c, ts, j)] = g
+            kept = [(g, d["box"]) for g, d in zip(ids, per[c]) if g is not None]
+            links.update(co.add([g for g, _ in kept], [b for _, b in kept]))
     if kind == "link-final":
         got = {k: ft.root(g) for k, g in got.items()}
         links = {(min(ft.root(a), ft.root(b)), max(ft.root(a), ft.root(b))) for a, b in links if ft.root(a) != ft.root(b)}
@@ -649,6 +653,9 @@ def variants(args, has_mats, cal=None):
               ("fid/link-final+llr+learn", "fid", "link-final", dict(llr, link_learn_offset=True)),
               ("fid/link-final~bent80+llr", "fid", "link-final", dict(llr, _bend=80.0)),
               ("fid/link-final~bent80+llr+learn", "fid", "link-final", dict(llr, _bend=80.0, link_learn_offset=True))]
+        # each camera tracked by a library (libtrack.py) instead of this system's tracker
+        v += [(f"fid/link-final+llr+{k}", "fid", "link-final", dict(llr, _tracker={"kind": k}))
+              for k in ("bytetrack", "botsort", "ocsort")]
         v += [("fid/link-final-nomargin", "fid", "link-final", dict(r9, link_margin=0.0)),
               ("fid/link-final+contra", "fid", "link-final", dict(r9, link_contra=0.3))]
         if cal and cal.get("late_sim"):                          # the late reacquire (off by default) tried

@@ -21,6 +21,9 @@ RUN pip install torch torchvision --index-url https://download.pytorch.org/whl/$
 RUN pip freeze | grep -iE '^(torch|torchvision)==' > /tmp/torch.txt \
     && pip install -c /tmp/torch.txt "transformers>=5.15" opencv-python-headless numpy scipy pillow requests \
        safetensors rfdetr
+# test branch: a library's tracker per camera ([tracker] kind = "bytetrack" / "botsort" / "ocsort": herd/libtrack.py)
+RUN pip install -c /tmp/torch.txt "supervision>=0.26.1" "pydeprecate<0.14" rich \
+    && pip install --no-deps trackers==2.6.1
 
 FROM deps
 # The models: every archive in docker/models/ (herd_models_*.tgz, herd_reid_*.tgz, herd_rumination_*.tgz)
