@@ -10,6 +10,8 @@
     cow_aliases   one cow's split profile merged into another (old -> canonical)
     track_handovers   a track passed from one camera to another (mct.py)
     track_links   one camera's track joined to another's: the same cow (mct.TrackletLinker)
+    track_evidence   two cameras' tracks: the summed log-likelihood that they are one cow, over the seconds
+              both were seen (TrackletLinker, link_rule "llr"); the night sums it per pair of cows
     alerts    raised alerts;  verdicts  the vet's answer to each
 
 Rows are written by track, not by cow: which cow a track is gets decided from
@@ -41,6 +43,8 @@ CREATE TABLE IF NOT EXISTS verdicts (alert_id INTEGER, ts REAL, confirmed INTEGE
 CREATE TABLE IF NOT EXISTS cannot_link (track_a TEXT, track_b TEXT, ts REAL, PRIMARY KEY (track_a, track_b));
 CREATE TABLE IF NOT EXISTS cow_aliases (old_cow TEXT PRIMARY KEY, canonical_cow TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS track_links (ts REAL, track TEXT PRIMARY KEY, joined_to TEXT);
+CREATE TABLE IF NOT EXISTS track_evidence (track_a TEXT, track_b TEXT, llr REAL, seconds INTEGER, ts REAL,
+                                           PRIMARY KEY (track_a, track_b));
 CREATE TABLE IF NOT EXISTS track_handovers (ts REAL, gid TEXT, from_cam TEXT, to_cam TEXT, kind TEXT,
                                             dist_m REAL, sim REAL);
 """
@@ -134,6 +138,19 @@ class Store:
                 r = links[r]
             out[t] = r
         return out
+
+    def put_evidence(self, rows):
+        """[(track a, track b, llr, seconds, ts)]: the pair's totals so far (a pair seen again is replaced)."""
+        rows = [(min(a, b), max(a, b), v, n, ts) for a, b, v, n, ts in rows if a != b]
+        if rows:
+            with self.lock:
+                self.db.executemany("INSERT OR REPLACE INTO track_evidence VALUES (?,?,?,?,?)", rows)
+                self.db.commit()
+
+    def evidence(self, since=0.0):
+        """{(track a, track b): llr} of the pairs seen since `since`."""
+        return {(a, b): v for a, b, v in self.query("SELECT track_a, track_b, llr FROM track_evidence WHERE ts >= ?",
+                                                    (since,))}
 
     def handover(self, ts, gid, from_cam, to_cam, kind, dist_m=None, sim=None):
         with self.lock:

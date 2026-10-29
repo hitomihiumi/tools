@@ -601,6 +601,36 @@ class Camera:
                    parts={k: round(v, 4) for k, v in part.items()})
 
 
+def merge_by_place(gallery, store, cfg, now):
+    """One cow under two names (each camera's gallery naming her by the side it sees) made one by where she stood:
+    [mct] link_rule "llr" keeps every two cameras' tracks' evidence of being one cow (store.track_evidence); summed
+    per pair of names over history_days (mct.cow_merges), a pair at cow_merge_llr, cow_merge_margin ahead of every
+    rival, never two names seen at the same time, is one cow - the gallery merges them, the store aliases them
+    (the reports follow). -> [(old, into)]; nothing unless [mct] is on in mode link with that rule."""
+    m = cfg["mct"]
+    if not (m.get("enabled") and m.get("mode") == "link" and m.get("link_rule") == "llr"
+            and m.get("cow_merge_llr", 0) > 0 and hasattr(store, "evidence")):
+        return []
+    from mct import cow_merges
+    from report import track_map
+    since = now - cfg["identity"]["history_days"] * 86400
+    evidence = store.evidence(since)
+    if not evidence:
+        return []
+    tm = track_map(store)                                    # track -> cow, joined tracks and aliases followed
+    apart = {(tm[a], tm[b]) for a, b in store.cannot_link_pairs(since)
+             if a in tm and b in tm and tm[a] != tm[b]}
+    size = collections.Counter(tm.values())
+    done = []
+    for old, into in cow_merges(evidence, tm, apart, m["cow_merge_llr"], m.get("cow_merge_margin", 100.0), size):
+        if gallery.merge(old, into):
+            store.alias_cow(old, into, now)
+            done.append((old, into))
+    if done:
+        store.event(now, "merged-by-place", json.dumps(done))
+    return done
+
+
 class SharedGallery:
     """The gallery behind a lock, with the nightly job and the weekly change-over.
 
@@ -698,7 +728,10 @@ class SharedGallery:
         if self.g.migration_due(ts):
             self.store.event(ts, "change-over", "weekly cow change-over started")
         if ts >= self.next_nightly:
+            merged = merge_by_place(self.g, self.store, self.cfg, ts)
             res = self.g.nightly(ts, self.cannot_link)
+            if merged:
+                res["merged_by_place"] = merged
             self.store.event(ts, "nightly", json.dumps(res))
             self.next_nightly = self._next_hour(ts, self.cfg["farm"]["nightly_hour"])
         hold = self.cfg["identity"].get("claim_s", 120.0)
@@ -925,6 +958,9 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
         stop.set()
         if status is not None:
             status["interrupted"] = True
+    linker = getattr(getattr(cams[0], "glob", None), "ft", None) if cams else None
+    if hasattr(linker, "flush_evidence") and getattr(linker, "last_ts", None) is not None:
+        linker.flush_evidence(linker.last_ts)             # the last minutes' evidence, before the night reads it
     shared.save()
     st = dict(getattr(cams[0].glob, "stats", None) or {}) if cams and getattr(cams[0], "glob", None) else {}
     if cfg["mct"].get("enabled") and cfg["mct"].get("mode") == "link":

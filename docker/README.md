@@ -518,6 +518,20 @@ only a strip along a fence (cam3-cam4: no floor mapping) by look - a cow one cam
 is one of the other's counted cows, the one her frame ids are clearly nearest to over 10 s. `trial` says
 how many tracks were joined per camera pair.
 
+**When a trial joins nothing** (the log: "tracks joined across cameras 0", most seconds turned away by
+`link_margin`): the floor mapping is right in only part of the seconds and the cows lie side by side. Join by
+evidence instead of by seconds near (`herd/GUIDE.md` section 4.8):
+
+```toml
+[mct]
+link_rule = "llr"           # every second both cameras see two tracks: evidence for or against one cow
+link_learn_offset = true    # the floor's bend between the cameras learnt from the cows joined
+```
+
+and run `trial` again. With it the night also puts together one cow the gallery named twice - once by each
+camera's side of her - by where she stood over the hours (`cow_merge_llr`): the trial says which names it
+made one ("one cow under two names, made one by where she stood"), and the score counts them as one cow.
+
 **No cows walking: click the same spots on both pictures.** Nothing is measured; you only show
 which spot of one picture is which spot of the other:
 

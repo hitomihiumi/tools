@@ -822,8 +822,16 @@ def main(argv=None):
     shutil.copytree(folder, os.path.join(out, "pass2", "gallery"))
     print("[trial] 2/3 the second pass, with those cows: who is who", flush=True)
     play(cfg, groups, os.path.join(out, "pass2", "herd.sqlite"), models)
-    print("[trial] 3/3 drawn back", flush=True)
     store2 = os.path.join(out, "pass2", "herd.sqlite")
+    # the second night: one cow named on two cameras by her two sides, made one by where she stood ([mct] llr)
+    from pipeline import merge_by_place
+    g2 = gallery_mod.Gallery(os.path.join(out, "pass2", "gallery"), cfg, abstain)
+    merged = merge_by_place(g2, Store(store2), cfg, last)
+    if merged:
+        g2.save()
+        print("[trial] one cow under two names, made one by where she stood: "
+              + ", ".join(f"{a} -> {b}" for a, b in merged), flush=True)
+    print("[trial] 3/3 drawn back", flush=True)
     shown = {}
     for cam, path, ts in recs:
         if cam in shown:

@@ -642,6 +642,13 @@ def variants(args, has_mats, cal=None):
         # the look without the vote: the usual rule, place and look in one number
         v += [("fid/link-final+look300", "fid", "link-final", dict(r9, link_look_cm=300.0)),
               ("fid/link-final~bent80+look300", "fid", "link-final", dict(r9, _bend=80.0, link_look_cm=300.0))]
+        # evidence summed as log-likelihood, joined by the best one-to-one assignment (link_rule "llr"), with and
+        # without the floor's bend learnt from the pairs joined; on the true floor and on the bent one
+        llr = dict(r9, link_rule="llr")
+        v += [("fid/link-final+llr", "fid", "link-final", dict(llr)),
+              ("fid/link-final+llr+learn", "fid", "link-final", dict(llr, link_learn_offset=True)),
+              ("fid/link-final~bent80+llr", "fid", "link-final", dict(llr, _bend=80.0)),
+              ("fid/link-final~bent80+llr+learn", "fid", "link-final", dict(llr, _bend=80.0, link_learn_offset=True))]
         v += [("fid/link-final-nomargin", "fid", "link-final", dict(r9, link_margin=0.0)),
               ("fid/link-final+contra", "fid", "link-final", dict(r9, link_contra=0.3))]
         if cal and cal.get("late_sim"):                          # the late reacquire (off by default) tried

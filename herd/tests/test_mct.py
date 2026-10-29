@@ -1057,3 +1057,94 @@ def test_calibrated_cows_counted_by_two_cameras_near_stay_two():
             out = lk.update_all(float(k), {"cam1": [{"box": box}], "cam2": [{"box": [v + 0.03 for v in box]}]})
     assert out["cam1"][0] != out["cam2"][0] and lk.stats["linked"] == 1 and lk.stats["unlinked"] == 1
     assert lk.stats["counted_by_two_near"] > 0 and said.getvalue().count("nearly one floor place") == 1
+
+
+def test_linker_llr_joins_through_wrong_seconds_and_keeps_neighbours_apart():
+    """Three cows lying 1.2 m apart in a row, camera b's floor 60 cm off along the row and in 30% of the seconds
+    1-2 m anywhere: counted second by second a neighbour is often the nearest; summed as evidence, each cow is
+    joined to her own track and no two cows to one."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    rng = np.random.default_rng(0)
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5)
+    lk = mct.TrackletLinker(cfg)
+    true_b = lk.floor["b"]
+
+    def bent(b, pl=0.5):
+        x, y = true_b(b, pl)
+        if rng.random() < 0.3:
+            a = rng.uniform(0, 2 * np.pi)
+            return x + 150 * np.cos(a), y + 150 * np.sin(a)
+        return x + 60 + rng.normal(0, 20), y + rng.normal(0, 20)
+    lk.floor["b"] = bent
+    xs = (0.40, 0.52, 0.64)
+    for k in range(120):
+        out = lk.update_all(float(k), {c: [{"box": box(x)} for x in xs] for c in ("a", "b")})
+    assert out["a"] == out["b"]
+    assert len(set(out["a"])) == 3
+
+
+def test_linker_llr_learns_the_bend_between_two_cameras():
+    """Camera b's floor 90 cm off everywhere: once the first cows are joined the offset is learnt from them."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x, y: [x - 0.03, y - 0.05, x + 0.03, y]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_learn_offset=True, link_offset_min=10)
+    lk = mct.TrackletLinker(cfg)
+    true_b = lk.floor["b"]
+    lk.floor["b"] = lambda b, pl=0.5: (lambda p: (p[0] + 90.0, p[1]))(true_b(b, pl))
+    cows = [(0.1 + 0.2 * i, 0.3 + 0.4 * (i % 2)) for i in range(5)]
+    for k in range(60):
+        out = lk.update_all(float(k), {c: [{"box": box(x, y)} for x, y in cows] for c in ("a", "b")})
+    assert out["a"] == out["b"]
+    off = lk._offset("a", "b", np.array([[500.0, 500.0]]))[0]
+    assert abs(off[0] - 90.0) < 5 and abs(off[1]) < 5
+
+
+def test_cow_merges_puts_one_cows_two_names_together():
+    """Each camera names a cow by her side (xa / xb): their tracks' evidence summed over pairs of names joins xa
+    with xb, not with the neighbour ya her tracks were also near now and then; names seen together never."""
+    import mct
+    track_cow = {}
+    ev = {}
+    for c in "xyz":
+        for k in range(4):                                   # four short visits to the overlap, each too weak alone
+            ta, tb = f"{c}a{k}", f"{c}b{k}"
+            track_cow[ta], track_cow[tb] = f"{c}a", f"{c}b"
+            ev[(ta, tb)] = 20.0
+    ev[("xa0", "yb0")] = 25.0                                # a neighbour, near once
+    apart = [("xa", "ya"), ("xa", "za"), ("ya", "za"), ("xb", "yb"), ("xb", "zb"), ("yb", "zb")]
+    got = dict(mct.cow_merges(ev, track_cow, apart, min_llr=60.0, margin=30.0))
+    top = lambda n: top(got[n]) if n in got else n
+    assert all(top(f"{c}a") == top(f"{c}b") for c in "xyz")
+    assert len({top(f"{c}a") for c in "xyz"}) == 3
+    kept = dict(mct.cow_merges(ev, track_cow, apart + [("xa", "xb")], min_llr=60.0, margin=30.0))
+    top = lambda n: top(kept[n]) if n in kept else n
+    assert top("xa") != top("xb") and top("ya") == top("yb")
+
+
+def test_merge_by_place_merges_the_gallery_and_the_reports_follow():
+    """The night: cow A (camera a's name) and cow B (camera b's) are one by their tracks' evidence - the gallery
+    keeps one, the store aliases the other, the report counts her tracks on both cameras as one cow."""
+    import pipeline
+    import report
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for k in range(3):
+            store.burst(("a", "ta", 100.0 + k, "confirmed", "A", 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+            store.burst(("b", "tb", 100.0 + k, "confirmed", "B", 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        store.put_evidence([("ta", "tb", 250.0, 300, 400.0)])
+        gal = _gallery(os.path.join(d, "g"), {"A": [1, 0, 0], "B": [0, 1, 0]})
+        cfg = _cfg()
+        cfg["mct"].update(enabled=True, mode="link", link_rule="llr")
+        assert pipeline.merge_by_place(gal, store, cfg, 1000.0) == [("B", "A")]
+        assert set(gal.cows) == {"A"} and len(gal.cows["A"]["prototypes"]) == 2
+        assert report.track_map(store) == {"ta": "A", "tb": "A"}
+        cfg["mct"]["link_rule"] = "near"                     # the old rule keeps no evidence: nothing merged
+        assert pipeline.merge_by_place(gal, store, cfg, 1000.0) == []

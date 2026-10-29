@@ -63,6 +63,60 @@ def assign(score):
     return [(r, c) for r, c in pairs if score[r, c] > NEG / 2]
 
 
+def cow_merges(evidence, track_cow, apart=(), min_llr=200.0, margin=100.0, size=None):
+    """One cow under two names - each camera's gallery naming her by the side it sees (MmCows: by look a cow is
+    found on another camera 40-50% of the time) - put together by where she stood. evidence {(track a, track b):
+    summed log-likelihood that they are one cow} (TrackletLinker, link_rule "llr": every second both were seen,
+    joined or not) is summed per pair of names (track_cow: track -> name); then, surest first, two groups of names
+    are one cow at min_llr, margin ahead of every rival - a group that is two cows with the partner (apart: pairs
+    of names seen at the same time) - and never two groups apart. Hours of a cow in the overlap add up where no
+    single track pair was enough. -> [(old name, into)], into the name with the larger size (bursts)."""
+    E = collections.Counter()
+    for (a, b), v in evidence.items():
+        x, y = track_cow.get(a), track_cow.get(b)
+        if x is not None and y is not None and x != y:
+            E[(x, y) if x < y else (y, x)] += v
+    parent = {}
+
+    def root(x):
+        while parent.get(x, x) != x:
+            x = parent[x]
+        return x
+    apart = {frozenset(p) for p in apart}
+    size = size or {}
+    members = collections.defaultdict(set)
+    for x, y in list(E) + [tuple(p) for p in apart if len(p) == 2]:
+        members[x].add(x), members[y].add(y)
+    out = []
+    while True:
+        G = collections.Counter()                          # group pair -> evidence
+        for (x, y), v in E.items():
+            rx, ry = root(x), root(y)
+            if rx != ry:
+                G[(rx, ry) if rx < ry else (ry, rx)] += v
+        sep = {frozenset((root(x), root(y))) for x, y in (tuple(p) for p in apart if len(p) == 2)}
+        near = collections.defaultdict(dict)
+        for (x, y), v in G.items():
+            near[x][y] = near[y][x] = v
+        best = None
+        for (x, y), v in G.items():
+            if v < min_llr or frozenset((x, y)) in sep:
+                continue
+            rival = max([w for z, w in near[x].items() if z != y and frozenset((z, y)) in sep] +
+                        [w for z, w in near[y].items() if z != x and frozenset((z, x)) in sep] + [-np.inf])
+            if v - rival >= margin and (best is None or v > best[0]):
+                best = (v, x, y)
+        if best is None:
+            return out
+        _, x, y = best
+        sx = sum(size.get(m, 0) for m in members[x])
+        sy = sum(size.get(m, 0) for m in members[y])
+        into, old = (x, y) if sx > sy or (sx == sy and x < y) else (y, x)
+        parent[old] = into
+        out.append((old, into))
+        members[into] |= members.pop(old)
+
+
 def _centre(b):
     return (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
 
@@ -700,6 +754,29 @@ class TrackletLinker:
         self.contra_s = m.get("link_contra_s", 10)
         self.contra = m.get("link_contra", 0.0)
         self.pen = m.get("height_penalty", 40.0)
+        # link_rule "llr": every second both are seen adds the log-likelihood that a pair is one cow, from their
+        # floor distance - one cow's two points ~ link_sigma apart, link_wrong of the seconds anywhere; two cows
+        # spread over link_spread - so a far second counts against, a near one for, by how near; a pair is
+        # joined at link_llr when the two cameras' tracks matched one to one keep it, and forbidding it costs that
+        # assignment link_llr_margin - on the evidence fading with link_window_s. link_learn_offset: the floor's
+        # bend between two cameras learnt from the pairs already joined (a median per link_offset_cell of floor,
+        # the whole pair's while a cell has too few) and taken out
+        self.rule = m.get("link_rule", "near")
+        self.sigma = m.get("link_sigma") or self.dist / 2.5
+        self.wrong = m.get("link_wrong", 0.3)
+        self.spread = m.get("link_spread") or 4 * self.dist
+        self.llr_join = m.get("link_llr", 40.0)
+        self.llr_margin = m.get("link_llr_margin", 20.0)
+        self.learn = bool(m.get("link_learn_offset", False))
+        self.cell = m.get("link_offset_cell") or 2 * self.dist
+        self.offset_min = m.get("link_offset_min", 30)
+        self.ev = collections.defaultdict(dict)                # track -> {other camera's track: summed log-likelihood}
+        # the same, fading with link_window_s (the joins weigh pairs on their recent seconds: a cow's new track, after
+        # her old one was lost, is not outweighed by the hours her neighbour's track has had)
+        self.window = m.get("link_window_s", 120.0)
+        self.recent = {}                                        # (a, b) -> (fading sum, last second)
+        self.dirty, self.flushed, self.last_ts = set(), None, None   # pairs changed since the store last had them
+        self.offsets = collections.defaultdict(lambda: collections.deque(maxlen=400))   # (ca, cb, cell) -> [b - a]
         self.parent = {}
         self.members = collections.defaultdict(set)           # root -> tracks
         self.life = {}                                         # track -> (cam, first, last)
@@ -902,8 +979,125 @@ class TrackletLinker:
             best = min(best, d)
         return best
 
+    @staticmethod
+    def _at(p):
+        """A floor point at the height its posture says (p: lying, standing, p_lying)."""
+        return p[0] if (0.5 if p[2] is None else p[2]) >= 0.5 else p[1]
+
+    def _dist(self, A, B, off=None):
+        """Every a against every b, as _d: the floor distance at the height where they agree, the posture a prior;
+        off (na x 2): b's points taken back by the offset learnt at a's place."""
+        like = lambda P: np.array([0.5 if p[2] is None else p[2] for p in P], float)
+        pa, pb = np.array([p[:2] for p in A], float), np.array([q[:2] for q in B], float)
+        la, lb = like(A), like(B)
+        best = None
+        for h, wa, wb in ((0, la, lb), (1, 1 - la, 1 - lb)):
+            diff = pa[:, None, h, :] - pb[None, :, h, :]
+            if off is not None:
+                diff = diff + off[:, None, :]
+            d = np.hypot(diff[..., 0], diff[..., 1]) + self.pen * (2 - wa[:, None] - wb[None, :]) / 2
+            best = d if best is None else np.minimum(best, d)
+        return best
+
+    def _llr(self, D):
+        """log p(this distance | one cow) / p(it | two cows): one cow's two points a 2-D normal of link_sigma, in
+        link_wrong of the seconds anywhere; two cows' anywhere within link_spread."""
+        s2 = 2 * self.sigma ** 2
+        return np.log((1 - self.wrong) * self.spread ** 2 / s2 * np.exp(-np.square(D) / s2) + self.wrong)
+
+    def _cell(self, p):
+        return (int(np.floor(p[0] / self.cell)), int(np.floor(p[1] / self.cell)))
+
+    def _offset(self, ca, cb, P):
+        """The learnt b - a at each of a's points P, from joined pairs: the cell's median, else the whole pair's,
+        else none yet."""
+        med = lambda k: np.median(np.asarray(self.offsets[k]), 0) \
+            if k in self.offsets and len(self.offsets[k]) >= self.offset_min else None
+        whole = med((ca, cb, None))
+        out = np.zeros((len(P), 2))
+        for x, p in enumerate(P):
+            o = med((ca, cb, self._cell(p)))
+            o = whole if o is None else o
+            if o is not None:
+                out[x] = o
+        return out
+
+    def _by_llr(self, ts, ca, cb, ids, per_cam, pts):
+        """link_rule "llr": the evidence of every pair of the two cameras' tracks this second, then the joins."""
+        A, B = pts[ca], pts[cb]
+        pa = np.array([self._at(p) for p in A], float)
+        pb = np.array([self._at(q) for q in B], float)
+        D = self._dist(A, B, self._offset(ca, cb, pa) if self.learn else None)
+        if self.look_cm:
+            D = D + self.look_cm * self._look(per_cam[ca], per_cam[cb])
+        L = self._llr(D)
+        ga, gb = ids[ca], ids[cb]
+        bx, by = D.argmin(1), D.argmin(0)
+        for x, y in enumerate(bx):
+            if by[y] == x:
+                self.nearest.append(float(D[x, y]))
+        for x, a in enumerate(ga):
+            for y, b in enumerate(gb):
+                k = self._key(a, b)
+                self.both[k] += 1
+                self.ev[a][b] = self.ev[b][a] = self.ev[a].get(b, 0.0) + float(L[x, y])
+                v, last = self.recent.get(k, (0.0, ts))
+                self.recent[k] = (v * np.exp(-(ts - last) / self.window) + float(L[x, y]), ts)
+                self.dirty.add(k)
+        if self.learn:                                         # the bend, from the cows already joined
+            for x, y in enumerate(bx):
+                if by[y] == x and D[x, y] <= 3 * self.sigma and self.root(ga[x]) == self.root(gb[y]):
+                    o = pb[y] - pa[x]
+                    self.offsets[(ca, cb, self._cell(pa[x]))].append(o)
+                    self.offsets[(ca, cb, None)].append(o)
+        # the joins: the two cameras' tracks of this second matched one to one by their evidence (best assignment -
+        # a row of cows seen shifted by half a stall is told by the row, not by each cow); a pair is joined when
+        # forbidding it costs the assignment link_llr_margin
+        cand = [(x, y) for x, a in enumerate(ga) for y, b in enumerate(gb)
+                if self.recent[self._key(a, b)][0] >= self.llr_join and self.both[self._key(a, b)] >= self.min_s
+                and self.root(a) != self.root(b)]
+        if not cand:
+            return
+        W = np.array([[self.recent[self._key(a, b)][0] for b in gb] for a in ga])
+        W[W < self.llr_join] = NEG
+        best = assign(W)
+        total, chosen = sum(W[r, c] for r, c in best), set(best)
+        for x, y in cand:
+            if (x, y) not in chosen:
+                self.stats["llr_not_assigned"] += 1
+                continue
+            W2 = W.copy()
+            W2[x, y] = NEG
+            if total - sum(W2[r, c] for r, c in assign(W2)) < self.llr_margin:
+                self.stats["llr_ambiguous"] += 1
+                continue
+            self._union(ga[x], gb[y], ts)
+
+    def flush_evidence(self, ts):
+        """The pairs' evidence changed since the last time into the store (track_evidence): the night sums it per
+        pair of cows (cow_merges). Pairs seen together less than link_min_s are left out."""
+        if self.store is not None and hasattr(self.store, "put_evidence"):
+            self.store.put_evidence([(a, b, self.ev[a][b], self.both[(a, b)], ts) for a, b in self.dirty
+                                     if b in self.ev.get(a, {}) and self.both[(a, b)] >= self.min_s])
+        self.dirty.clear()
+        self.flushed = ts
+
+    def _forget(self, ts, keep_s=3600.0):
+        """The evidence of tracks gone for keep_s: a live barn makes thousands of tracks a day."""
+        self.flush_evidence(ts)
+        gone = {t for t, (_, _, last) in self.life.items() if ts - last > keep_s and t in self.ev}
+        for t in gone:
+            for o in self.ev.pop(t):
+                if o in self.ev:
+                    self.ev[o].pop(t, None)
+                self.both.pop(self._key(t, o), None)
+                self.recent.pop(self._key(t, o), None)
+
     def update_all(self, ts, per_cam):
         with self.lock:
+            self.last_ts = ts
+            if self.rule == "llr" and (self.flushed is None or ts - self.flushed >= 600):
+                self._forget(ts)
             ids = {cam: self.cam_tracker.update(cam, ts, ds) for cam, ds in per_cam.items()}
             for late, earlier in self.cam_tracker.late_links:    # a cow taken back late: before life grows
                 if late in self.life and earlier in self.life:
@@ -927,6 +1121,9 @@ class TrackletLinker:
             for i, ca in enumerate(cams):
                 for cb in cams[i + 1:]:
                     if frozenset((ca, cb)) in self.disjoint:
+                        continue
+                    if self.rule == "llr":
+                        self._by_llr(ts, ca, cb, ids, per_cam, pts)
                         continue
                     D = np.array([[self._d(p, q) for q in pts[cb]] for p in pts[ca]])
                     if self.look_cm and D.size:                # place and look in one number

@@ -387,14 +387,71 @@ within 1 m of herself in 63% of the pairs, two different cows in 0.7%. So: calib
 the cameras (`floor_points`) before turning `[mct]` on; without calibration keep
 handover off (`handover_min_sim = 0.8`).
 
+**Evidence, not seconds near (`[mct] link_rule = "llr"`).** The barn's cam1/cam2 floor
+mapping puts a cow's true partner nearest in ~70% of the seconds; `link_share` asks for 60%
+of the seconds near *and* no other cow within `link_margin`, which cows lying side by side
+under such a mapping never give (a trial joined nothing). With `llr` every second two tracks
+of two cameras are both seen adds the log-likelihood that they are one cow, from their floor
+distance `d`:
+
+    log( (1 - link_wrong) * link_spread² / (2 link_sigma²) * exp(-d² / (2 link_sigma²)) + link_wrong )
+
+one cow's two points a normal of `link_sigma` (0: `link_dist` / 2.5) in all but `link_wrong`
+(0.3) of the seconds, two cows anywhere within `link_spread` (0: 4 x `link_dist`) - a near
+second counts for, a far one against (at most log 0.3), a wrong one costs little. A pair is
+joined at `link_llr` (40) when the two cameras' tracks of this second, matched one to one by
+their evidence (best assignment), keep it, and forbidding it costs that assignment
+`link_llr_margin` (20): a row of cows seen shifted by half a stall is told by the row, which
+no rule of one cow and her nearest can do. The joins weigh the evidence fading over
+`link_window_s` (120 s): summed over whole lives, a cow's new track (her old one lost) was
+outweighed by the hours her neighbour's track had had. `link_learn_offset = true` learns the
+floor's bend between the two cameras from the pairs joined (median per `link_offset_cell`).
+
+`python herd/mct_sim.py` tries the rules on a made-up barn where the truth is known (two cameras
+facing each other over a shared strip, 40 cows, most lying in rows of stalls 1.2 m apart, each
+camera's floor bent by up to 60 cm and 0.8-2 m off in 15% of the seconds, so that a cow's true
+partner is the other camera's nearest in 50-70% of the seconds - the barn's cam1/cam2: ~70%;
+minutes on any computer, not a pod). 30 min, 3 seeds:
+
+| rule | IDF1 both cameras | cow on both at once, one track | track purity |
+|---|---|---|---|
+| `link_share` (the default) | 0.611 | 27.0% | 93.7% |
+| `link_vote = 2` | 0.652 | 50.3% | 93.3% |
+| **`link_rule = "llr"`** | **0.684** | **71.7%** | 92.1% |
+| `llr` + `link_learn_offset` | 0.680 | 67.3% | 91.5% |
+
+The joins it makes wrong are mostly two neighbours the bend swaps (each cow of the pair nearer the
+other's point than her own, for minutes): place alone cannot tell them; the look can, once the identity
+model tells cows apart across views. Learning the bend did not help here (it learns from joins already
+made, wrong ones included) - it stays off. `mct_eval` scores `+llr`, `+llr+learn`, `~bent80+llr` and
+`~bent80+llr+learn` on MmCows; the barn's verdict is `trial` with `link_rule = "llr"` on your labels.
+
+**One cow under two names, made one by where she stood (`cow_merge_llr`).** Each camera's
+gallery names a cow by the side it sees, so a cow that walks from one camera's floor to the
+other's is enrolled twice unless her two tracks were joined at that moment. With `llr` the
+linker writes every pair of tracks' evidence to `track_evidence`; at night
+(`pipeline.merge_by_place`, before the gallery's own night; `trial` after its second pass)
+the evidence is summed per pair of names (`mct.cow_merges`: track -> cow from the bursts),
+so many short visits to the overlap add up where no single pair of tracks was enough. Two
+names are one cow at `cow_merge_llr` (200), `cow_merge_margin` (100) ahead of every rival (a
+name seen at the same time as the partner), never two names seen at the same time: the gallery merges
+their prototypes and fingerprints (`Gallery.merge`), the store aliases the old name
+(`cow_aliases`; the reports follow, `store.unalias_cow` undoes it), the night's event says
+`merged_by_place`. In `mct_sim` (30 min, 3 seeds, each camera naming its own side perfectly) it
+made 32 of the 106 cows seen by both cameras one name and put 2 names into another cow (at 60 / 30:
+36 cows, 3 wrong) - the hours a cow spends in the overlap are what it needs, so it grows with the days.
+Identity within one camera's view is the easy part (one side, another
+day: 96%); which of one camera's names is which of the other's is a slowly changing
+one-to-one match, learnt from hours of place, not from one look.
+
 Each camera then tracks in its `tracking_mask` (overlapping its neighbours; default
 its `mask`) but writes seconds and bursts only for boxes in its own `mask`, so a cow in
 an overlap is counted once, under one track. Across cameras `cannot_link` is added only
 for `disjoint` pairs (cameras with no shared floor): without a floor map, one cow in an
 overlap is seen by two cameras at once. Handovers are logged in `track_handovers`.
-Not yet: a Kalman filter on the floor point, a nightly merge of split profiles, and
-identity training with real cow ids across views (the fingerprint does not tell cows
-apart across views today).
+Not yet: a Kalman filter on the floor point, a nightly merge of split profiles by look
+(by place: `cow_merge_llr` above), and identity training with real cow ids across views (the
+fingerprint does not tell cows apart across views today).
 
 **Checking it — MmCows** (`mct_eval.py`, `mct_pod.sh`): four synchronised cameras over
 one pen of 16 cows, a frame a second (7/25 12:00–15:00), each cow's number in every
@@ -941,6 +998,7 @@ model sees fine detail: coat pattern, the jaw.
 | `pipeline.py` | real time: cameras, detector, tracker, bursts, cache |
 | `mct.py` | one track per cow across cameras (GlobalTracker) |
 | `mct_eval.py`, `mct_pod.sh` | that tracker scored on MmCows' four cameras |
+| `mct_sim.py` | the cross-camera joining rules on a made-up barn where the truth is known |
 | `show_ids.py` | `herd.py show-ids`: who is who drawn on a recorded file (from the store) |
 | `reid.py`, `reid_pod.sh` | identity taught on sets with cow ids; MmCows labelled by its neck tags (section 4.9) |
 | `store.py` | SQLite: seconds, bursts, events, alerts, verdicts |

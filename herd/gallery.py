@@ -318,6 +318,17 @@ class Gallery:
             self.pool = [p for p in self.pool if id(p) not in used]
         return made
 
+    def merge(self, old, into):
+        """old is into - one cow the gallery knew under two names (each camera her side): old's fingerprints and
+        prototypes go to into (the night's k-means then spans both looks), old is gone. -> done or not."""
+        if old == into or old not in self.cows or into not in self.cows:
+            return False
+        a, b = self.cows[into], self.cows.pop(old)
+        a["prototypes"] = np.concatenate([a["prototypes"], b["prototypes"]]).astype(np.float32)
+        a["created"], a["last_seen"] = min(a["created"], b["created"]), max(a["last_seen"], b["last_seen"])
+        self.history[into] = sorted(self.history.get(into, []) + self.history.pop(old, []), key=lambda h: h[0])
+        return True
+
     def nightly(self, now, cannot_link=None):
         """retire -> rebuild -> enroll; returns what changed, for the log."""
         gone = self.retire(now)

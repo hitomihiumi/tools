@@ -119,6 +119,22 @@ DEFAULTS = {
             # link_look_cm > 0: the look counts too - two cows' floor distance plus link_look_cm times their
             # frame ids' cosine distance (1 - cos): place, then look, in one number (0: place alone)
             "link_look_cm": 0.0,
+            # link_rule "llr" (mct_sim.py): instead of counting seconds near, each second both are seen adds the
+            # log-likelihood that two tracks are one cow from their floor distance - one cow's two points
+            # link_sigma apart (0: link_dist / 2.5), link_wrong of the seconds anywhere; two cows anywhere within
+            # link_spread (0: 4 x link_dist) - a near second counts for, a far one against; joined at link_llr
+            # when the two cameras' tracks matched one to one (best assignment) keep the pair and forbidding it
+            # costs link_llr_margin - on the evidence fading with link_window_s (s: a cow's new track is not
+            # outweighed by her neighbour's hours; the night's cow_merges takes the whole sums).
+            # link_learn_offset: the floor's bend between two cameras learnt from the pairs joined (median per
+            # link_offset_cell, 0: 2 x link_dist; the whole pair's while a cell has under link_offset_min)
+            "link_rule": "near", "link_sigma": 0.0, "link_wrong": 0.3, "link_spread": 0.0, "link_llr": 40.0,
+            "link_llr_margin": 20.0, "link_window_s": 120.0, "link_learn_offset": False, "link_offset_cell": 0.0,
+            "link_offset_min": 30,
+            # with link_rule "llr", nightly: one cow under two names (each camera's gallery naming her side) made
+            # one when the evidence of all their tracks together reaches cow_merge_llr, cow_merge_margin ahead of
+            # every rival (pipeline.merge_by_place, mct.cow_merges; 0: off)
+            "cow_merge_llr": 200.0, "cow_merge_margin": 100.0,
             # link mode, neighbours with no floor mapping (a narrow strip along a fence): a cow one camera sees
             # beyond its mask (tracking_mask) joined to the other's counted cow by look - mean cos of frame
             # ids over look_min_s s at least look_min_sim, look_margin above the next cow
