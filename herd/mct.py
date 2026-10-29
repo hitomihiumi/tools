@@ -689,6 +689,9 @@ class TrackletLinker:
         self.disjoint = {frozenset(p) for p in m.get("disjoint", [])}   # no floor shared: never compared
         self.min_s = m.get("link_min_s", 5)
         self.share = m.get("link_share", 0.6)
+        self.vote = m.get("link_vote", 0.0)
+        self.vote_share = m.get("link_vote_share", 0.15)
+        self.near_of = collections.defaultdict(collections.Counter)   # track -> other cameras' tracks: seconds near
         # strict joining: the next cow at least link_margin further than the pair; and no join that would
         # put together two tracks of other cameras seen at the same time for link_contra_s seconds yet
         # near in less than link_contra of them (A=B and B=C must not make A=C when A and C stood apart)
@@ -932,7 +935,16 @@ class TrackletLinker:
                                     continue
                             k = self._key(ids[ca][x], ids[cb][y])
                             self.near[k] += 1
-                            if self.near[k] >= self.min_s and self.near[k] >= self.share * self.both[k]:
+                            self.near_of[k[0]][k[1]] += 1
+                            self.near_of[k[1]][k[0]] += 1
+                            if self.near[k] < self.min_s:
+                                continue
+                            if self.vote:                 # the most often near, clearly - not most of the time
+                                rival = max([c for o, c in self.near_of[k[0]].items() if o != k[1]] +
+                                            [c for o, c in self.near_of[k[1]].items() if o != k[0]] + [0])
+                                if self.near[k] >= self.vote * rival and self.near[k] >= self.vote_share * self.both[k]:
+                                    self._union(k[0], k[1], ts)
+                            elif self.near[k] >= self.share * self.both[k]:
                                 self._union(k[0], k[1], ts)
             return {cam: [self.root(g) for g in gs] for cam, gs in ids.items()}
 

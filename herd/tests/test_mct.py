@@ -523,6 +523,38 @@ def test_linker_refuses_a_chain_that_joins_cows_apart():
     assert lk.stats["linked"] >= 1 and lk.stats["link_contradicted"] >= 1
 
 
+def test_linker_by_vote_joins_the_pair_most_often_near():
+    """Two cows side by side, still; camera b's floor mapping is off: half the seconds its cows land 3 m away,
+    now and then swapped. Each pair is near under half the time (never link_share's 60%), but clearly more
+    often than the swapped one - joined by vote, each to the right one."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    results = {}
+    for vote in (0.0, 2.0):
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+        cfg["mct"].update(link_min_s=3, link_dist=120.0, link_margin=0.0, link_vote=vote, link_vote_share=0.15)
+        lk = mct.TrackletLinker(cfg)
+        true_b, now = lk.floor["b"], {"k": 0}
+
+        def bent(b, pl=0.5):                               # where b says its cow is: off as the second has it
+            x, y = true_b(b, pl)
+            k = now["k"]
+            x += 300.0 if k % 2 == 0 else 0.0
+            if k % 10 == 1:                                # swapped: each lands on the other cow's place
+                x += 100.0 if b[0] < 0.3 else -100.0
+            return x, y
+        lk.floor["b"] = bent
+        for k in range(60):
+            now["k"] = k
+            out = lk.update_all(float(k), {"a": [{"box": box(0.3)}, {"box": box(0.4)}],
+                                           "b": [{"box": box(0.3)}, {"box": box(0.4)}]})
+        results[vote] = out
+    assert results[0.0]["a"] != results[0.0]["b"]                  # 60% of the time: never
+    assert results[2.0]["a"] == results[2.0]["b"]                  # by vote: each to the right one
+
+
 def test_linker_leaves_disjoint_cameras_alone():
     """Two cameras in [mct] disjoint whose floor plans happen to coincide: their cows are never joined."""
     import mct

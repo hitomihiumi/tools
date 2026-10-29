@@ -111,6 +111,11 @@ DEFAULTS = {
             # MmCows with the identity model (frame-against-frame, calibrated): link_dist 160 against 120 -
             # IDF1 over all cameras 0.496 -> 0.540, purity 72 -> 77%, wrong joins 2095 -> 1682
             "link_dist": 160.0, "link_min_s": 5, "link_share": 0.6,
+            # link_vote > 0: by vote instead of link_share - a pair is joined once its seconds together are
+            # link_vote times those of either track with any other (and at least link_min_s, and link_vote_share
+            # of the seconds both were seen): an imperfect floor mapping (the barn's cam1/cam2, right in ~70% of
+            # the seconds) still puts the right pair together most often (crosscam: ~95% of cows), never 60%
+            "link_vote": 0.0, "link_vote_share": 0.15,
             # link mode, neighbours with no floor mapping (a narrow strip along a fence): a cow one camera sees
             # beyond its mask (tracking_mask) joined to the other's counted cow by look - mean cos of frame
             # ids over look_min_s s at least look_min_sim, look_margin above the next cow
