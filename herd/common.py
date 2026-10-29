@@ -116,6 +116,9 @@ DEFAULTS = {
             # of the seconds both were seen): an imperfect floor mapping (the barn's cam1/cam2, right in ~70% of
             # the seconds) still puts the right pair together most often (crosscam: ~95% of cows), never 60%
             "link_vote": 0.0, "link_vote_share": 0.15,
+            # link_look_cm > 0: the look counts too - two cows' floor distance plus link_look_cm times their
+            # frame ids' cosine distance (1 - cos): place, then look, in one number (0: place alone)
+            "link_look_cm": 0.0,
             # link mode, neighbours with no floor mapping (a narrow strip along a fence): a cow one camera sees
             # beyond its mask (tracking_mask) joined to the other's counted cow by look - mean cos of frame
             # ids over look_min_s s at least look_min_sim, look_margin above the next cow

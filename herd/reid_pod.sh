@@ -44,8 +44,9 @@
 # A herd_reid_feat_*.tgz in WORK (the second export of a run) brings every set's frame vectors: nothing
 # of those sets is fetched again.
 # A herd_barn_feat_*.tgz in WORK (herd.py barn export: the barn's own cows, named by hand) adds the set
-# "barn" to SOURCES, a herd_barn_ids_*.tgz (herd.py boxes ids: cows' boxes named on the box page) the set
-# "barn_ids" (BARN=0: neither); their held-out cows are scored with the others and set the thresholds.
+# "barn" to SOURCES, herd_barn_ids_*.tgz (herd.py boxes ids: cows' boxes named on the box page; several:
+# one set, each recording's cows apart) the set "barn_ids" (BARN=0: neither); their held-out cows are
+# scored with the others and set the thresholds.
 # Every step resumes. Licences: MmCows CC BY-NC-SA, CoBRA and SideViewCows CC BY 4.0, the Bristol sets NCGL
 # (non-commercial), CowDataset as on Figshare 16879780.
 
@@ -157,14 +158,35 @@ if [ -n "$b" ] && [ "$(cat "$R/feat/barn/.from" 2>/dev/null || true)" != "$(base
     tar -xzf "$b" -C "$WORK"
     basename "$b" > "$R/feat/barn/.from"
 fi
-# the barn's frames with each cow's box named (herd.py boxes ids): crops, made into vectors below
-bi="$(ls -t "$WORK"/herd_barn_ids_*.tgz 2>/dev/null | head -1 || true)"
-if [ -n "$bi" ] && [ "$(cat "$R/raw/barn_ids/.from" 2>/dev/null || true)" != "$(basename "$bi")" ]; then
-    step "The barn's named boxes from $bi"
-    rm -rf "$R/raw/barn_ids" "$R/feat/barn_ids"
-    mkdir -p "$R"
-    tar -xzf "$bi" -C "$WORK"
-    basename "$bi" > "$R/raw/barn_ids/.from"
+# the barn's frames with each cow's box named (herd.py boxes ids): crops, made into vectors below. Every
+# herd_barn_ids_*.tgz in WORK, one set: each archive's cows under names of their own (r1_14, r2_14 - two
+# recordings numbered apart), its held-out cows held out
+bis="$(ls "$WORK"/herd_barn_ids_*.tgz 2>/dev/null | sort || true)"
+if [ -n "$bis" ] && [ "$(cat "$R/raw/barn_ids/.from" 2>/dev/null || true)" != "$(echo $bis | xargs -n1 basename | tr '\n' ' ')" ]; then
+    step "The barn's named boxes from $(echo $bis | wc -w) archive(s)"
+    rm -rf "$R/raw/barn_ids" "$R/feat/barn_ids" "$R/_barn_ids"
+    mkdir -p "$R/raw/barn_ids"
+    k=0
+    for bi in $bis; do
+        k=$((k + 1))
+        mkdir -p "$R/_barn_ids/$k"
+        tar -xzf "$bi" -C "$R/_barn_ids/$k"
+        python3 - "$R/_barn_ids/$k/reid/raw/barn_ids" "$R/raw/barn_ids" "r$k" <<'PYEOF'
+import json, os, shutil, sys
+src, dst, tag = sys.argv[1:]
+rows = [json.loads(x) for x in open(os.path.join(src, "index.jsonl"), encoding="utf-8")]
+with open(os.path.join(dst, "index.jsonl"), "a", encoding="utf-8") as fh:
+    for r in rows:
+        f = os.path.join(tag, r["file"])
+        os.makedirs(os.path.dirname(os.path.join(dst, f)), exist_ok=True)
+        shutil.move(os.path.join(src, r["file"]), os.path.join(dst, f))
+        fh.write(json.dumps(dict(r, file=f, cow=f"{tag}_{r['cow']}")) + "\n")
+print(f"  {tag}: {len(rows)} named boxes of {len({r['cow'] for r in rows})} cows")
+PYEOF
+    done
+    rm -rf "$R/_barn_ids"
+    echo '{"merged": true}' > "$R/raw/barn_ids/complete.json"
+    echo $bis | xargs -n1 basename | tr '\n' ' ' > "$R/raw/barn_ids/.from"
 fi
 if [ "${BARN:-1}" = "1" ] && [ -f "$R/raw/barn_ids/index.jsonl" ] && [[ " $SOURCES " != *" barn_ids "* ]]; then
     SOURCES="$SOURCES barn_ids"

@@ -555,6 +555,30 @@ def test_linker_by_vote_joins_the_pair_most_often_near():
     assert results[2.0]["a"] == results[2.0]["b"]                  # by vote: each to the right one
 
 
+def test_linker_place_and_look_together():
+    """Two cows lying 10 cm apart, camera b's floor 80 cm off at random: by place alone each is b's nearest to
+    either about as often (no vote won); with the look in the same number (link_look_cm) to the right one."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    e1, e2 = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+    out = {}
+    for look in (0.0, 300.0):
+        rng = np.random.default_rng(0)
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+        cfg["mct"].update(link_min_s=3, link_dist=120.0, link_margin=0.0, link_vote=2.0, link_look_cm=look)
+        lk = mct.TrackletLinker(cfg)
+        true_b = lk.floor["b"]
+        lk.floor["b"] = lambda b, pl=0.5: (lambda p: (p[0] + rng.normal(0, 80.0), p[1]))(true_b(b, pl))
+        for k in range(60):
+            res = lk.update_all(float(k), {"a": [{"box": box(0.30), "emb": e1}, {"box": box(0.31), "emb": e2}],
+                                           "b": [{"box": box(0.30), "emb": e1}, {"box": box(0.31), "emb": e2}]})
+        out[look] = res
+    assert out[0.0]["a"] != out[0.0]["b"]
+    assert out[300.0]["a"] == out[300.0]["b"]
+
+
 def test_linker_leaves_disjoint_cameras_alone():
     """Two cameras in [mct] disjoint whose floor plans happen to coincide: their cows are never joined."""
     import mct

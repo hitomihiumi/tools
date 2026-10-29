@@ -690,6 +690,7 @@ class TrackletLinker:
         self.min_s = m.get("link_min_s", 5)
         self.share = m.get("link_share", 0.6)
         self.vote = m.get("link_vote", 0.0)
+        self.look_cm = m.get("link_look_cm", 0.0)
         self.vote_share = m.get("link_vote_share", 0.15)
         self.near_of = collections.defaultdict(collections.Counter)   # track -> other cameras' tracks: seconds near
         # strict joining: the next cow at least link_margin further than the pair; and no join that would
@@ -882,6 +883,18 @@ class TrackletLinker:
             return None
         return [(f(d["box"], 1.0), f(d["box"], 0.0), d.get("p_lying", 0.5)) for d in ds]
 
+    @staticmethod
+    def _look(da, db):
+        """Every a against every b: 1 - cos of their frame ids (0.5 where either has none)."""
+        def unit(d):
+            e = d.get("emb")
+            if e is None:
+                return None
+            e = np.asarray(e, np.float32)
+            return e / max(float(np.linalg.norm(e)), 1e-9)
+        ua, ub = [unit(d) for d in da], [unit(d) for d in db]
+        return np.array([[0.5 if a is None or b is None else 1.0 - float(a @ b) for b in ub] for a in ua])
+
     def _d(self, p, q):
         best = np.inf
         for h, like in ((0, lambda r: r[2]), (1, lambda r: 1 - r[2])):
@@ -916,6 +929,8 @@ class TrackletLinker:
                     if frozenset((ca, cb)) in self.disjoint:
                         continue
                     D = np.array([[self._d(p, q) for q in pts[cb]] for p in pts[ca]])
+                    if self.look_cm and D.size:                # place and look in one number
+                        D = D + self.look_cm * self._look(per_cam[ca], per_cam[cb])
                     for x, ga in enumerate(ids[ca]):
                         for y, gb in enumerate(ids[cb]):
                             self.both[self._key(ga, gb)] += 1

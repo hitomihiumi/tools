@@ -634,6 +634,11 @@ def variants(args, has_mats, cal=None):
         # joined by most of the time (link_share) against by vote
         v += [("fid/link-final~bent80", "fid", "link-final", dict(r9, _bend=80.0)),
               ("fid/link-final~bent80+vote2", "fid", "link-final", dict(r9, _bend=80.0, link_vote=2.0, link_margin=0.0))]
+        # place and look in one number (link_look_cm per unit of the frame ids' cosine distance)
+        v += [(f"fid/link-final+vote2+look{c:g}", "fid", "link-final", dict(r9, link_vote=2.0, link_margin=0.0,
+                                                                            link_look_cm=c)) for c in (100.0, 300.0)]
+        v += [("fid/link-final~bent80+vote2+look300", "fid", "link-final",
+               dict(r9, _bend=80.0, link_vote=2.0, link_margin=0.0, link_look_cm=300.0))]
         v += [("fid/link-final-nomargin", "fid", "link-final", dict(r9, link_margin=0.0)),
               ("fid/link-final+contra", "fid", "link-final", dict(r9, link_contra=0.3))]
         if cal and cal.get("late_sim"):                          # the late reacquire (off by default) tried
