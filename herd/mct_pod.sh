@@ -89,6 +89,11 @@ if [ -z "${DET:-}" ]; then
            | sort -rn | head -1 | cut -d' ' -f2-)"
 fi
 [ -n "$DET" ] && [ -f "$DET/det_train_meta.json" ] || { echo "!! no detector best/ under $H (DET=<it>)"; exit 1; }
+if [ -n "${IDENTITY:-}" ] && [ ! -f "$IDENTITY" ]; then                     # before an hour of fetching
+    echo "!! IDENTITY=$IDENTITY: no such file - upload the identity model's folder (identity.pt, thresholds.json,"
+    echo "   abstain.json) there, or leave IDENTITY out for the herd model's own frame id"
+    exit 1
+fi
 echo "model    $H/$RUN/model.pt"
 echo "detector $DET"
 
