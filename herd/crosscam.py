@@ -208,17 +208,23 @@ def fit_lens(mos, cam_a, cam_b, where, keep=(), iters=300):
     return best[1], best[2], best[3]
 
 
-def check(mos, cam_a, cam_b, where, seed=0, gate=GATE, planes=1):
-    """Each moment matched by the mapping fitted without it -> the counts and the misses by distance."""
+def check(mos, cam_a, cam_b, where, seed=0, gate=GATE, planes=1, train=None):
+    """Each moment matched by the mapping fitted without it (train given: fitted once, on another recording's
+    moments) -> the counts and the misses by distance."""
     from scipy.optimize import linear_sum_assignment
     per = [pairs_of(mo, cam_a, cam_b, where) for mo in mos]
     n = collections.Counter()
     miss, chance, cows = [], [], collections.defaultdict(collections.Counter)
     lands = collections.defaultdict(collections.Counter)      # your cow -> your other cows she was put on
+    partner = collections.defaultdict(collections.Counter)    # your cow -> what she was matched to, each moment
+    fixed = None
+    if train is not None:
+        tr = [pairs_of(mo, cam_a, cam_b, where) for mo in train]
+        fixed = fit_model([p for pa, _ in tr for p in pa], [p for _, pb in tr for p in pb], random.Random(seed), planes)
     for k, mo in enumerate(mos):
         src = [p for j, (pa, _) in enumerate(per) if j != k for p in pa]
         dst = [p for j, (_, pb) in enumerate(per) if j != k for p in pb]
-        model = fit_model(src, dst, random.Random(seed + k), planes, iters=500)
+        model = fixed if train is not None else fit_model(src, dst, random.Random(seed + k), planes, iters=500)
         if model is None:
             n["not_fitted"] += 1
             continue
@@ -240,13 +246,29 @@ def check(mos, cam_a, cam_b, where, seed=0, gate=GATE, planes=1):
             what = "none" if j is None else ("right" if idb[j] == cid else "wrong")
             n[what] += 1
             cows[cid][what] += 1
+            partner[cid][None if j is None else idb[j]] += 1
             if what == "wrong":
                 lands[cid][idb[j]] += 1
     return {"cows": n["cows"], "right": n["right"], "wrong": n["wrong"], "none": n["none"],
             "moments_not_fitted": n["not_fitted"], "chance": float(np.mean(chance)) if chance else 0.0,
             "median_miss": float(np.median(miss)) if miss else None,
-            "by_cow": {c: dict(v) for c, v in sorted(cows.items())},
+            "by_cow": {c: dict(v) for c, v in sorted(cows.items())}, **over_time(partner),
             "lands_on": {c: dict(v.most_common(3)) for c, v in sorted(lands.items())}}
+
+
+def over_time(partner):
+    """What the linker asks: over all the moments, is the cow she was matched to most often (her pair's
+    tracks standing together longest) the right one? -> cows right / another / never matched."""
+    right = wrong = never = 0
+    for cid, cnt in partner.items():
+        seen = [(k, c) for c, k in cnt.items() if c is not None]
+        if not seen:
+            never += 1
+        elif max(seen)[1] == cid:
+            right += 1
+        else:
+            wrong += 1
+    return {"over_time": {"cows": len(partner), "right": right, "wrong": wrong, "never": never}}
 
 
 def picture(path, boxes_dir, mos, cam_a, cam_b, model, where):
@@ -397,6 +419,7 @@ def check_learnt(mos, gate=GATE, train=None, kind="poly"):
     recording's moments only) -> the same counts as check()."""
     from scipy.optimize import linear_sum_assignment
     n, cows = collections.Counter(), collections.defaultdict(collections.Counter)
+    partner = collections.defaultdict(collections.Counter)
     chance, fixed = [], (learn(train, kind) if train is not None else None)
     for k, mo in enumerate(mos):
         model = fixed if train is not None else learn(mos[:k] + mos[k + 1:], kind)
@@ -416,16 +439,20 @@ def check_learnt(mos, gate=GATE, train=None, kind="poly"):
             what = "none" if j is None else ("right" if idb[j] == cid else "wrong")
             n[what] += 1
             cows[cid][what] += 1
+            partner[cid][None if j is None else idb[j]] += 1
     return {"cows": n["cows"], "right": n["right"], "wrong": n["wrong"], "none": n["none"],
             "moments_not_fitted": n["not_fitted"], "chance": float(np.mean(chance)) if chance else 0.0,
-            "by_cow": {c: dict(v) for c, v in sorted(cows.items())}}
+            "by_cow": {c: dict(v) for c, v in sorted(cows.items())}, **over_time(partner)}
 
 
 def say(name, y):
     if not y["cows"]:
         return f"  {name}: no mapping"
+    t = y.get("over_time")
     return (f"  {name}: the right cow {y['right'] / y['cows']:.0%} (another {y['wrong'] / y['cows']:.0%}, none near "
-            f"{y['none'] / y['cows']:.0%}) of {y['cows']}")
+            f"{y['none'] / y['cows']:.0%}) of {y['cows']}" +
+            (f"; over all the moments the right partner for {t['right']} of {t['cows']} cows (another "
+             f"{t['wrong']}, none {t['never']})" if t else ""))
 
 
 def onto(cams, ref, oth, H, mos, where):
@@ -525,11 +552,14 @@ def main(argv=None):
                            for c in (a, b))
             print(f"  {where:6}: the right cow {y['right'] / y['cows']:.0%} (another {y['wrong'] / y['cows']:.0%}, none near "
                   f"{y['none'] / y['cows']:.0%}) of {y['cows']}, a guess {y['chance']:.0%}; median miss "
-                  f"{y['median_miss']:.1%} of the frame height; {y['inliers']} of {npairs} pairs agree; lens {ls}")
+                  f"{y['median_miss']:.1%} of the frame height; {y['inliers']} of {npairs} pairs agree; lens {ls}; "
+                  f"over all the moments the right partner for {y['over_time']['right']} of {y['over_time']['cows']} "
+                  f"cows (another {y['over_time']['wrong']})")
             if z and z["cows"]:
                 print(f"  {'':6}  in {z['planes']} planes (" + ", ".join(f"{x:.0%}" for x in z["share"]) +
                       f" of the pairs): the right cow {z['right'] / z['cows']:.0%} (another {z['wrong'] / z['cows']:.0%}, "
-                      f"none near {z['none'] / z['cows']:.0%})")
+                      f"none near {z['none'] / z['cows']:.0%}); over all the moments the right partner for "
+                      f"{z['over_time']['right']} of {z['over_time']['cows']} cows (another {z['over_time']['wrong']})")
         bad = [(c, v) for c, v in x["by_cow"].items() if v.get("right", 0) < sum(v.values())]
         if bad:
             print("  cows it missed (" + best + "): " + ", ".join(
@@ -559,6 +589,13 @@ def main(argv=None):
             fr2 = {f["file"]: f for f in json.load(open(os.path.join(args.also[0], "frames.json"), encoding="utf-8"))["frames"]}
             mos2 = moments(cfg, fr2, read_labels(args.also[1]), a, b)
             if mos2:
+                ca, cb = fitted[best][:2]
+                for nm, pl in (("one plane", 1), (f"{args.planes} planes", args.planes)):
+                    x1 = check(mos2, ca, cb, best, gate=args.gate, planes=pl, train=mos)
+                    x2 = check(mos, ca, cb, best, gate=args.gate, planes=pl, train=mos2)
+                    r[f"{best}_{pl}_other_recording"], r[f"{best}_{pl}_from_other_recording"] = x1, x2
+                    print(say(f"{nm} ({best}s): learnt here, checked on the other recording", x1))
+                    print(say(f"{nm} ({best}s): learnt on the other, checked here", x2))
                 for kind, nm in (("poly", "smooth"), ("local", "nearest pairs")):
                     x1 = check_learnt(mos2, gate=args.gate, train=mos, kind=kind)
                     x2 = check_learnt(mos, gate=args.gate, train=mos2, kind=kind)
