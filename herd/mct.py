@@ -1295,7 +1295,9 @@ class TrackletLinker:
             self.last_ts = ts
             if self.rule == "llr" and (self.flushed is None or ts - self.flushed >= 600):
                 self._forget(ts)
-            raw = {cam: self.cam_tracker.update(cam, ts, ds) for cam, ds in per_cam.items()}
+            # each camera's tracks as given (a store replayed: herd.py relink), else its own tracker's
+            raw = {cam: ([d["track"] for d in ds] if ds and all("track" in d for d in ds)
+                         else self.cam_tracker.update(cam, ts, ds)) for cam, ds in per_cam.items()}
             # the low boxes no track took ([tracker] low_score) are no cow here: left out, None in the answer
             per_cam = {cam: [d for d, g in zip(ds, raw[cam]) if g is not None] for cam, ds in per_cam.items()}
             ids = {cam: [g for g in gs if g is not None] for cam, gs in raw.items()}

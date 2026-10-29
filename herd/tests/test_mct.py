@@ -1323,3 +1323,27 @@ def test_trial_says_how_often_one_cow_on_two_cameras_got_one_id():
     assert (m["moments"], m["one_track"], m["same_cow"], m["two_cows"], m["no_name"]) == (3, 1, 1, 1, 1)
     assert m["cows"]["7"] == {"moments": 1, "one_track": 0, "same_cow": 0, "two_cows": 1, "no_name": 0}
     assert m["camera_pairs"]["cam1-cam2"]["moments"] == 3
+
+
+def test_trial_relink_joins_a_recorded_trial_anew():
+    """trial --relink: the second pass's tracks as they were, joined across cameras again with the config's floor -
+    a copy in OUT/relink, the old joins cleared, the original store untouched."""
+    import trial
+    from store import Store
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "pass2"))
+        st = Store(os.path.join(d, "pass2", "herd.sqlite"))
+        rows = []
+        for t in range(100, 220):
+            for cam, tr, x in (("cam1", "a1", 0.3), ("cam1", "a2", 0.6), ("cam2", "b1", 0.3), ("cam2", "b2", 0.6)):
+                rows.append((cam, tr, float(t), x - 0.03, 0.45, x + 0.03, 0.5, "lying", "none", 0.9))
+        st.seconds(rows)
+        st.link_tracks(100.0, "b2", "a1")                    # a wrong join of the trial: cleared
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("cam1", "cam2")]
+        cfg["mct"].update(link_rule="llr")
+        dst = trial.relink(cfg, d)
+        roots = Store(dst).track_roots()
+        assert {frozenset((t, r)) for t, r in roots.items()} == {frozenset(("a1", "b1")), frozenset(("a2", "b2"))}
+        assert Store(os.path.join(d, "pass2", "herd.sqlite")).track_roots() == {"b2": "a1"}

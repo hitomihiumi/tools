@@ -21,6 +21,7 @@ IDR beside it; per camera too, and which of its cows took two of yours (merged) 
 
     python herd/herd.py trial ... --boxes /srv/herd/boxes --labels /srv/herd/labels.json
     python herd/herd.py trial --score-only --config barn.toml --out /srv/herd/trial --boxes ... --labels ...
+    python herd/herd.py trial --relink --config barn.toml --out /srv/herd/trial --boxes ... --labels ...   # joins anew
 """
 
 from __future__ import annotations
@@ -792,6 +793,66 @@ def overlap(cfg):
     return cfg
 
 
+def relink(cfg, out):
+    """--relink: the second pass's store copied to OUT/relink/ (and its gallery), its cross-camera joins, evidence,
+    the night's merges and the questions to a person cleared, and each second of it played again through
+    mct.TrackletLinker with this config - each camera's tracks as the trial made them, only the joining anew
+    (new floor_points, link_* settings, clocks). Then the night's merge by place. -> the new store's path."""
+    import contextlib
+    import io
+    import sqlite3
+    import gallery as gallery_mod
+    from mct import TrackletLinker
+    from pipeline import merge_by_place
+    from store import Store
+    src = os.path.join(out, "pass2", "herd.sqlite")
+    if not os.path.exists(src):
+        sys.exit(f"[relink] no {src}: play the trial first")
+    folder = os.path.join(out, "relink")
+    shutil.rmtree(folder, ignore_errors=True)
+    os.makedirs(folder)
+    dst = os.path.join(folder, "herd.sqlite")
+    with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:     # WAL and all
+        a.backup(b)
+    if os.path.isdir(os.path.join(out, "pass2", "gallery")):
+        shutil.copytree(os.path.join(out, "pass2", "gallery"), os.path.join(folder, "gallery"))
+    store = Store(dst)
+    for t in ("track_links", "track_evidence", "merge_reviews", "cow_aliases", "track_handovers"):
+        store.execute(f"DELETE FROM {t}")
+    store.execute("DELETE FROM events WHERE kind IN ('merged-by-place', 'clocks', 'merge-reviews')")
+    cfg = copy.deepcopy(cfg)
+    cfg["mct"].update(enabled=True, mode="link")
+    cams = {c["id"] for c in cfg["cameras"]}
+    per = collections.defaultdict(lambda: collections.defaultdict(list))
+    for cam, track, ts, x1, y1, x2, y2, pl in store.query("SELECT cam, track, ts, x1, y1, x2, y2, p_lying FROM seconds "
+                                                          "ORDER BY ts"):
+        if cam in cams:
+            per[int(round(ts))][cam].append({"box": [x1, y1, x2, y2], "p_lying": 0.5 if pl is None else pl, "track": track})
+    lk = TrackletLinker(cfg, store)
+    notes = io.StringIO()
+    with contextlib.redirect_stdout(notes):
+        for ts in sorted(per):
+            lk.update_all(float(ts), dict(per[ts]))
+    if lk.last_ts is not None:
+        lk.flush_evidence(lk.last_ts)
+    near = np.asarray(lk.nearest)
+    print(f"[relink] {len(per)} seconds played again with {', '.join(sorted(cams))}: tracks joined {lk.stats['linked']}, "
+          f"refused {lk.stats['link_refused']}" + (f"; two cameras' cows each other's nearest {len(near)} times, "
+          f"{np.percentile(near, 10):.0f} / {np.percentile(near, 50):.0f} / {np.percentile(near, 90):.0f} apart "
+          "(10th / 50th / 90th percentile)" if len(near) else "; no two cameras' cows ever on one floor"), flush=True)
+    for (a, b), (lag, n, sharp) in sorted(lk.clocks().items()):
+        print(f"[relink] clocks: {b}'s frames come {lag:+.1f} s late against {a}'s ({n} walks, {sharp:.0f} cm sharper)",
+              flush=True)
+    if os.path.isdir(os.path.join(folder, "gallery")):
+        g = gallery_mod.Gallery(os.path.join(folder, "gallery"), cfg)
+        merged = merge_by_place(g, store, cfg, (lk.last_ts or 0) + 3600)
+        if merged:
+            g.save()
+        print(f"[relink] the night: {len(merged)} pairs of names made one by place, "
+              f"{len(store.reviews('pending'))} left to a person (herd.py merges page --store {dst})", flush=True)
+    return dst
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", required=True)
@@ -804,12 +865,26 @@ def main(argv=None):
     p.add_argument("--boxes", default=None, help="your labelled frames (herd.py boxes: the folder with frames.json)")
     p.add_argument("--labels", default=None, help="their labels.json with cow ids: the second pass scored (IDF1)")
     p.add_argument("--score-only", action="store_true", help="score the trial already in --out, play nothing")
+    p.add_argument("--relink", action="store_true", help="the trial already in --out joined across cameras again with "
+                   "this config's [mct] and floor_points (each camera's tracks as they were: minutes, no GPU) -> "
+                   "OUT/relink/; scored with --boxes and --labels")
     p.add_argument("--cameras", nargs="*", default=None, help="score these cameras only (one id across them)")
     p.add_argument("--overlap", action="store_true",
                    help="an experiment: every camera counts its whole tracking_mask (masks share floor) and a cow "
                         "counted by two cameras at once may be one cow - does one cow get one id on both? "
                         "Never for a barn: shared floor counts its cows twice")
     args = p.parse_args(argv)
+    if args.relink:
+        cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
+        out = os.path.abspath(args.out.rstrip("\\"))
+        dst = relink(cfg, out)
+        if args.boxes and args.labels:
+            sc = score(dst, cfg, args.boxes, args.labels, page_dir=os.path.dirname(dst), cameras=args.cameras)
+            with open(os.path.join(os.path.dirname(dst), "score.json"), "w", encoding="utf-8") as fh:
+                json.dump(sc, fh, indent=2)
+            print_score(sc)
+            print(f"-> {os.path.join(os.path.dirname(dst), 'score.json')}")
+        return
     if args.score_only:
         if not (args.boxes and args.labels):
             p.error("--score-only needs --boxes and --labels")

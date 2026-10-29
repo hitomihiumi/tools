@@ -451,6 +451,23 @@ shared floor its cows are counted twice.
 docker compose run --rm herd trial --overlap --config /data/barn.toml --videos /data/rec_fixed --out /data/trial_overlap --boxes /data/boxes --labels /data/labels.json
 ```
 
+**Is the joining on at all?** A run with `[mct] mode = "link"` ends with `[run] [mct] two cameras' cows each
+other's nearest ...` and `tracks joined across cameras N`; with `link_rule = "llr"` the store's `track_evidence`
+fills. None of it in the log: the image is older than the code (`docker compose build` after `git pull`) or the
+container reads another barn.toml.
+
+**Another calibration or [mct] setting, without playing the recordings again** (minutes, no GPU): each camera's
+tracks as the trial made them, only the joining across cameras done anew with the config as it is now, then
+scored on your labels:
+
+```bash
+docker compose run --rm herd trial --relink --overlap --config /data/barn.toml --out /data/trial_overlap --boxes /data/boxes --labels /data/labels.json
+```
+
+It writes `trial_overlap/relink/` (a copy of the store, the trial's own left as it was) and says how far apart
+the two cameras put their nearest cows and how many tracks it joined. Recalibrate (studio, `autocalib --pick`),
+relink, compare - then a full trial with the calibration that wins.
+
 The score then says, for every moment one of your cows is in both cameras' frames and both found her: how
 often she was on **one joined track** (the linker found her on both), had **one id** (the same cow on both -
 joins, the night's merges and your `merges apply` answers followed), **two different cows**, or **no name** on
