@@ -555,6 +555,21 @@ def test_linker_by_vote_joins_the_pair_most_often_near():
     assert results[2.0]["a"] == results[2.0]["b"]                  # by vote: each to the right one
 
 
+def test_linker_vote_rivals_only_on_the_partner_camera():
+    """Three cameras over one cow: her tracks on b and c are not each other's rivals for a's track - all three
+    joined by vote."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b", "c")]
+    cfg["mct"].update(link_min_s=3, link_dist=120.0, link_margin=0.0, link_vote=2.0)
+    lk = mct.TrackletLinker(cfg)
+    for k in range(10):
+        out = lk.update_all(float(k), {c: [{"box": box(0.3)}] for c in ("a", "b", "c")})
+    assert out["a"] == out["b"] == out["c"]
+
+
 def test_linker_place_and_look_together():
     """Two cows lying 10 cm apart, camera b's floor 80 cm off at random: by place alone each is b's nearest to
     either about as often (no vote won); with the look in the same number (link_look_cm) to the right one."""

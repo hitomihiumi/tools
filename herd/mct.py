@@ -955,8 +955,11 @@ class TrackletLinker:
                             if self.near[k] < self.min_s:
                                 continue
                             if self.vote:                 # the most often near, clearly - not most of the time
-                                rival = max([c for o, c in self.near_of[k[0]].items() if o != k[1]] +
-                                            [c for o, c in self.near_of[k[1]].items() if o != k[0]] + [0])
+                                # rivals: the other tracks of the partner's own camera (a third camera's track of
+                                # the same cow is no rival - four cameras see one cow three times over)
+                                c0, c1 = self.life[k[0]][0], self.life[k[1]][0]
+                                rival = max([c for o, c in self.near_of[k[0]].items() if o != k[1] and self.life[o][0] == c1] +
+                                            [c for o, c in self.near_of[k[1]].items() if o != k[0] and self.life[o][0] == c0] + [0])
                                 if self.near[k] >= self.vote * rival and self.near[k] >= self.vote_share * self.both[k]:
                                     self._union(k[0], k[1], ts)
                             elif self.near[k] >= self.share * self.both[k]:

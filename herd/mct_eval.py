@@ -639,6 +639,9 @@ def variants(args, has_mats, cal=None):
                                                                             link_look_cm=c)) for c in (100.0, 300.0)]
         v += [("fid/link-final~bent80+vote2+look300", "fid", "link-final",
                dict(r9, _bend=80.0, link_vote=2.0, link_margin=0.0, link_look_cm=300.0))]
+        # the look without the vote: the usual rule, place and look in one number
+        v += [("fid/link-final+look300", "fid", "link-final", dict(r9, link_look_cm=300.0)),
+              ("fid/link-final~bent80+look300", "fid", "link-final", dict(r9, _bend=80.0, link_look_cm=300.0))]
         v += [("fid/link-final-nomargin", "fid", "link-final", dict(r9, link_margin=0.0)),
               ("fid/link-final+contra", "fid", "link-final", dict(r9, link_contra=0.3))]
         if cal and cal.get("late_sim"):                          # the late reacquire (off by default) tried
