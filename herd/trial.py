@@ -177,7 +177,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         pred = [(list(r[2:6]), tm.get(r[0]), roots.get(r[0], r[0])) for r in rows if r[1] == sec]
         view.append({"cam": cam, "ts": f["ts"], "file": file, "w": f.get("w", 1920), "h": f.get("h", 1080),
                      "mine": [[*map(float, b), i, (b, i) in truth] for b, i in named],   # [.., scored: in its mask]
-                     "its": [[*map(float, r[2:6]), tm.get(r[0]), r[0]] for r in rows if r[1] == sec],
+                     "its": [[*map(float, r[2:6]), tm.get(r[0]), r[0], roots.get(r[0], r[0])] for r in rows if r[1] == sec],
                      "hit": match([b for b, _ in named], [p[0] for p in pred], min_iou)})
         n[(cam, "your_boxes")] += len(truth)
         n[(cam, "its_named_boxes")] += sum(1 for p in pred if p[1])
@@ -216,7 +216,8 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         out["same_cow_page"] = same_cow_page(page_dir, boxes_dir, labels, frames, out["merged"])
     if page_dir and view:
         out["boxes_page"] = boxes_page(page_dir, boxes_dir, view, out["all"]["mapping"],
-                                       cfg["farm"].get("timezone_offset_hours", 0), unnamed(store, tm))
+                                       cfg["farm"].get("timezone_offset_hours", 0), unnamed(store, tm),
+                                       joined_groups(store, roots))
     return out
 
 
@@ -254,14 +255,29 @@ def match(mine, its, min_iou):
     return [(int(i), int(j)) for i, j in zip(r, c) if M[i, j] >= min_iou]
 
 
-def boxes_page(out, boxes_dir, view, mapping, tz_hours=0, why=None):
+def joined_groups(store, roots):
+    """{track the joined ones go under: its number} for every group of tracks joined across two cameras or more,
+    numbered by when it begins (#1, #2, ...): the same number on two cameras is one cow to the system."""
+    cam_of, first = {}, {}
+    for track, cam, ts in store.query("SELECT track, MIN(cam), MIN(ts) FROM seconds GROUP BY track"):
+        cam_of[track], first[track] = cam, ts
+    cams = collections.defaultdict(set)
+    for track, cam in cam_of.items():
+        cams[roots.get(track, track)].add(cam)
+    groups = sorted((g for g, cs in cams.items() if len(cs) > 1),
+                    key=lambda g: min(first[t] for t in cam_of if roots.get(t, t) == g))
+    return {g: k + 1 for k, g in enumerate(groups)}
+
+
+def boxes_page(out, boxes_dir, view, mapping, tz_hours=0, why=None, joined=None):
     """OUT/boxes.html: every labelled moment with all its cameras side by side - your boxes with your ids and
     the cow the system gave each (right / another cow / not found / no name given) - and any box, or any cow of
     yours, as crops from every camera and moment. The frames are read where they are (boxes/frames/...)."""
     rel = lambda file: os.path.relpath(os.path.join(boxes_dir, file), out).replace(os.sep, "/")
     frames = [dict(v, src=rel(v["file"])) for v in sorted(view, key=lambda v: (v["ts"], v["cam"]))]
     tracks = {b[5] for v in view for b in v["its"] if not b[4]}
-    data = {"frames": frames, "mapping": mapping, "tz": tz_hours, "why": {t: w for t, w in (why or {}).items() if t in tracks}}
+    data = {"frames": frames, "mapping": mapping, "tz": tz_hours, "why": {t: w for t, w in (why or {}).items() if t in tracks},
+            "joined": joined or {}}
     path = os.path.join(out, "boxes.html")
     with open(path, "w", encoding="utf-8") as fh:
         fh.write(BOXES_PAGE.replace("__DATA__", json.dumps(data).replace("</", "<\\/")))
@@ -588,6 +604,16 @@ h3 { font-size: 13px; color: var(--muted); font-weight: normal; margin: 12px 0 4
   box-shadow: 0 0 0 9999px rgba(0, 0, 0, .38); }
 .strip figure.here .crop, .strip figure.here .shot { outline: 3px solid var(--fg); outline-offset: 1px; }
 .cam { font-weight: 600; color: var(--fg); font-size: 12px; margin-top: 4px; }
+.box.j { box-shadow: 0 0 0 3px var(--g), 0 0 0 5px #000; }
+.box .jn { position: absolute; right: -2px; bottom: -2px; background: var(--g); color: #000; font-weight: 700;
+  font-size: 12px; line-height: 16px; padding: 0 5px; border-radius: 3px; }
+#cross { padding: 6px 16px 0; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; }
+#cross:empty { display: none; }
+#cross .chip { border-radius: 12px; padding: 2px 9px; border: 1px solid var(--line); background: var(--card); cursor: pointer; }
+#cross .chip.track { background: var(--right); color: #fff; border-color: var(--right); }
+#cross .chip.oneid { border: 2px solid var(--right); }
+#cross .chip.two { background: var(--wrong); color: #fff; border-color: var(--wrong); }
+#cross .chip.noname { border: 2px dashed var(--nocow); }
 </style></head><body>
 <header><h1>Boxes</h1>
   <button id="prev" title="Left arrow">&#9664;</button><span id="when"></span><button id="next" title="Right arrow">&#9654;</button>
@@ -596,13 +622,16 @@ h3 { font-size: 13px; color: var(--muted); font-weight: normal; margin: 12px 0 4
   <label><input type="checkbox" id="errs"> moments with a mistake (E)</label>
   <label><input type="checkbox" id="extra" checked> its boxes you did not name</label>
   <label><input type="checkbox" id="zoom"> close-ups (Z)</label>
+  <label><input type="checkbox" id="both"> your cow on two cameras (B)</label>
 </header>
 <div class="legend">
   <span><i style="background:var(--right)"></i>the right cow</span><span><i style="background:var(--wrong)"></i>another cow</span>
   <span><i style="background:var(--missed)"></i>not found</span><span><i style="background:var(--nocow)"></i>found, no name given (a cow all the same)</span>
   <span><i style="background:var(--extra)"></i>its box, not yours</span><span>dashed: outside this camera's mask (not scored)</span>
   <span>Click a box: it from every camera and moment.</span>
+  <span><b style="color:var(--fg)">&#8644;#7</b> and a coloured ring: one track across the cameras - the same number on another camera is the same cow to the system</span>
 </div>
+<div id="cross"></div>
 <div id="grid"></div>
 <section id="insp"></section>
 <script>
@@ -628,7 +657,29 @@ function clock(ts) {
   const d = new Date((ts + DATA.tz * 3600) * 1000);
   return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
 }
-let shown = new Set(CAMS), cow = "", errs = false, extra = true, zoom = false, sel = null, m = 0;
+let shown = new Set(CAMS), cow = "", errs = false, extra = true, zoom = false, both = false, sel = null, m = 0;
+const J = DATA.joined || {};
+const gcol = n => `hsl(${(n * 137.5) % 360} 85% 60%)`;
+function cross(mo) {                                  // your cows two shown cameras see at this moment, each judged
+  const by = {};
+  Object.entries(mo.at).filter(([c]) => shown.has(c)).forEach(([c, i]) => {
+    const f = F[i], [mm] = hitOf(f);
+    f.mine.forEach((b, k) => { const j = mm[k];
+      (by[b[4]] = by[b[4]] || []).push({ cam: c, fi: i, k, its: j === undefined ? null : f.its[j] }); });
+  });
+  return Object.entries(by).filter(([, v]) => new Set(v.map(x => x.cam)).size > 1).map(([id, v]) => {
+    const found = v.filter(x => x.its), roots = new Set(found.map(x => x.its[6])), cows = new Set(found.map(x => x.its[4]));
+    let kind, words;
+    if (found.length < v.length) { kind = "missed"; words = "not found on " + v.filter(x => !x.its).map(x => x.cam).join(", "); }
+    else if (roots.size === 1 && J[found[0].its[6]]) { kind = "track"; words = `ONE TRACK #${J[found[0].its[6]]}` +
+      (found[0].its[4] ? ` = ${found[0].its[4]}` : ", no name yet"); }
+    else if (cows.has(null) || cows.has(undefined) || cows.has("")) { kind = "noname"; words = "no name on " +
+      found.filter(x => !x.its[4]).map(x => x.cam).join(", ") + (roots.size > 1 ? ", not joined" : ""); }
+    else if (cows.size === 1) { kind = "oneid"; words = `one id ${[...cows][0]} (tracks not joined)`; }
+    else { kind = "two"; words = "two cows: " + found.map(x => `${x.cam} ${x.its[4]}`).join(" / "); }
+    return { id, kind, words, at: v[0] };
+  }).sort((a, b) => (+a.id - +b.id) || a.id.localeCompare(b.id));
+}
 try { const s = JSON.parse(localStorage.getItem("boxes-cams") || "null"); if (s) shown = new Set(s.filter(c => CAMS.includes(c))); } catch (e) {}
 if (!shown.size) shown = new Set(CAMS);
 const save = () => { try { localStorage.setItem("boxes-cams", JSON.stringify([...shown])); } catch (e) {} };
@@ -639,6 +690,7 @@ function wanted(mo) {
   const fs = Object.entries(mo.at).filter(([c]) => shown.has(c)).map(([, i]) => F[i]);
   if (cow && !fs.some(f => f.mine.some(b => b[4] === cow))) return false;
   if (errs && !fs.some(f => f.mine.some((b, k) => b[5] && (!cow || b[4] === cow) && status(f, k) !== "right"))) return false;
+  if (both && !cross(mo).some(x => !cow || x.id === cow)) return false;
   return fs.length > 0;
 }
 const list = () => moments.map((mo, i) => i).filter(i => wanted(moments[i]));
@@ -667,9 +719,11 @@ function boxEl(f, fi, b, kind, k, st) {
     const [mm] = hitOf(f), j = mm[k], c = j === undefined ? null : f.its[j][4];
     lab = st === "right" ? `${b[4]} = ${c}` : st === "wrong" ? `${b[4]}: ${c}` : st === "missed" ? `${b[4]}: not found` : `${b[4]}: no name`;
   } else lab = b[4] || "no name";
-  return `<div class="box ${st} ${kind === "mine" && !b[5] ? "out" : ""} ${dim ? "dim" : ""} ${isSel ? "sel" : ""}"
+  const it = kind === "mine" ? (j => j === undefined ? null : f.its[j])(hitOf(f)[0][k]) : b;
+  const g = it && J[it[6]];
+  return `<div class="box ${st} ${kind === "mine" && !b[5] ? "out" : ""} ${dim ? "dim" : ""} ${isSel ? "sel" : ""} ${g ? "j" : ""}"
     data-fi="${fi}" data-kind="${kind}" data-k="${k}"
-    style="left:${x1 * 100}%;top:${y1 * 100}%;width:${(x2 - x1) * 100}%;height:${(y2 - y1) * 100}%"><span>${lab}</span></div>`;
+    style="left:${x1 * 100}%;top:${y1 * 100}%;width:${(x2 - x1) * 100}%;height:${(y2 - y1) * 100}%${g ? `;--g:${gcol(g)}` : ""}"><span>${lab}</span>${g ? `<b class="jn">&#8644;#${g}</b>` : ""}</div>`;
 }
 function render() {
   const mo = moments[m];
@@ -688,6 +742,9 @@ function render() {
       <div class="frame" style="aspect-ratio:${f.w}/${f.h}"><img src="${f.src}" alt="${c}" onerror="this.style.visibility='hidden'">${html}</div></div>`;
   }).join("");
   document.getElementById("cams").innerHTML = CAMS.map(c => `<button data-cam="${c}" class="${shown.has(c) ? "on" : ""}">${c}</button>`).join(" ");
+  const cr = mo ? cross(mo) : [];
+  document.getElementById("cross").innerHTML = cr.length ? `<span>your cows on two cameras now:</span>` + cr.map(x =>
+    `<span class="chip ${x.kind}" data-fi="${x.at.fi}" data-kind="mine" data-k="${x.at.k}" title="click: this cow on every camera">your ${x.id}: ${x.words}</span>`).join("") : "";
   inspect();
 }
 function shot(f, b, W, st) {                        // the whole frame, the box marked, the rest darker
@@ -715,7 +772,9 @@ function inspect() {
     const words = { right: "the right cow", wrong: "another cow", missed: "not found", nocow: "found, no name given" }[st];
     facts = `<b>your ${b[4]}</b> → its <b>${c || "—"}</b> <span class="${st}" style="color:var(--c)">${words}</span><br>
       ${MAP[b[4]] ? `<span class="note">your ${b[4]} is its ${MAP[b[4]]} overall</span><br>` : ""}
-      ${f.cam} · ${clock(f.ts)}${j !== undefined ? ` · track ${f.its[j][5]}` : ""}${b[5] ? "" : `<br><span class="note">outside ${f.cam}'s mask: not scored</span>`}
+      ${f.cam} · ${clock(f.ts)}${j !== undefined ? ` · track ${f.its[j][5]}` : ""}${j !== undefined && J[f.its[j][6]] ?
+        `<br><b class="jn" style="position:static;--g:${gcol(J[f.its[j][6]])};background:var(--g)">&#8644;#${J[f.its[j][6]]}</b> one track across the cameras: the same number on another camera is this cow to the system` :
+        j !== undefined ? `<br><span class="note">a track of ${f.cam} alone: not joined to another camera's</span>` : ""}${b[5] ? "" : `<br><span class="note">outside ${f.cam}'s mask: not scored</span>`}
       ${st === "nocow" && (DATA.why || {})[f.its[j][5]] ? `<br><span class="note">no name: ${DATA.why[f.its[j][5]]}</span>` : ""}`;
     title = `Your cow ${b[4]}, every camera and moment (its cow under each)`;
     F.forEach((g, fi) => g.mine.forEach((x, k) => {
@@ -763,6 +822,7 @@ sel_.onchange = () => { cow = sel_.value; sel = null; go(0); };
 document.getElementById("errs").onchange = e => { errs = e.target.checked; go(0); };
 document.getElementById("extra").onchange = e => { extra = e.target.checked; render(); };
 document.getElementById("zoom").onchange = e => { zoom = e.target.checked; inspect(); };
+document.getElementById("both").onchange = e => { both = e.target.checked; go(0); };
 document.addEventListener("keydown", e => {
   if (e.target.tagName === "SELECT") return;
   if (e.key === "ArrowLeft") go(-1);
@@ -770,6 +830,7 @@ document.addEventListener("keydown", e => {
   else if (e.key === "Escape") { sel = null; render(); }
   else if (e.key === "z" || e.key === "Z") { const x = document.getElementById("zoom"); x.checked = !x.checked; zoom = x.checked; inspect(); }
   else if (e.key === "e" || e.key === "E") { const x = document.getElementById("errs"); x.checked = !x.checked; errs = x.checked; go(0); }
+  else if (e.key === "b" || e.key === "B") { const x = document.getElementById("both"); x.checked = !x.checked; both = x.checked; go(0); }
 });
 render();
 </script></body></html>

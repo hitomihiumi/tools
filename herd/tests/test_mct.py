@@ -1365,3 +1365,38 @@ def test_joined_tracks_two_cameras_two_names_one_cow():
         store.link_tracks(150.0, "td", "tc")
         assert report.track_map(store) == {"ta": "B", "tb": "B"}
         assert report.track_map(store, joins=False) == {"ta": "A", "tb": "B", "td": "C"}
+
+
+def test_boxes_page_shows_one_cow_joined_across_cameras():
+    """boxes.html: your cow on both cameras at one moment - its two tracks joined: the group's number on both
+    (joined), the page's data says which root each box is under."""
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        st = Store(os.path.join(d, "s.sqlite"))
+        rows = []
+        for t in range(100, 121):
+            rows += [("cam1", "a1", float(t), 0.1, 0.4, 0.3, 0.6, "lying", "none", 0.9),
+                     ("cam2", "b1", float(t), 0.5, 0.4, 0.7, 0.6, "lying", "none", 0.9),
+                     ("cam2", "b2", float(t), 0.1, 0.1, 0.2, 0.2, "lying", "none", 0.9)]
+        st.seconds(rows)
+        for tr, cam, cow in (("a1", "cam1", "P1"), ("b1", "cam2", "P1"), ("b2", "cam2", "P2")):
+            for k in range(3):
+                st.burst((cam, tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        st.link_tracks(105.0, "b1", "a1")
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"{c}/{t}.jpg", "cam": c, "ts": float(t), "w": 1920, "h": 1080} for c in ("cam1", "cam2")
+                  for t in (100, 110)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        lab = {"cam1": [[0.1, 0.4, 0.3, 0.6, "4"]], "cam2": [[0.5, 0.4, 0.7, 0.6, "4"], [0.1, 0.1, 0.2, 0.2, "9"]]}
+        json.dump({"frames": {f["file"]: {"boxes": lab[f["cam"]], "status": "done"} for f in frames}},
+                  open(os.path.join(d, "labels.json"), "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1", "mask": []}, {"id": "cam2", "mask": []}]
+        sc = trial.score(os.path.join(d, "s.sqlite"), cfg, boxes, os.path.join(d, "labels.json"), page_dir=d)
+        assert sc["cross_camera_moments"]["one_track"] == 2
+        bd = json.loads(open(sc["boxes_page"], encoding="utf-8").read().split("const DATA = ", 1)[1].split(";\n", 1)[0])
+        assert bd["joined"] == {"a1": 1}
+        cam2 = next(f for f in bd["frames"] if f["cam"] == "cam2")
+        assert sorted(b[6] for b in cam2["its"]) == ["a1", "b2"]
