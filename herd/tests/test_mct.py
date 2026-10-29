@@ -1309,3 +1309,17 @@ def test_neighbours_on_floor_plans_of_their_own_joined_by_look():
                       {"id": "cam5", "mask": [], "floor_points": plan(400500)}]
     cfg["mct"].update(neighbours=[["cam3", "cam4"], ["cam4", "cam5"]])
     assert mct.TrackletLinker(cfg).by_look == [("cam3", "cam4")]
+
+
+def test_trial_says_how_often_one_cow_on_two_cameras_got_one_id():
+    """Your cow in both cameras' frames at one moment: on one joined track, the same cow, two cows, or no name on one
+    of them - counted per moment, per camera pair and per cow of yours."""
+    import trial
+    seen = {"4": [("cam1", 100.0, "g1", "P1"), ("cam2", 100.2, "g1", "P1"),            # one track, one id
+                  ("cam1", 105.0, "g1", "P1"), ("cam2", 105.0, "g7", None)],           # her cam2 track: no name yet
+            "7": [("cam1", 100.0, "g2", "P2"), ("cam2", 100.0, "g3", "P3"),            # two tracks, two cows
+                  ("cam1", 110.0, "g2", "P2"), ("cam2", 130.0, "g3", "P2")]}           # not at one moment
+    m = trial.cross_camera_moments(seen)
+    assert (m["moments"], m["one_track"], m["same_cow"], m["two_cows"], m["no_name"]) == (3, 1, 1, 1, 1)
+    assert m["cows"]["7"] == {"moments": 1, "one_track": 0, "same_cow": 0, "two_cows": 1, "no_name": 0}
+    assert m["camera_pairs"]["cam1-cam2"]["moments"] == 3

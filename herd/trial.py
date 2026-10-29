@@ -146,6 +146,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     from store import Store
     store = Store(store_path)
     tm = report.track_map(store)
+    roots = store.track_roots() if hasattr(store, "track_roots") else {}   # tracks joined across cameras
     frames = {f["file"]: f for f in json.load(open(os.path.join(boxes_dir, "frames.json"), encoding="utf-8"))["frames"]}
     cams = {c["id"]: c for c in cfg["cameras"] if not cameras or c["id"] in cameras}
     labels = read_labels(labels_path)
@@ -154,6 +155,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     co, cam_co = collections.Counter(), collections.defaultdict(collections.Counter)
     n = collections.Counter()                      # (cam, what) -> boxes
     seen_as = collections.defaultdict(list)        # your id -> [(cam, ts, its cow)]: one cow on two cameras
+    seen_track = collections.defaultdict(list)     # your id -> [(cam, ts, its joined track, its cow or None)]
     view = []                                      # every frame played: your boxes and its, for boxes.html
     for file, lab in labels.items():
         f = frames.get(file)
@@ -171,17 +173,18 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
             continue
         n[(cam, "frames")] += 1
         sec = min({r[1] for r in rows}, key=lambda t: abs(t - f["ts"]))
-        pred = [(list(r[2:6]), tm.get(r[0])) for r in rows if r[1] == sec]
+        pred = [(list(r[2:6]), tm.get(r[0]), roots.get(r[0], r[0])) for r in rows if r[1] == sec]
         view.append({"cam": cam, "ts": f["ts"], "file": file, "w": f.get("w", 1920), "h": f.get("h", 1080),
                      "mine": [[*map(float, b), i, (b, i) in truth] for b, i in named],   # [.., scored: in its mask]
                      "its": [[*map(float, r[2:6]), tm.get(r[0]), r[0]] for r in rows if r[1] == sec],
-                     "hit": match([b for b, _ in named], [b for b, _ in pred], min_iou)})
+                     "hit": match([b for b, _ in named], [p[0] for p in pred], min_iou)})
         n[(cam, "your_boxes")] += len(truth)
-        n[(cam, "its_named_boxes")] += sum(1 for _, cow in pred if cow)
-        hit = match([b for b, _ in truth], [b for b, _ in pred], min_iou)
+        n[(cam, "its_named_boxes")] += sum(1 for p in pred if p[1])
+        hit = match([b for b, _ in truth], [p[0] for p in pred], min_iou)
         n[(cam, "found")] += len(hit)
         n[(cam, "found_with_a_cow")] += sum(1 for _, j in hit if pred[j][1])
         for i, j in hit:
+            seen_track[truth[i][1]].append((cam, f["ts"], pred[j][2], pred[j][1]))
             if pred[j][1]:
                 co[(truth[i][1], pred[j][1])] += 1
                 cam_co[cam][(truth[i][1], pred[j][1])] += 1
@@ -206,6 +209,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     out["split"] = {t: dict(cnt.most_common()) for t, cnt in by_true.items() if len(big(cnt)) > 1}
     out["your_cows"], out["its_cows"] = len(by_true), len(by_pred)
     out["cross_camera"] = cross_camera(seen_as)
+    out["cross_camera_moments"] = cross_camera_moments(seen_track)
     out["clock_shift_s"] = shift
     if page_dir and out["merged"]:
         out["same_cow_page"] = same_cow_page(page_dir, boxes_dir, labels, frames, out["merged"])
@@ -287,6 +291,31 @@ def cross_camera(seen_as, min_boxes=3, at_once_s=1.0):
                 agree += pa == pb
     return {"cows_on_two_cameras": len(cows), "same_cow_on_all": same, "cows": cows,
             "moments": pairs, "moments_same_cow": agree}
+
+
+def cross_camera_moments(seen_track, at_once_s=1.0):
+    """Your cow in two cameras' frames at one moment (within at_once_s), found by both: did it find her as one cow?
+    On one joined track (the linker's join: what makes one id of her at once), given the same cow (its names,
+    joins and the night's merges followed), two different cows, or no name on one camera or both (no burst
+    sure enough there yet) - over all and per cow of yours, the cameras of each pair named."""
+    keys = ("moments", "one_track", "same_cow", "two_cows", "no_name")
+    tot, per = collections.Counter(), collections.defaultdict(collections.Counter)
+    pairs = collections.Counter()
+    for t, items in seen_track.items():
+        for (ca, ta, ra, pa), (cb, tb, rb, pb) in itertools.combinations(sorted(items, key=lambda x: x[:2]), 2):
+            if ca == cb or abs(ta - tb) > at_once_s:
+                continue
+            what = ["moments"] + (["one_track"] if ra == rb else []) + \
+                (["no_name"] if not pa or not pb else ["same_cow"] if pa == pb else ["two_cows"])
+            for k in what:
+                tot[k] += 1
+                per[t][k] += 1
+                pairs[("-".join(sorted((ca, cb))), k)] += 1
+    by_pair = collections.defaultdict(dict)
+    for (pair, k), n in pairs.items():
+        by_pair[pair][k] = n
+    return {**{k: tot[k] for k in keys}, "cows": {t: {k: c[k] for k in keys} for t, c in sorted(per.items())},
+            "camera_pairs": {p: {k: v.get(k, 0) for k in keys} for p, v in sorted(by_pair.items())}}
 
 
 def same_cow_page(out, boxes_dir, labels, frames, merged, per_cam=2):
@@ -480,6 +509,20 @@ def print_score(sc):
     elif x is not None:
         print("  none of your cows scored on two cameras (each camera counts its own floor: --overlap lets the "
               "masks share it)")
+    m = sc.get("cross_camera_moments")
+    if m and m["moments"]:
+        share = lambda k, r=m: f"{r[k]} ({r[k] / max(1, r['moments']):.0%})"
+        print(f"  one cow on two cameras at one moment, found by both: {m['moments']} times - one joined track "
+              f"{share('one_track')}; one id (the same cow) {share('same_cow')}, two different cows "
+              f"{share('two_cows')}, no name on one or both {share('no_name')}")
+        for pair, r in m["camera_pairs"].items():
+            print(f"    {pair}: {r['moments']} times, one track {share('one_track', r)}, one id {share('same_cow', r)}, "
+                  f"two cows {share('two_cows', r)}, no name {share('no_name', r)}")
+        worst = sorted(((r["same_cow"] / max(1, r["moments"]), t, r) for t, r in m["cows"].items() if r["moments"]))
+        for _, t, r in worst[:8]:
+            if r["same_cow"] < r["moments"]:
+                print(f"    your {t}: {r['moments']} times on two cameras at once - one id {r['same_cow']}, two cows "
+                      f"{r['two_cows']}, no name {r['no_name']}, one track {r['one_track']}")
     print(f"  its cows: {sc['its_cows']} for your {sc['your_cows']}; one of its cows on several of yours (merged): "
           f"{len(sc['merged'])}; one of yours under several of its (split): {len(sc['split'])}")
     if sc.get("boxes_page"):

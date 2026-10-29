@@ -451,6 +451,11 @@ shared floor its cows are counted twice.
 docker compose run --rm herd trial --overlap --config /data/barn.toml --videos /data/rec_fixed --out /data/trial_overlap --boxes /data/boxes --labels /data/labels.json
 ```
 
+The score then says, for every moment one of your cows is in both cameras' frames and both found her: how
+often she was on **one joined track** (the linker found her on both), had **one id** (the same cow on both -
+joins, the night's merges and your `merges apply` answers followed), **two different cows**, or **no name** on
+one camera (no burst sure enough there yet) - over all, per camera pair, and the cows of yours it got wrong.
+
 **Several identity models, one rehearsal each, on a pod** (`herd/trial_pod.sh`): which identity model
 is best on your own cows. Upload to the pod's `/workspace`:
 
