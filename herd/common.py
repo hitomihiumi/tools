@@ -50,8 +50,9 @@ DEFAULTS = {
                 "still_contain": 0.8, "still_for_s": 30.0, "still_moved": 0.3,
                 "kalman": False, "low_score": 0.0, "low_iou": 0.5,
                 # kind: "own" (this tracker) or a library's - "bytetrack", "botsort", "ocsort", "sort" (libtrack.py,
-                # Roboflow's trackers): lost tracks kept lib_lost_s, an id after lib_min_frames updates
-                "kind": "own", "lib_lost_s": 30.0, "lib_min_frames": 1},
+                # Roboflow's trackers): lost tracks kept lib_lost_s, an id after lib_min_frames updates, lib_min_iou
+                # the least overlap to stay one track (0: the library's own, 0.1)
+                "kind": "own", "lib_lost_s": 30.0, "lib_min_frames": 1, "lib_min_iou": 0.0},
     "identity": {"prototypes_per_cow": 6, "history_days": 7, "max_error": 0.01,
                  "new_cow_similarity": 0.55, "new_cow_min_bursts": 20, "retire_after_hours": 48,
                  # the herd's size (0: no limit): at it, no new ids are made - unknown bursts wait in the pool

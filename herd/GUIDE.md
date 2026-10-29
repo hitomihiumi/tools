@@ -497,6 +497,15 @@ nor harms (IDF1 0.797 without, 0.793 with): it matters where tracks break. Its b
 better of where her speed puts her and where she was - a cow stopping short of the guess keeps her
 track. Both are off by default; try them in `trial` on your labels and keep what raises IDF1.
 
+**A library's tracker instead (`[tracker] kind`, test branch `claude/relaxed-hypatia-j4d7aa-libtrack`).**
+`libtrack.py` puts ByteTrack, BoT-SORT or OC-SORT from Roboflow's `trackers` (Apache-2.0, no torch) in place of
+the camera's own tracker, behind the same interfaces. In `mct_sim` (30 min, 3 seeds, `llr` joining) none came
+near it: IDF1 over both cameras 0.553 (ByteTrack), 0.484 (BoT-SORT), 0.486 (OC-SORT) against 0.683 (own) and
+0.752 (own + `kalman`), tracks ~67% pure against ~92%; with lying cows fading for the detector 0.30-0.50 against
+0.672. A longer lost buffer or a stricter overlap did not help. What they lack is what this barn needs: a cow
+lying still for minutes held at her place, the frame id. The branch keeps them to try on your own labels
+(`trial` per tracker, one `--out` each); `mct_eval` scores them on MmCows.
+
 **One clock (`time_offset_s`, PTP / NTP).** Every rule above compares two cameras at the same
 second, and a live frame is stamped when the server reads it: a camera whose stream comes 1.5 s
 late (encoding, the network, HEVC buffering) puts a walking cow a metre or more behind herself. Turn

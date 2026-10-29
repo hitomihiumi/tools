@@ -6,6 +6,7 @@ than pipeline.Tracker / mct.GlobalTracker (IoU, Kalman, unsure boxes, a cow lyin
     kind = "bytetrack"      # "own" (the default) | "bytetrack" | "botsort" | "ocsort" | "sort"
     lib_lost_s = 30         # a lost track kept this long (s) - the library's lost_track_buffer
     lib_min_frames = 1      # updates before a track gets its id (the library's minimum_consecutive_frames)
+    lib_min_iou = 0         # the least overlap to stay one track (0: the library's own, 0.1)
     low_score = 0.1         # boxes under [detector] threshold handed in too: ByteTrack / BoT-SORT's second round
 
 Where it goes: pipeline.Camera's tracker (no [mct]) and TrackletLinker's camera trackers ([mct] mode = "link");
@@ -16,6 +17,16 @@ reacquire. Boxes go in as the detector's confidence is unknown here: a sure box 
 low_score) 0.3.
 
 pip install "supervision>=0.26.1" "pydeprecate<0.14" rich && pip install --no-deps trackers==2.6.1
+
+mct_sim.py, 30 min, 3 seeds, joining llr - IDF1 over both cameras / within a camera / track purity:
+    own tracker            0.683 / 0.772 / 91.8%     own + kalman   0.752 / 0.849 / 92.7%
+    bytetrack              0.553 / 0.623 / 67.2%     (lib_lost_s 300: 0.549; lib_min_iou 0.3: 0.470)
+    botsort                0.484 / 0.547 / 67.1%
+    ocsort                 0.486 / 0.551 / 67.6%
+  lying cows fading for the detector (--weak 0.003):
+    own + kalman + low     0.672 / 0.756 / 85.4%
+    bytetrack              0.499 / 0.578 / 62.9%     botsort 0.311 / 0.356     ocsort 0.298 / 0.343
+The libraries' tracks mix cows a third of the time (purity ~67%) whatever their buffer or overlap threshold.
 """
 
 from __future__ import annotations
@@ -48,6 +59,8 @@ def make(kind, tcfg, rate=1.0):
             "minimum_consecutive_frames": int(tcfg.get("lib_min_frames", 1)),
             "track_activation_threshold": 0.5, "high_conf_det_threshold": 0.5,
             "enable_cmc": False}                                                  # fixed cameras
+    if tcfg.get("lib_min_iou"):                       # the boxes' least overlap to be one track (library default 0.1)
+        want.update(minimum_iou_threshold=tcfg["lib_min_iou"], minimum_iou_threshold_first_assoc=tcfg["lib_min_iou"])
     params = inspect.signature(cls.__init__).parameters
     return cls(**{k: v for k, v in want.items() if k in params})
 

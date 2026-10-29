@@ -294,6 +294,8 @@ RULES = [
     ("llr+bytetrack", {"mode": "link", "link_rule": "llr", "_tracker": {"kind": "bytetrack", "low_score": 0.2}}),
     ("llr+botsort", {"mode": "link", "link_rule": "llr", "_tracker": {"kind": "botsort", "low_score": 0.2}}),
     ("llr+ocsort", {"mode": "link", "link_rule": "llr", "_tracker": {"kind": "ocsort", "low_score": 0.2}}),
+    ("llr+bytetrack-300s", {"mode": "link", "link_rule": "llr",
+                            "_tracker": {"kind": "bytetrack", "low_score": 0.2, "lib_lost_s": 300.0}}),
 ]
 
 
