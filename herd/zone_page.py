@@ -30,6 +30,7 @@ import common  # noqa: E402,F401  (puts cowbench on the path)
 from common import load_config, recordings  # noqa: E402
 
 KEYS = ("mask", "exclude", "tracking_mask", "floor_points")
+KEEP = ("distortion", "aspect", "floor_at", "time_offset_s")
 
 
 def still(path, at, width):
@@ -94,7 +95,9 @@ def cmd_page(args):
     for cid in ids:
         c = by_id.get(cid, {"id": cid})
         rec = {"id": cid, "url": c.get("url", ""), "min_box_pct": c.get("min_box_pct") or 0.0,
-               **{k: c.get(k) or [] for k in KEYS}, "still": None, "w": 16, "h": 9, "boxes": []}
+               **{k: c.get(k) or [] for k in KEYS}, "still": None, "w": 16, "h": 9, "boxes": [],
+               # what the page does not draw but the camera's block must keep (the lens, its clock)
+               "keep": {k: c[k] for k in KEEP if c.get(k) not in (None, "", 0, 0.0)}}
         img = pictures.get(cid)
         if img is not None:
             rel = f"stills/{cid}.jpg"
@@ -291,6 +294,7 @@ function toml() {
     ["mask", "exclude", "tracking_mask"].forEach(k => { if (s[k].length) out.push(`${k} = ${fmt(s[k]).replace(/,/g, ", ")}`); });
     if (s.floor_points.length) out.push(`floor_points = ${JSON.stringify(s.floor_points.map(f => [r3(f[0]), r3(f[1]), f[2], f[3]])).replace(/,/g, ", ")}`);
     if (s.min_box_pct) out.push(`min_box_pct = ${s.min_box_pct}`);
+    Object.entries(c.keep || {}).forEach(([k, v]) => out.push(`${k} = ${JSON.stringify(v)}`));
     out.push("");
   });
   $("toml").value = out.join("\n");

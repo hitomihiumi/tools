@@ -75,6 +75,15 @@ ls /srv/herd/herd/detector_*/best                             # the detector
    Green — counted; orange — too small (`min_box_pct` / `min_box_side_px`); red — in the
    excluded zone. Set the size cut so that only cows whose posture can no longer be made
    out are dropped.
+4. **One clock for every camera.** A cow seen by two cameras is joined by where she stands *at the same
+   second*: a camera whose frames come 1.5 s late puts a walking cow a metre behind herself. In each
+   camera's web page turn on time sync - PTP (IEEE 1588) if the camera has it, else NTP - against the
+   same server the barn's computer uses (`timedatectl` on it: "System clock synchronized: yes"), and keep
+   RTCP on in its RTSP settings. The stream's own delay (encoding, network: tenths of a second to seconds,
+   HEVC more) is still there: `herd.py run` / `trial` with `[mct]` measure it from the cows that walk on
+   two cameras and say at the end, e.g. "cam2's frames come +1.4 s late against cam1's ...:
+   time_offset_s = -1.4 on cam2". Put that into the camera's `[[cameras]]` block (a negative number:
+   its frames are moved earlier) and run again; it is said again only while it is 0.5 s or more.
 
 ## 4. The config `/srv/herd/barn.toml`
 

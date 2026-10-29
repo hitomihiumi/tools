@@ -53,6 +53,8 @@ Reports:
     herd.py report --config barn.toml alert-stats           how often alerts were right
     herd.py report --config barn.toml daily                 per cow per day
     herd.py gallery --config barn.toml                      the cows the system knows
+    herd.py merges page --config barn.toml --out merges.html   one cow under two names? (the night was unsure)
+    herd.py merges apply --config barn.toml --decisions decisions.json
 """
 
 from __future__ import annotations
@@ -157,6 +159,9 @@ def main():
         return report.main(argv)
     if cmd == "gallery":
         return gallery_cmd(argv)
+    if cmd == "merges":
+        import merges
+        return merges.main(argv)
     print(f"unknown command {cmd}\n{__doc__}")
     return 2
 

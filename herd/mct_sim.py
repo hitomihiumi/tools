@@ -28,6 +28,7 @@ import collections
 import copy
 import os
 import sys
+import zlib
 
 import numpy as np
 
@@ -60,7 +61,7 @@ def masks():
     return {"a": [[0, 0], [ua, 0], [ua, 1], [0, 1]], "b": [[0, 0], [ub, 0], [ub, 1], [0, 1]]}
 
 
-def cows_path(n, seconds, rng, lying_share=0.6):
+def cows_path(n, seconds, rng, lying_share=0.6, speed_x=1.0):
     """[cow][second] -> (x, y, lying): cows lying in rows of stalls (1.2 m apart) for long stretches, standing,
     walking from place to place at 0.5-0.9 m/s."""
     stalls = [(x, y) for y in (150.0, 1050.0) for x in np.arange(100.0, PEN[0] - 50, 120.0)]
@@ -81,7 +82,7 @@ def cows_path(n, seconds, rng, lying_share=0.6):
                 tx, ty = rng.uniform(100, PEN[0] - 100), rng.uniform(300, 900)
                 lie = False
                 dur = int(rng.uniform(60, 400))
-            speed = rng.uniform(50, 90)
+            speed = rng.uniform(50, 90) * speed_x
             while t < seconds and np.hypot(tx - x, ty - y) > 1:
                 step = min(speed, np.hypot(tx - x, ty - y))
                 a = np.arctan2(ty - y, tx - x)
@@ -107,13 +108,16 @@ def bend_field(cam, bend, rng):
                          bend * np.cos(x / 350 + ph[2]) * np.sin(y / 450 + ph[3]))
 
 
-def simulate(n=40, minutes=30, look=0.35, seed=0, miss=0.05):
-    """-> dets {cam: {ts: [(box, emb, p_lying)]}}, gt {cam: {ts: [(cow, box)]}}, the cameras' configs, the paths.
-    The boxes sit where the cows are (a few cm of jitter): within a camera boxes are reliable; the floor
-    mapping's errors are put in by noisy_floor."""
+def simulate(n=40, minutes=30, look=0.35, seed=0, miss=0.05, weak=0.0, speed=1.0, lag=0.0):
+    """-> dets {cam: {ts: [(box, emb, p_lying, score)]}}, gt {cam: {ts: [(cow, box)]}}, the cameras' configs, the
+    paths. The boxes sit where the cows are (a few cm of jitter): within a camera boxes are reliable; the floor
+    mapping's errors are put in by noisy_floor. weak > 0: a lying cow fades for the detector - each second that
+    chance of 30-300 s in which her box comes at score 0.3 (under the threshold, 0.5) in 70% of the seconds and
+    not at all in the rest; a missed box is then low half the time as well. lag: camera b's frames stamped that
+    many s late (its stream's delay): at its second t it shows the cows where they were at t - lag."""
     rng = np.random.default_rng(seed)
     T = int(minutes * 60)
-    pos = cows_path(n, T, rng)
+    pos = cows_path(n, T, rng, speed_x=speed)
     dim = 32
     unit = lambda v: v / np.linalg.norm(v)
     cow_vec = rng.normal(size=(n, dim))
@@ -121,19 +125,37 @@ def simulate(n=40, minutes=30, look=0.35, seed=0, miss=0.05):
                for cam in VIEW}             # a cow's look from one side: a little of her, mostly the view
     dets = {cam: {} for cam in VIEW}
     gt = {cam: {} for cam in VIEW}
+    faded = {(cam, c): -1 for cam in VIEW for c in range(n)}     # until when the detector is unsure of her
     for t in range(T):
         for cam in VIEW:
             x0, x1 = VIEW[cam]
             ds, gs = [], []
             for c in range(n):
                 x, y, lie = pos[c, t]
-                if not x0 + 30 <= x <= x1 - 30 or rng.random() < miss:
+                if cam == "b" and lag:
+                    k = t - lag
+                    i0 = int(np.clip(np.floor(k), 0, T - 1))
+                    i1, w = min(i0 + 1, T - 1), float(np.clip(k - i0, 0, 1))
+                    x, y = (1 - w) * pos[c, i0, :2] + w * pos[c, i1, :2]
+                    lie = pos[c, i0, 2]
+                if not x0 + 30 <= x <= x1 - 30:
                     continue
+                score = 0.9
+                if weak and lie and faded[(cam, c)] < t and rng.random() < weak:
+                    faded[(cam, c)] = t + int(rng.uniform(30, 300))
+                if weak and lie and faded[(cam, c)] >= t:
+                    if rng.random() < 0.3:
+                        continue
+                    score = 0.3
+                elif rng.random() < miss:
+                    if not weak or rng.random() < 0.5:
+                        continue
+                    score = 0.3
                 u, v = to_frame(cam, x + rng.normal(0, 5), y + rng.normal(0, 5))
                 w, h = BOX
                 box = [u - w / 2, v - h, u + w / 2, v]
                 emb = unit(look_of[cam][c] + rng.normal(0, 0.15, dim))
-                ds.append((box, emb.tolist(), 0.9 if lie else 0.1))
+                ds.append((box, emb.tolist(), 0.9 if lie else 0.1, score))
                 gs.append((c, box))
             dets[cam][t] = ds
             gt[cam][t] = gs
@@ -150,7 +172,7 @@ def noisy_floor(f, cam, bend, wrong, jitter, seed):
 
     def g(box, p_lying=0.5):
         x, y = f(box, p_lying)
-        r = np.random.default_rng(abs(hash((seed, cam) + tuple(round(v, 6) for v in box))) % 2 ** 32)
+        r = np.random.default_rng(zlib.crc32(repr((seed, cam) + tuple(round(v, 6) for v in box)).encode()))
         dx, dy = field(x, y)
         ex, ey = r.normal(0, jitter, 2)
         if r.random() < wrong:
@@ -188,17 +210,28 @@ def run(dets, gt, cams, floors, over, label_every=5):
     import mct_eval
     cfg = copy.deepcopy(DEFAULTS)
     cfg["cameras"] = copy.deepcopy(cams)
+    over = dict(over)
+    cfg["tracker"].update(over.pop("_tracker", {}))
     cfg["mct"].update(reacquire_sim=0.9, **over)
+    low_on = cfg["tracker"]["low_score"] > 0
     co = mct.CoSeen(cfg["identity"]["cannot_link_min_s"], cfg["identity"]["cannot_link_max_iou"])
     lk = mct.TrackletLinker(cfg)
     lk.floor.update(floors)
     got, links = {}, set()
     for ts in sorted({t for per in dets.values() for t in per}):
-        per = {c: [{"box": d[0], "emb": d[1], "p_lying": d[2]} for d in dets[c][ts]] for c in dets if ts in dets[c]}
+        per, where = {}, {}
+        for c in dets:
+            # the detector at its threshold (0.5); with low_score its unsure boxes go in too, marked
+            keep = [j for j, d in enumerate(dets[c].get(ts, [])) if low_on or d[3] >= 0.5]
+            per[c] = [{"box": dets[c][ts][j][0], "emb": dets[c][ts][j][1], "p_lying": dets[c][ts][j][2],
+                       "low": dets[c][ts][j][3] < 0.5} for j in keep]
+            where[c] = keep
         for c, ids in lk.update_all(float(ts), per).items():
-            for j, g in enumerate(ids):
-                got[(c, ts, j)] = g
-            links.update(co.add(ids, [d["box"] for d in per[c]]))
+            for j, g in zip(where[c], ids):
+                if g is not None:
+                    got[(c, ts, j)] = g
+            kept = [(g, d["box"]) for g, d in zip(ids, per[c]) if g is not None]
+            links.update(co.add([g for g, _ in kept], [b for _, b in kept]))
     raw = dict(got)
     got = {k: lk.root(g) for k, g in got.items()}
     links = {(min(lk.root(a), lk.root(b)), max(lk.root(a), lk.root(b))) for a, b in links if lk.root(a) != lk.root(b)}
@@ -208,6 +241,7 @@ def run(dets, gt, cams, floors, over, label_every=5):
     r, _ = mct_eval.score_run(got, links, gt_map, lab, dets, n, n)
     if lk.ev:
         r["names"] = names_check(lk, raw, gt)
+    r["clocks"] = {f"{a}-{b}": v for (a, b), v in lk.clocks().items()}
     return r, dict(lk.stats)
 
 
@@ -252,6 +286,10 @@ RULES = [
     ("llr+look", {"mode": "link", "link_rule": "llr", "link_look_cm": 300.0}),
     ("llr+self-calib", {"mode": "link", "link_rule": "llr", "link_learn_offset": True}),
     ("llr+look+self-calib", {"mode": "link", "link_rule": "llr", "link_look_cm": 300.0, "link_learn_offset": True}),
+    # the camera's own tracker ([tracker]): Kalman, ByteTrack's second round for unsure boxes (--weak > 0)
+    ("llr+kalman", {"mode": "link", "link_rule": "llr", "_tracker": {"kalman": True}}),
+    ("llr+low", {"mode": "link", "link_rule": "llr", "_tracker": {"low_score": 0.2}}),
+    ("llr+kalman+low", {"mode": "link", "link_rule": "llr", "_tracker": {"kalman": True, "low_score": 0.2}}),
 ]
 
 
@@ -263,7 +301,8 @@ def one(job):
     import contextlib
     import io
     seed, name, a = job
-    dets, gt, cams, _ = simulate(a["cows"], a["minutes"], look=a["look"], seed=seed)
+    dets, gt, cams, _ = simulate(a["cows"], a["minutes"], look=a["look"], seed=seed, weak=a["weak"], speed=a["speed"],
+                                 lag=a["lag"])
     floors = floors_of(cams, a["bend"], a["wrong"], a["jitter"], seed)
     with contextlib.redirect_stdout(io.StringIO()):          # the linker's notes, once a place
         r, stats = run(dets, gt, cams, floors, dict(RULES)[name])
@@ -278,35 +317,43 @@ def main(argv=None):
     ap.add_argument("--wrong", type=float, default=0.15, help="share of seconds a camera's floor point lands 0.8-2 m off")
     ap.add_argument("--jitter", type=float, default=20.0, help="cm of noise on every floor point")
     ap.add_argument("--look", type=float, default=0.35, help="how much of a cow's look is hers on both sides (0-1)")
+    ap.add_argument("--weak", type=float, default=0.0,
+                    help="each second, the chance a lying cow fades for the detector for 30-300 s (e.g. 0.003)")
+    ap.add_argument("--speed", type=float, default=1.0, help="walking cows this many times faster (0.5-0.9 m/s x)")
+    ap.add_argument("--lag", type=float, default=0.0, help="camera b's frames stamped this many s late (its stream's "
+                    "delay, no time_offset_s); the linker should measure it")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     ap.add_argument("--rules", nargs="*", default=DEFAULT_RULES, help=f"of: {', '.join(n for n, _ in RULES)}")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     args = ap.parse_args(argv)
     import concurrent.futures as cf
-    a = {k: getattr(args, k) for k in ("cows", "minutes", "look", "bend", "wrong", "jitter")}
+    a = {k: getattr(args, k) for k in ("cows", "minutes", "look", "bend", "wrong", "jitter", "weak", "speed", "lag")}
     jobs = [(seed, name, a) for seed in args.seeds for name in args.rules]
     res = collections.defaultdict(list)
     with cf.ProcessPoolExecutor(max(1, args.jobs)) as ex:
         for seed, name, r, stats, near in ex.map(one, jobs):
             res[name].append(r)
             print(f"[sim] seed {seed} (true partner nearest in {near:.0%} of the seconds) {name:22s} "
-                  f"IDF1 {r['idf1_global']:.3f}  one track on both {r['cross_cam_same_track'] or 0:.1%}  "
+                  f"IDF1 {r['idf1_global']:.3f} (camera {r['idf1_camera']:.3f})  one track on both {r['cross_cam_same_track'] or 0:.1%}  "
                   f"purity {r['track_purity']:.1%}  wrong {r['false_merges']}  joins {stats.get('linked', 0)} "
                   f"refused {stats.get('link_refused', 0)} unlinked {stats.get('unlinked', 0)}"
                   + (f"  names: {r['names']['one_name']}/{r['names']['cows_on_both']} cows one name, "
-                     f"{r['names']['wrong_merges']} wrong" if "names" in r else ""), flush=True)
+                     f"{r['names']['wrong_merges']} wrong" if "names" in r else "")
+                  + "".join(f"  clocks {k}: b {v[0]:+.1f} s late ({v[1]} walks, {v[2]:.0f} cm)" for k, v in r.get("clocks", {}).items()),
+                  flush=True)
     print(f"\n{args.cows} cows, {args.minutes:g} min, floor bent {args.bend:g} cm, {args.wrong:.0%} of seconds wrong, "
           f"seeds {args.seeds}\n")
-    print("| rule | IDF1 both cameras | cow on both at once, one track | track purity | wrong (two cows, one track) "
-          "| cows with one name (cow_merges) |")
-    print("|---|---|---|---|---|---|")
+    print("| rule | IDF1 both cameras | IDF1 within a camera | cow on both at once, one track | track purity "
+          "| wrong (two cows, one track) | cows with one name (cow_merges) |")
+    print("|---|---|---|---|---|---|---|")
     for name in args.rules:
         rs = res[name]
         mean = lambda k: float(np.mean([r[k] or 0 for r in rs]))
         nm = [r["names"] for r in rs if "names" in r]
         names = (f"{sum(x['one_name'] for x in nm)}/{sum(x['cows_on_both'] for x in nm)}, "
                  f"{sum(x['wrong_merges'] for x in nm)} wrong") if nm else "-"
-        print(f"| {name} | {mean('idf1_global'):.3f} | {mean('cross_cam_same_track'):.1%} | {mean('track_purity'):.1%} | "
+        print(f"| {name} | {mean('idf1_global'):.3f} | {mean('idf1_camera'):.3f} | {mean('cross_cam_same_track'):.1%} | "
+              f"{mean('track_purity'):.1%} | "
               f"{mean('false_merges'):.0f} | {names} |")
     named = [(name, r["names"]) for name in args.rules for r in res[name] if "names" in r]
     if named:

@@ -134,6 +134,8 @@ mask = [[0.0, 0.0], [0.55, 0.0], [0.55, 1.0], [0.0, 1.0]]
 # for what the size cut does not catch - e.g. a neighbour's pen behind a rail
 # exclude = [[0.0, 0.0], [1.0, 0.0], [1.0, 0.15], [0.0, 0.15]]
 # min_box_pct = 0.4              # this camera's own size cut, if it differs
+# time_offset_s = -1.4           # this camera's frames moved onto the barn's clock (its stream comes late):
+#                                # herd.py run / trial with [mct] measure it and say what to put here
 
 [[cameras]]
 id = "cam2"

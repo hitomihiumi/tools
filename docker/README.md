@@ -532,6 +532,38 @@ and run `trial` again. With it the night also puts together one cow the gallery 
 camera's side of her - by where she stood over the hours (`cow_merge_llr`): the trial says which names it
 made one ("one cow under two names, made one by where she stood"), and the score counts them as one cow.
 
+**Pairs the night was not sure of: you decide.** Pairs with some evidence but not enough wait for a person.
+The trial says how many; look at them (each name's faces, camera by camera, side by side):
+
+```bash
+docker compose run --rm herd merges page --store /data/trial/pass2/herd.sqlite --out /data/trial/merges.html
+```
+
+Open `docker/data/trial/merges.html`: **S** the same cow, **D** two cows, then **Save decisions.json**, move it
+to `docker/data/`, and:
+
+```bash
+docker compose run --rm herd merges apply --store /data/trial/pass2/herd.sqlite --decisions /data/decisions.json
+docker compose run --rm herd trial --score-only --config /data/barn.toml --out /data/trial --boxes /data/boxes --labels /data/labels.json
+```
+
+Live, the same with `--config /data/barn.toml` instead of `--store`: "same" counts in the reports at once, the
+gallery merges the two the next night; "different" is never asked again.
+
+**Tracks that break in one camera** (a cow walking, a lying cow the detector loses for minutes) break the
+joining too. Two settings from ByteTrack (`herd/GUIDE.md` section 4.8):
+
+```toml
+[tracker]
+kalman = true        # a walking cow's box looked for where her speed puts it
+low_score = 0.2      # boxes the detector is unsure of (under [detector] threshold) keep a cow's track, never start one
+```
+
+**One clock.** Joining compares two cameras at the same second. Turn on time sync in every camera's web page
+(PTP if it has it, else NTP, against the same server as this computer). A camera's stream may still come late:
+the end of a `trial` (and of a live run) says it, e.g. `cam2's frames come +1.4 s late against cam1's ...:
+time_offset_s = -1.4 on cam2`. Put that line into cam2's `[[cameras]]` block and run `trial` again.
+
 **No cows walking: click the same spots on both pictures.** Nothing is measured; you only show
 which spot of one picture is which spot of the other:
 

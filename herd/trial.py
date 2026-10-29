@@ -159,8 +159,8 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         f = frames.get(file)
         if lab.get("status") != "done" or not f or f["cam"] not in cams:
             continue
-        f = dict(f, ts=f["ts"] + shift)
         cam = f["cam"]
+        f = dict(f, ts=f["ts"] + shift + float(cams[cam].get("time_offset_s") or 0.0))   # the run's clock for it
         named = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
                  and str(b[4]).strip().lower() != "x"]
         truth = [t for t in named if in_zone(t[0], cams[cam], f.get("w", 1920), f.get("h", 1080))]
@@ -831,6 +831,11 @@ def main(argv=None):
         g2.save()
         print("[trial] one cow under two names, made one by where she stood: "
               + ", ".join(f"{a} -> {b}" for a, b in merged), flush=True)
+    unsure = Store(store2).reviews("pending")
+    if unsure:
+        print(f"[trial] {len(unsure)} more pairs of names may be one cow - look at them: herd.py merges page "
+              f"--store {store2} --out {os.path.join(out, 'merges.html')}; then merges apply --store {store2} "
+              "--decisions decisions.json and trial --score-only", flush=True)
     print("[trial] 3/3 drawn back", flush=True)
     shown = {}
     for cam, path, ts in recs:

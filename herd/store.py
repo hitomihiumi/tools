@@ -12,6 +12,8 @@
     track_links   one camera's track joined to another's: the same cow (mct.TrackletLinker)
     track_evidence   two cameras' tracks: the summed log-likelihood that they are one cow, over the seconds
               both were seen (TrackletLinker, link_rule "llr"); the night sums it per pair of cows
+    merge_reviews   two cow names the night was unsure are one cow (old, into): pending until a person says
+              same (aliased at once, the gallery merged the next night: applied) or different (never again)
     alerts    raised alerts;  verdicts  the vet's answer to each
 
 Rows are written by track, not by cow: which cow a track is gets decided from
@@ -45,6 +47,8 @@ CREATE TABLE IF NOT EXISTS cow_aliases (old_cow TEXT PRIMARY KEY, canonical_cow 
 CREATE TABLE IF NOT EXISTS track_links (ts REAL, track TEXT PRIMARY KEY, joined_to TEXT);
 CREATE TABLE IF NOT EXISTS track_evidence (track_a TEXT, track_b TEXT, llr REAL, seconds INTEGER, ts REAL,
                                            PRIMARY KEY (track_a, track_b));
+CREATE TABLE IF NOT EXISTS merge_reviews (old_cow TEXT, into_cow TEXT, llr REAL, margin REAL, ts REAL, state TEXT,
+                                          decided REAL, PRIMARY KEY (old_cow, into_cow));
 CREATE TABLE IF NOT EXISTS track_handovers (ts REAL, gid TEXT, from_cam TEXT, to_cam TEXT, kind TEXT,
                                             dist_m REAL, sim REAL);
 """
@@ -151,6 +155,33 @@ class Store:
         """{(track a, track b): llr} of the pairs seen since `since`."""
         return {(a, b): v for a, b, v in self.query("SELECT track_a, track_b, llr FROM track_evidence WHERE ts >= ?",
                                                     (since,))}
+
+    def put_reviews(self, rows, ts):
+        """[(old, into, llr, margin)] the night was unsure of: new ones pending, pending ones' numbers updated, a pair
+        a person decided (either way round) left as it is."""
+        with self.lock:
+            decided = {frozenset(r) for r in self.db.execute("SELECT old_cow, into_cow FROM merge_reviews "
+                                                             "WHERE state != 'pending'")}
+            self.db.executemany(
+                "INSERT INTO merge_reviews VALUES (?,?,?,?,?,'pending',NULL) ON CONFLICT(old_cow, into_cow) DO UPDATE SET "
+                "llr = excluded.llr, margin = excluded.margin, ts = excluded.ts WHERE state = 'pending'",
+                [(a, b, v, m, ts) for a, b, v, m in rows if frozenset((a, b)) not in decided])
+            self.db.commit()
+
+    def reviews(self, state=None):
+        """[{old, into, llr, margin, ts, state, decided}], surest first."""
+        cols = ("old", "into", "llr", "margin", "ts", "state", "decided")
+        sql = "SELECT * FROM merge_reviews" + (" WHERE state = ?" if state else "") + " ORDER BY llr DESC"
+        return [dict(zip(cols, r)) for r in self.query(sql, (state,) if state else ())]
+
+    def decide_review(self, old, into, state, ts):
+        """A person's answer on a pair: same / different (or applied, once the gallery merged them)."""
+        with self.lock:
+            cur = self.db.execute("UPDATE merge_reviews SET state = ?, decided = ? WHERE (old_cow = ? AND into_cow = ?) "
+                                  "OR (old_cow = ? AND into_cow = ?)", (state, ts, old, into, into, old))
+            if not cur.rowcount:
+                self.db.execute("INSERT INTO merge_reviews VALUES (?,?,NULL,NULL,?,?,?)", (old, into, ts, state, ts))
+            self.db.commit()
 
     def handover(self, ts, gid, from_cam, to_cam, kind, dist_m=None, sim=None):
         with self.lock:

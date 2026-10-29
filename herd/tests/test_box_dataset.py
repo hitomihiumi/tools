@@ -360,6 +360,8 @@ def test_zones_page_and_apply():
     import zone_page
     with tempfile.TemporaryDirectory() as d:
         cfg, rec = _setup(d)
+        text = open(cfg).read()
+        open(cfg, "w").write(text.replace('id = "cam1"', 'id = "cam1"\ntime_offset_s = -1.2', 1))
         sys.modules["detector"] = types.SimpleNamespace(Live=lambda *a, **k: (lambda img: [{"bbox": [0.1, 0.4, 0.3, 0.8], "det_score": 0.9}]))
         try:
             zone_page.main(["page", "--config", cfg, "--videos", rec, "--out", os.path.join(d, "zones")])
@@ -371,6 +373,7 @@ def test_zones_page_and_apply():
         assert set(cams) == {"cam1", "cam2"} and cams["cam1"]["w"] == 320 and cams["cam1"]["boxes"]
         assert cams["cam1"]["exclude"] == [[0.0, 0.0], [1.0, 0.0], [1.0, 0.2], [0.0, 0.2]]      # from the config
         assert os.path.exists(os.path.join(d, "zones", cams["cam2"]["still"]))
+        assert cams["cam1"]["keep"] == {"time_offset_s": -1.2} and cams["cam2"]["keep"] == {}   # kept on Save
         # a camera not in the config yet (cam3's recording), named on the command line
         import shutil as sh
         sh.copy(os.path.join(rec, "cam1_2026-10-20_06-00-00.mp4"), os.path.join(rec, "cam3_2026-10-20_06-00-00.mp4"))

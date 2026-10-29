@@ -42,8 +42,13 @@ DEFAULTS = {
     "detector": {"weights": "", "threshold": None, "tiles": None},   # None: as the detector was trained
     # still_*: a cow lost is waited for still_s at the same place, still_long_s when she had not moved for
     # still_for_s before (as [mct])
+    # kalman: a track's box is matched where its speed puts it now (common.BoxKalman), not where it was last.
+    # low_score > 0 (under [detector] threshold): ByteTrack's second round - boxes the detector is unsure of
+    # (low_score <= score < threshold) only continue a track the camera had a moment ago (IoU low_iou with
+    # where it is expected), or a cow lying still at her place; they never start a track (mct_sim.py --detector)
     "tracker": {"iou": 0.3, "max_age_s": 5, "still_s": 60.0, "still_long_s": 300.0, "still_iou": 0.5,
-                "still_contain": 0.8, "still_for_s": 30.0, "still_moved": 0.3},
+                "still_contain": 0.8, "still_for_s": 30.0, "still_moved": 0.3,
+                "kalman": False, "low_score": 0.0, "low_iou": 0.5},
     "identity": {"prototypes_per_cow": 6, "history_days": 7, "max_error": 0.01,
                  "new_cow_similarity": 0.55, "new_cow_min_bursts": 20, "retire_after_hours": 48,
                  # the herd's size (0: no limit): at it, no new ids are made - unknown bursts wait in the pool
@@ -58,7 +63,10 @@ DEFAULTS = {
                  "cannot_link_min_s": 5, "cannot_link_max_iou": 0.3,
                  # tracks two cameras count (their masks, which share no floor) at the same second this many
                  # seconds: two cows (0: off - when masks were drawn overlapping)
-                 "counted_apart_s": 10},
+                 "counted_apart_s": 10,
+                 # a confirmed burst's crop kept as the cow's face per camera, one each face_every_s, the last
+                 # face_keep (gallery/faces/): what a person compares in herd.py merges page
+                 "face_every_s": 600.0, "face_keep": 6},
     "lameness": {"enabled": False},
     "alerts": {"baseline_days": 7, "min_baseline_days": 3, "min_observed_minutes": 120,
                "mad_z": 3.0, "rumination_drop": 0.20, "lying_directions": ["low", "high"],
@@ -135,6 +143,8 @@ DEFAULTS = {
             # one when the evidence of all their tracks together reaches cow_merge_llr, cow_merge_margin ahead of
             # every rival (pipeline.merge_by_place, mct.cow_merges; 0: off)
             "cow_merge_llr": 200.0, "cow_merge_margin": 100.0,
+            # below that, down to cow_review_llr / cow_review_margin: a person is asked (herd.py merges page)
+            "cow_review_llr": 60.0, "cow_review_margin": 30.0,
             # link mode, neighbours with no floor mapping (a narrow strip along a fence): a cow one camera sees
             # beyond its mask (tracking_mask) joined to the other's counted cow by look - mean cos of frame
             # ids over look_min_s s at least look_min_sim, look_margin above the next cow
@@ -149,7 +159,11 @@ DEFAULTS = {
             # MmCows: link_margin 50 halved the wrong joins (2330 -> 1309) at the same IDF1 (0.498);
             # link_contra barely helped and with the margin cost IDF1 - off
             "link_margin": 50.0, "link_contra_s": 10, "link_contra": 0.0,
-            "body_height_lying": 55.0, "body_height_standing": 90.0},
+            "body_height_lying": 55.0, "body_height_standing": 90.0,
+            # the cameras' clocks from cows walking on two of them (TrackletLinker.clocks; said at the end of a run):
+            # the shift of one's floor path, within lag_max_s, that lays it best on the other's over lag_window_s.
+            # A camera's own [[cameras]] time_offset_s (s, default 0) moves its frames by it
+            "lag_window_s": 20.0, "lag_max_s": 3.0},
     "cameras": [],
 }
 
@@ -177,6 +191,53 @@ def load_config(path=None):
 
 
 # ---------------------------------------------------------------- geometry
+
+class BoxKalman:
+    """A box's centre and size and how fast they change (the constant-velocity filter of SORT / ByteTrack, frame
+    units): where a walking cow's box will be at the next frame, so a cow that moved more than her box in a
+    second is still matched. The noise scales with the box's height; a lying cow's speed stays ~0. Tuned for a
+    frame a second, not ByteTrack's 30: a cow's speed may change by a good part of her box from one to the next."""
+
+    W_POS, W_VEL = 1 / 20, 1 / 5
+
+    def __init__(self, box, ts):
+        import numpy as np
+        cx, cy, w, h = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, box[2] - box[0], box[3] - box[1]
+        self.x = np.array([cx, cy, w, h, 0.0, 0.0, 0.0, 0.0])
+        p, v = 2 * self.W_POS * h, 2 * self.W_VEL * h
+        self.P = np.diag(np.square([p, p, p, p, v, v, v, v]))
+        self.t = ts
+
+    def _step(self, ts):
+        import numpy as np
+        dt = max(0.0, ts - self.t)
+        F = np.eye(8)
+        F[:4, 4:] = dt * np.eye(4)
+        h = max(self.x[3], 1e-3)
+        q = np.square([self.W_POS * h] * 4 + [self.W_VEL * h] * 4) * max(dt, 1e-3)
+        return F @ self.x, F @ self.P @ F.T + np.diag(q)
+
+    @staticmethod
+    def _box(x):
+        w, h = max(x[2], 1e-4), max(x[3], 1e-4)
+        return [x[0] - w / 2, x[1] - h / 2, x[0] + w / 2, x[1] + h / 2]
+
+    def predict(self, ts):
+        """The box expected at ts (the filter itself unchanged)."""
+        return self._box(self._step(ts)[0])
+
+    def update(self, ts, box):
+        import numpy as np
+        x, P = self._step(ts)
+        z = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2, box[2] - box[0], box[3] - box[1]])
+        H = np.eye(4, 8)
+        R = np.diag(np.square([self.W_POS * max(z[3], 1e-3)] * 4))
+        S = H @ P @ H.T + R
+        K = P @ H.T @ np.linalg.inv(S)
+        self.x = x + K @ (z - H @ x)
+        self.P = (np.eye(8) - K @ H) @ P
+        self.t = ts
+
 
 def iou(a, b):
     iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))

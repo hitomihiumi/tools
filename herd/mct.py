@@ -40,7 +40,7 @@ import time
 
 import numpy as np
 
-from common import floor_mapper, in_mask, in_polygon, iou, same_place
+from common import BoxKalman, floor_mapper, in_mask, in_polygon, iou, same_place
 
 NEG = -1e9
 
@@ -63,14 +63,19 @@ def assign(score):
     return [(r, c) for r, c in pairs if score[r, c] > NEG / 2]
 
 
-def cow_merges(evidence, track_cow, apart=(), min_llr=200.0, margin=100.0, size=None):
+def cow_merges(evidence, track_cow, apart=(), min_llr=200.0, margin=100.0, size=None, reviews=None,
+               review_llr=60.0, review_margin=30.0):
     """One cow under two names - each camera's gallery naming her by the side it sees (MmCows: by look a cow is
     found on another camera 40-50% of the time) - put together by where she stood. evidence {(track a, track b):
     summed log-likelihood that they are one cow} (TrackletLinker, link_rule "llr": every second both were seen,
     joined or not) is summed per pair of names (track_cow: track -> name); then, surest first, two groups of names
     are one cow at min_llr, margin ahead of every rival - a group that is two cows with the partner (apart: pairs
     of names seen at the same time) - and never two groups apart. Hours of a cow in the overlap add up where no
-    single track pair was enough. -> [(old name, into)], into the name with the larger size (bursts)."""
+    single track pair was enough. -> [(old name, into)], into the name with the larger size (bursts).
+
+    reviews (a list, optional): filled with the pairs left after that which a person should look at - three zones,
+    as in a city's camera network: sure (merged), unsure (review_llr, review_margin: [(old, into, evidence,
+    margin)], surest first) and the rest (nothing)."""
     E = collections.Counter()
     for (a, b), v in evidence.items():
         x, y = track_cow.get(a), track_cow.get(b)
@@ -87,6 +92,11 @@ def cow_merges(evidence, track_cow, apart=(), min_llr=200.0, margin=100.0, size=
     members = collections.defaultdict(set)
     for x, y in list(E) + [tuple(p) for p in apart if len(p) == 2]:
         members[x].add(x), members[y].add(y)
+    def order(x, y):
+        """(old, into): into the group with more bursts."""
+        sx = sum(size.get(m, 0) for m in members[x])
+        sy = sum(size.get(m, 0) for m in members[y])
+        return (y, x) if sx > sy or (sx == sy and x < y) else (x, y)
     out = []
     while True:
         G = collections.Counter()                          # group pair -> evidence
@@ -98,23 +108,39 @@ def cow_merges(evidence, track_cow, apart=(), min_llr=200.0, margin=100.0, size=
         near = collections.defaultdict(dict)
         for (x, y), v in G.items():
             near[x][y] = near[y][x] = v
-        best = None
+        best, unsure = None, []
         for (x, y), v in G.items():
-            if v < min_llr or frozenset((x, y)) in sep:
+            if frozenset((x, y)) in sep or v < min(min_llr, review_llr):
                 continue
             rival = max([w for z, w in near[x].items() if z != y and frozenset((z, y)) in sep] +
                         [w for z, w in near[y].items() if z != x and frozenset((z, x)) in sep] + [-np.inf])
-            if v - rival >= margin and (best is None or v > best[0]):
-                best = (v, x, y)
+            if v >= min_llr and v - rival >= margin:
+                if best is None or v > best[0]:
+                    best = (v, x, y)
+            elif v >= review_llr and v - rival >= review_margin:
+                unsure.append((v, v - max(rival, 0.0), x, y))           # no rival: ahead by all of it
         if best is None:
+            if reviews is not None:
+                for v, mg, x, y in sorted(unsure, reverse=True):
+                    reviews.append(order(x, y) + (float(v), float(mg)))
             return out
         _, x, y = best
-        sx = sum(size.get(m, 0) for m in members[x])
-        sy = sum(size.get(m, 0) for m in members[y])
-        into, old = (x, y) if sx > sy or (sx == sy and x < y) else (y, x)
+        old, into = order(x, y)
         parent[old] = into
         out.append((old, into))
         members[into] |= members.pop(old)
+
+
+def _plans_meet(ca, cb, grow):
+    """Two cameras' floor plans overlap (their floor_points' X, Y spans, grown by grow) - or cannot be told
+    (a projection matrix, no floor_points): True."""
+    fa, fb = ca.get("floor_points"), cb.get("floor_points")
+    if not fa or not fb:
+        return True
+    span = lambda f: (min(p[2] for p in f) - grow, max(p[2] for p in f) + grow,
+                      min(p[3] for p in f) - grow, max(p[3] for p in f) + grow)
+    (ax0, ax1, ay0, ay1), (bx0, bx1, by0, by1) = span(fa), span(fb)
+    return ax0 <= bx1 and bx0 <= ax1 and ay0 <= by1 and by0 <= ay1
 
 
 def _centre(b):
@@ -181,6 +207,8 @@ class GlobalTracker:
         self.m = m
         self.cams = {c["id"]: c for c in cfg["cameras"]}
         self.min_iou, self.max_age = cfg["tracker"]["iou"], cfg["tracker"]["max_age_s"]
+        self.kalman = bool(cfg["tracker"].get("kalman", False))
+        self.low_iou = cfg["tracker"].get("low_iou", 0.5)
         self.neighbours = collections.defaultdict(set)
         for a, b in m.get("neighbours", []):
             self.neighbours[a].add(b), self.neighbours[b].add(a)
@@ -209,18 +237,22 @@ class GlobalTracker:
 
     # ---------------------------------------------------------------- one camera, one second
     def update(self, cam, ts, dets):
-        """dets [{"box": [x1, y1, x2, y2] 0-1, "emb": unit vector or None, "p_lying": 0-1 (optional)}]
-        -> a gid per det."""
+        """dets [{"box": [x1, y1, x2, y2] 0-1, "emb": unit vector or None, "p_lying": 0-1 (optional), "low": True
+        for a box under the detector's threshold (optional)}] -> a gid per det. A low box only continues a track
+        this camera had a moment ago, or a cow lying still at her place (ByteTrack's second round) - else None."""
         f = self.floor.get(cam)
         dets = [dict(d, xy=f(d["box"], d.get("p_lying", 0.5)) if f else None) for d in dets]
+        hi = [j for j, d in enumerate(dets) if not d.get("low")]
+        lo = [j for j, d in enumerate(dets) if d.get("low")]
+        sure = [dets[j] for j in hi]
         with self.lock:
-            out = [None] * len(dets)
+            out = [None] * len(sure)
             taken = set()
-            self._same_camera(cam, ts, dets, out, taken)
-            self._floor_handover(cam, ts, dets, out, taken)
-            self._handover(cam, ts, dets, out, taken)
-            self._portals(cam, ts, dets, out, taken)
-            for j, d in enumerate(dets):
+            self._same_camera(cam, ts, sure, out, taken)
+            self._floor_handover(cam, ts, sure, out, taken)
+            self._handover(cam, ts, sure, out, taken)
+            self._portals(cam, ts, sure, out, taken)
+            for j, d in enumerate(sure):
                 if out[j] is None:
                     self.n += 1
                     t = GlobalTrack(f"g-{int(ts)}-{self.n}", ts)
@@ -229,13 +261,55 @@ class GlobalTracker:
                     out[j] = t.gid
                     self.stats["new"] += 1
                 self._observe(self.tracks[out[j]], cam, ts, d)
+            low_out = self._low(cam, ts, [dets[j] for j in lo], taken)
             if self.m.get("late_sim", 0) > 0:
                 self._late(cam, ts, out)
+            full = [None] * len(dets)
+            for j, g in zip(hi, out):
+                full[j] = g
+            for j, g in zip(lo, low_out):
+                full[j] = g
             self._prune(ts)
-            links = self._disjoint_links(cam, ts, out, dets)
+            kept = [j for j, g in enumerate(full) if g is not None]
+            links = self._disjoint_links(cam, ts, [full[j] for j in kept], [dets[j] for j in kept])
         if links and self.apart is not None:
             self.apart(links, ts)
+        return full
+
+    def _low(self, cam, ts, lows, taken):
+        """ByteTrack's second round: the boxes the detector was unsure of, against this camera's tracks no sure box
+        took - one seen a moment ago where its box is expected (IoU low_iou), or a cow lying still at her place.
+        A low box matching none is dropped (None): it may be no cow at all."""
+        out = [None] * len(lows)
+        if not lows:
+            return out
+        m = self.m
+        mine = [t for t in self.tracks.values() if t.gid not in taken and cam in t.cams]
+        S = np.full((len(mine), len(lows)), NEG)
+        for i, t in enumerate(mine):
+            seen = t.cams[cam]
+            age = ts - seen["last"]
+            for k, d in enumerate(lows):
+                v = max(iou(self._expected(seen, ts), d["box"]), iou(seen["box"], d["box"])) \
+                    if age <= self.max_age else 0.0
+                if v >= self.low_iou:
+                    S[i, k] = v
+                elif (age <= m.get("still_s", 0) or (age <= m.get("still_long_s", 0) and self._was_still(seen))) \
+                        and self._same_place(seen["box"], d["box"], iou(seen["box"], d["box"])):
+                    S[i, k] = 0.5 * self.low_iou
+        for i, k in assign(S):
+            out[k] = mine[i].gid
+            taken.add(mine[i].gid)
+            self._observe(mine[i], cam, ts, lows[k])
+            self.stats["low_kept"] += 1
+        self.stats["low_dropped"] += out.count(None)
         return out
+
+    def _expected(self, seen, ts):
+        """Where this camera's box of a track is expected at ts: moved on by its speed (kalman), else as last seen.
+        The matching takes the better of this and the last box: a cow may stop short of the guess."""
+        kf = seen.get("kf")
+        return kf.predict(ts) if kf is not None else seen["box"]
 
     def track_only(self, cam, ts, dets):
         """A frame between the seconds (track_fps): the camera's boxes kept on their tracks."""
@@ -256,13 +330,15 @@ class GlobalTracker:
         for i, t in enumerate(mine):
             seen = t.cams[cam]
             age = ts - seen["last"]
+            ref = self._expected(seen, ts) if age <= self.max_age else seen["box"]
             for j, d in enumerate(dets):
-                v, c = iou(seen["box"], d["box"]), self._cos(t, d)
+                # where her speed puts her, or where she was (a cow that stopped short of the guess)
+                v, c = max(iou(ref, d["box"]), iou(seen["box"], d["box"])), self._cos(t, d)
                 if age <= self.max_age and v >= self.min_iou:
                     S[i, j] = m["w_iou"] * v + (1 - m["w_iou"]) * (0.5 if c is None else c)
                 elif (age <= m.get("still_s", 0) or (age <= m.get("still_long_s", 0) and self._was_still(seen))) \
-                        and self._same_place(seen["box"], d["box"], v):
-                    S[i, j] = m["w_iou"] * max(v, 0.3)            # lying still: back at the same place
+                        and self._same_place(seen["box"], d["box"], iou(seen["box"], d["box"])):
+                    S[i, j] = m["w_iou"] * max(iou(seen["box"], d["box"]), 0.3)   # lying still: back at the same place
                 elif age <= m["reacquire_s"] and c is not None and c >= m["reacquire_sim"]:
                     # lost a moment (hidden, missed): near where she was and still looking like her
                     (ax, ay), (bx, by) = _centre(seen["box"]), _centre(d["box"])
@@ -372,7 +448,14 @@ class GlobalTracker:
             moved = np.hypot(prev["anchor"][0] - anchor[0], prev["anchor"][1] - anchor[1])
             if moved <= self.m.get("still_moved", 0.3) * max(box[3] - box[1], 1e-6):
                 anchor, since = prev["anchor"], prev["still_since"]
-        t.cams[cam] = {"box": box, "last": ts, "anchor": anchor, "still_since": since}
+        kf = None
+        if self.kalman:
+            kf = prev.get("kf") if prev is not None and ts - prev["last"] <= self.max_age else None
+            if kf is None:
+                kf = BoxKalman(box, ts)
+            else:
+                kf.update(ts, box)
+        t.cams[cam] = {"box": box, "last": ts, "anchor": anchor, "still_since": since, "kf": kf}
         t.last, t.last_cam, t.n = ts, cam, t.n + 1
         if d.get("xy") is not None:
             if t.xy is not None and t.xy_ts is not None and abs(ts - t.xy_ts) < 1.0:
@@ -789,8 +872,17 @@ class TrackletLinker:
         # camera sees beyond its own mask (its tracking_mask) is a cow the other counts - joined by look,
         # her frame ids over look_min_s seconds clearly nearest (look_margin) to one of the other's cows
         self.masks = {c["id"]: c.get("mask") or [] for c in cfg["cameras"]}
+        # ... and neighbours each calibrated on a floor plan of its own (planes placed apart: studio, autocalib's
+        # groups kept apart) - by place they never meet
+        cams = {c["id"]: c for c in cfg["cameras"]}
+        apart = {tuple(sorted(p)) for p in m.get("neighbours", []) if p[0] in cams and p[1] in cams
+                 and not _plans_meet(cams[p[0]], cams[p[1]], 2 * self.dist)}
+        for a, b in sorted(apart):
+            print(f"[mct] {a}-{b}: neighbours whose floor plans do not meet (each calibrated on a plane of its own) "
+                  "- joined by look in the strip they share, not by place; calibrate them together (studio: Spots) "
+                  "to join them by place", flush=True)
         self.by_look = sorted({tuple(sorted(p)) for p in m.get("neighbours", [])
-                               if self.floor.get(p[0]) is None or self.floor.get(p[1]) is None})
+                               if self.floor.get(p[0]) is None or self.floor.get(p[1]) is None} | apart)
         self.look = {}                                         # (visitor, owner) -> (sum of cos, seconds)
         self.look_min_s = m.get("look_min_s", 30)
         self.look_min_sim = m.get("look_min_sim", 0.6)
@@ -803,6 +895,14 @@ class TrackletLinker:
         self.never = set()                                     # track pairs that are two cows
         self.warned = set()                                    # places already said (_near_note)
         self.nearest = collections.deque(maxlen=20000)         # floor distance of each mutual-nearest pair (said)
+        # the cameras' clocks against each other, from cows walking on two cameras' joined tracks: the shift of one
+        # track's floor path that lays it best on the other's (lag_window_s of it, within lag_max_s) - a camera
+        # whose frames come late (its stream's delay) puts a walking cow a metre or two behind herself
+        self.lag_window = m.get("lag_window_s", 20.0)
+        self.lag_max = m.get("lag_max_s", 3.0)
+        self.path = collections.defaultdict(lambda: collections.deque(maxlen=int(self.lag_window) * 4 + 8))
+        self.lags, self.lag_n = {}, collections.Counter()      # (cam a, cam b) -> summed distance by tau, walks
+        self.lag_next = {}                                     # (track a, track b) -> when to measure it again
 
     def _by_look(self, ts, per_cam, ids):
         """Neighbours without a floor mapping: a cow camera x sees beyond its mask against the cows camera y
@@ -1085,6 +1185,8 @@ class TrackletLinker:
     def _forget(self, ts, keep_s=3600.0):
         """The evidence of tracks gone for keep_s: a live barn makes thousands of tracks a day."""
         self.flush_evidence(ts)
+        for t in [t for t, q in self.path.items() if q and ts - q[-1][0] > keep_s]:
+            del self.path[t]
         gone = {t for t, (_, _, last) in self.life.items() if ts - last > keep_s and t in self.ev}
         for t in gone:
             for o in self.ev.pop(t):
@@ -1093,12 +1195,110 @@ class TrackletLinker:
                 self.both.pop(self._key(t, o), None)
                 self.recent.pop(self._key(t, o), None)
 
+    def _clocks(self, ts, ids, pts):
+        """Each track's floor path (the last 4 x lag_window_s); for two cameras' tracks of one cow that walks (joined, or
+        both walking and each other's nearest), every lag_window_s: how far apart b's path lies from a's when b's frames are taken as
+        stamped tau late, for every tau within lag_max_s (0.1 s apart) - summed per camera pair over every such
+        walk, the tau where the sum is least is how late b's frames come (clocks())."""
+        if self.lag_next and int(ts) % 600 == 0:               # the paths of tracks long gone
+            old = ts - 2 * (self.lag_window + self.lag_max)
+            for t in [t for t, q in self.path.items() if not q or q[-1][0] < old]:
+                del self.path[t]
+            self.lag_next = {k: v for k, v in self.lag_next.items() if v >= old}
+        for cam, gs in ids.items():
+            if pts.get(cam):
+                for g, p in zip(gs, pts[cam]):
+                    self.path[g].append((ts, *self._at(p)))
+        cams = sorted(c for c in ids if pts.get(c))
+        for i, ca in enumerate(cams):
+            for cb in cams[i + 1:]:
+                if frozenset((ca, cb)) in self.disjoint:
+                    continue
+                # a cow walking on both: her tracks joined, or two tracks walking now and each other's nearest
+                # (within 3 x link_dist: an unknown lag puts her that far behind herself)
+                walk = {g: self._walking(g) for g in ids[ca] + ids[cb]}
+                ma = [(a, walk[a]) for a in ids[ca] if walk[a] is not None]
+                mb = [(b, walk[b]) for b in ids[cb] if walk[b] is not None]
+                pairs = {(a, b) for a in ids[ca] for b in ids[cb] if self.root(a) == self.root(b)}
+                if ma and mb:
+                    D = np.array([[np.hypot(*(p - q)) for _, q in mb] for _, p in ma])
+                    for x, y in enumerate(D.argmin(1)):
+                        if D[:, y].argmin() == x and D[x, y] <= 3 * self.dist:
+                            pairs.add((ma[x][0], mb[y][0]))
+                for a, b in pairs:
+                    if ts < self.lag_next.get((a, b), -np.inf):
+                        continue
+                    curve = self._lag_curve(a, b, ts)
+                    if curve is not None:
+                        k = (ca, cb)
+                        self.lags[k] = curve if k not in self.lags else self.lags[k] + curve
+                        self.lag_n[k] += 1
+                        self.lag_next[(a, b)] = ts + self.lag_window            # its next stretch
+
+    def _walking(self, g):
+        """Where track g is now if she walks (her floor path over the last 7 s, smoothed, moved at least a sixth of
+        link_dist a second), else None."""
+        path = self.path.get(g)
+        P = np.array([p for p in path if p[0] >= path[-1][0] - 7], float) if path else np.zeros((0, 3))
+        if len(P) < 5:
+            return None
+        h = len(P) // 2
+        a, b = np.median(P[:h, 1:], 0), np.median(P[h:, 1:], 0)
+        dt = max(np.median(P[h:, 0]) - np.median(P[:h, 0]), 1e-6)
+        return b if np.hypot(*(b - a)) / dt >= self.dist / 6 else None
+
+    def _lag_curve(self, a, b, ts):
+        """a's path (the last 2 x lag_window_s, within lag_max_s of b's ends) against b's (interpolated), b taken
+        as tau late: the summed distance of her moments in motion (each capped at 2 x link_dist: a wrong second costs
+        no more) for every tau, and how many moments - or None when she did not walk, or either track was not seen
+        enough."""
+        taus = np.arange(-self.lag_max, self.lag_max + 1e-9, 0.1)
+        B = np.array(self.path[b], float)
+        if len(B) < self.lag_window / 2:
+            return None
+        # a's moments of the last 2 x lag_window_s that b's path covers at every tau tried: each tau scored on the
+        # same stretch
+        A = np.array([q for q in self.path[a] if max(B[0, 0] + self.lag_max, ts - 2 * self.lag_window) <= q[0]
+                      <= B[-1, 0] - self.lag_max], float)
+        if len(A) < 6:
+            return None
+        # only her moments in motion tell the time (a lying cow is anywhere in time): her path smoothed over 7 s (no
+        # one wrong second) moving at least a sixth of link_dist a second over 6 s
+        sm = np.array([np.median(A[max(0, i - 3):i + 4, 1:], 0) for i in range(len(A))])
+        lo, hi = np.maximum(np.arange(len(A)) - 3, 0), np.minimum(np.arange(len(A)) + 3, len(A) - 1)
+        v = np.hypot(*(sm[hi] - sm[lo]).T) / np.maximum(A[hi, 0] - A[lo, 0], 1e-6)
+        moving = v >= self.dist / 6
+        if moving.sum() < 3:
+            return None
+        A = A[moving]
+        t = A[:, 0][None, :] + taus[:, None]
+        bx, by = np.interp(t, B[:, 0], B[:, 1]), np.interp(t, B[:, 0], B[:, 2])
+        return np.append(np.minimum(np.hypot(A[None, :, 1] - bx, A[None, :, 2] - by), 2 * self.dist).sum(1), len(A))
+
+    def clocks(self, min_n=5):
+        """{(cam a, cam b): (s b's frames come late against a's, how many walks it rests on, how much nearer the
+        paths lie there than a second either side - cm, the sharper the surer)}; the distances of every moment a
+        cow was walking, summed (the last number of each curve: how many moments)."""
+        taus = np.arange(-self.lag_max, self.lag_max + 1e-9, 0.1)
+        out = {}
+        for k, curve in self.lags.items():
+            if self.lag_n[k] < min_n:
+                continue
+            c = curve[:-1] / max(curve[-1], 1.0)               # summed over every moment in motion: their mean
+            i = int(np.argmin(c))
+            side = [c[j] for j in (i - 10, i + 10) if 0 <= j < len(c)]
+            out[k] = (round(float(taus[i]), 1), int(self.lag_n[k]), float(np.mean(side) - c[i]) if side else 0.0)
+        return out
+
     def update_all(self, ts, per_cam):
         with self.lock:
             self.last_ts = ts
             if self.rule == "llr" and (self.flushed is None or ts - self.flushed >= 600):
                 self._forget(ts)
-            ids = {cam: self.cam_tracker.update(cam, ts, ds) for cam, ds in per_cam.items()}
+            raw = {cam: self.cam_tracker.update(cam, ts, ds) for cam, ds in per_cam.items()}
+            # the low boxes no track took ([tracker] low_score) are no cow here: left out, None in the answer
+            per_cam = {cam: [d for d, g in zip(ds, raw[cam]) if g is not None] for cam, ds in per_cam.items()}
+            ids = {cam: [g for g in gs if g is not None] for cam, gs in raw.items()}
             for late, earlier in self.cam_tracker.late_links:    # a cow taken back late: before life grows
                 if late in self.life and earlier in self.life:
                     self._union(late, earlier, ts)
@@ -1117,6 +1317,7 @@ class TrackletLinker:
                 if apart:
                     self.apart([(a, b) for a, b in apart if a != b], ts)
             pts = {cam: self._points(cam, per_cam[cam]) for cam in per_cam}
+            self._clocks(ts, ids, pts)
             cams = [c for c in per_cam if pts[c] is not None and pts[c]]
             for i, ca in enumerate(cams):
                 for cb in cams[i + 1:]:
@@ -1161,7 +1362,7 @@ class TrackletLinker:
                                     self._union(k[0], k[1], ts)
                             elif self.near[k] >= self.share * self.both[k]:
                                 self._union(k[0], k[1], ts)
-            return {cam: [self.root(g) for g in gs] for cam, gs in ids.items()}
+            return {cam: [None if g is None else self.root(g) for g in gs] for cam, gs in raw.items()}
 
     def track_at(self, cam, ts, box):
         t = self.cam_tracker.track_at(cam, ts, box)

@@ -1148,3 +1148,164 @@ def test_merge_by_place_merges_the_gallery_and_the_reports_follow():
         assert report.track_map(store) == {"ta": "A", "tb": "A"}
         cfg["mct"]["link_rule"] = "near"                     # the old rule keeps no evidence: nothing merged
         assert pipeline.merge_by_place(gal, store, cfg, 1000.0) == []
+
+
+# ------------------------------------------------------------------ the camera's tracker: Kalman, unsure boxes
+
+def test_box_kalman_follows_a_walking_box():
+    """A box moving 0.08 a second: after a few seconds the filter expects it where it will be, not where it was."""
+    from common import BoxKalman, iou
+    box = lambda x: [x, 0.4, x + 0.1, 0.5]
+    kf = BoxKalman(box(0.1), 0.0)
+    for k in range(1, 6):
+        kf.update(float(k), box(0.1 + 0.08 * k))
+    assert iou(kf.predict(6.0), box(0.1 + 0.08 * 6)) > 0.8
+    assert iou(box(0.1 + 0.08 * 5), box(0.1 + 0.08 * 6)) < 0.5
+
+
+def test_tracker_keeps_a_fast_walker_with_kalman():
+    """A cow setting off and walking up to 0.08 of the frame a second with a box 0.1 wide: at 1 fps her boxes soon
+    overlap too little for IoU alone (a new track every second); with the Kalman filter one track."""
+    import mct
+    import pipeline
+    box = lambda x: [x, 0.4, x + 0.1, 0.5]
+    xs = np.cumsum([0.05, 0.02, 0.035, 0.05, 0.065, 0.075, 0.08, 0.08, 0.08, 0.08])
+    for kalman, ok in ((False, lambda n: n >= 5), (True, lambda n: n == 1)):
+        cfg = _mct_cfg([("a", {})])
+        cfg["tracker"]["kalman"] = kalman
+        g = mct.GlobalTracker(cfg)
+        t = pipeline.Tracker("a", 0.3, 5, kalman=kalman)
+        gids, tids = set(), set()
+        for k, x in enumerate(xs):
+            gids |= set(g.update("a", float(k), [{"box": box(x)}]))
+            tids |= {tid for tid, _ in t.update(float(k), [box(x)])}
+        assert ok(len(gids)) and ok(len(tids)), (kalman, gids, tids)
+
+
+def test_unsure_boxes_only_continue_a_track():
+    """ByteTrack's second round: a cow's box under the threshold keeps her track; an unsure box where no track was
+    starts none (None / left out)."""
+    import mct
+    import pipeline
+    box = lambda x: [x, 0.4, x + 0.1, 0.5]
+    g = mct.GlobalTracker(_mct_cfg([("a", {})]))
+    t = pipeline.Tracker("a", 0.3, 5)
+    first = g.update("a", 0.0, [{"box": box(0.2)}])[0]
+    (tid, _), = t.update(0.0, [box(0.2)])
+    for k in range(1, 4):                                  # the detector unsure of her for three seconds
+        out = g.update("a", float(k), [{"box": box(0.2), "low": True}, {"box": box(0.7), "low": True}])
+        assert out == [first, None]
+        got = t.update(float(k), [], low=[box(0.2), box(0.7)])
+        assert [x for x, _ in got] == [tid]
+    assert g.update("a", 30.0, [{"box": box(0.5), "low": True}]) == [None]
+    lk = mct.TrackletLinker(_mct_cfg([("a", {})]))
+    lk.update_all(0.0, {"a": [{"box": box(0.2)}]})
+    assert lk.update_all(1.0, {"a": [{"box": box(0.2), "low": True}, {"box": box(0.7), "low": True}]})["a"][1] is None
+
+
+def test_models_split_the_detectors_boxes_at_its_threshold():
+    """[tracker] low_score: the detector keeps boxes down to it; detect() still gives only the sure ones."""
+    import pipeline
+
+    class Det:
+        threshold = 0.5
+
+        def __call__(self, img):
+            return [{"bbox": [0, 0, 0.1, 0.1], "det_score": 0.9}, {"bbox": [0.5, 0.5, 0.6, 0.6], "det_score": 0.3},
+                    {"bbox": [0.7, 0.7, 0.8, 0.8], "det_score": 0.1}][:2 + (self.threshold < 0.1)]
+    m = pipeline.Models.__new__(pipeline.Models)
+    m.detector, m.det_high = Det(), 0.0
+    m.gpu = lambda urgent, kind: __import__("contextlib").nullcontext()
+    m.detector.threshold, m.det_high = 0.2, 0.5
+    img = np.zeros((4, 4, 3), np.uint8)
+    assert m.detect(img) == [[0, 0, 0.1, 0.1]]
+    assert m.detect_split(img) == ([[0, 0, 0.1, 0.1]], [[0.5, 0.5, 0.6, 0.6]])
+
+
+# ------------------------------------------------------------------ the night unsure: a person asked
+
+def test_cow_merges_three_zones():
+    """Sure pairs merged; pairs with some evidence but not enough go to a person; the rest nothing."""
+    import mct
+    track_cow = {f"{c}{k}": c for c in ("xa", "xb", "ya", "yb", "za", "zb") for k in range(2)}
+    ev = {("xa0", "xb0"): 300.0, ("ya0", "yb0"): 90.0, ("za0", "zb0"): 20.0}
+    apart = [("xa", "ya"), ("xa", "za"), ("ya", "za"), ("xb", "yb"), ("xb", "zb"), ("yb", "zb")]
+    reviews = []
+    got = mct.cow_merges(ev, track_cow, apart, reviews=reviews)
+    assert got == [("xb", "xa")]
+    assert [r[:2] for r in reviews] == [("yb", "ya")] and reviews[0][2] == 90.0
+
+
+def test_unsure_pair_asked_then_merged_or_never_again():
+    """The night stores an unsure pair; a person's "same" aliases it at once and the next night merges the gallery;
+    "different" keeps it from being proposed again; the page shows both names' faces."""
+    import merges
+    import pipeline
+    import report
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "herd.sqlite"))
+        for k in range(3):
+            for cam, tr, cow in (("a", "ta", "A"), ("b", "tb", "B"), ("a", "tc", "C"), ("b", "td", "D")):
+                store.burst((cam, tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        store.put_evidence([("ta", "tb", 120.0, 300, 400.0), ("tc", "td", 100.0, 300, 400.0)])
+        store.add_cannot_link([("ta", "tc"), ("tb", "td")], 100.0)
+        gal = _gallery(os.path.join(d, "gallery"), {c: v for c, v in zip("ABCD", np.eye(4))})
+        cfg = _cfg()
+        cfg["mct"].update(enabled=True, mode="link", link_rule="llr")
+        cfg["store"]["path"] = os.path.join(d, "herd.sqlite")
+        shared = pipeline.SharedGallery(gal, store, cfg, 0.0)
+        for cow, cam in (("A", "a"), ("B", "b"), ("A", "a")):
+            shared.face(cow, cam, 1000.0, np.full((224, 224, 3), 128, np.uint8))
+        assert len(os.listdir(os.path.join(d, "gallery", "faces", "A"))) == 1      # one each face_every_s
+        assert pipeline.merge_by_place(gal, store, cfg, 1000.0) == []
+        assert {(r["old"], r["into"]) for r in store.reviews("pending")} == {("B", "A"), ("D", "C")}
+        page = os.path.join(d, "merges.html")
+        merges.main(["page", "--store", store.db.execute("PRAGMA database_list").fetchone()[2], "--out", page])
+        html = open(page, encoding="utf-8").read()
+        assert "gallery/faces/A/a_1000.jpg" in html and "gallery/faces/B/b_1000.jpg" in html
+        dec = os.path.join(d, "decisions.json")
+        json.dump({"decisions": [{"old": "B", "into": "A", "answer": "same"},
+                                 {"old": "D", "into": "C", "answer": "different"}]}, open(dec, "w"))
+        merges.main(["apply", "--store", os.path.join(d, "herd.sqlite"), "--decisions", dec])
+        assert report.track_map(store)["tb"] == "A" and set(gal.cows) == set("ABCD")   # the reports at once
+        assert pipeline.merge_by_place(gal, store, cfg, 2000.0) == [("B", "A")]      # the gallery the next night
+        assert set(gal.cows) == {"A", "C", "D"}
+        assert not store.reviews("pending")
+        store.put_evidence([("tc", "td", 1000.0, 3000, 2500.0)])                    # however sure it looks now
+        assert pipeline.merge_by_place(gal, store, cfg, 3000.0) == [] and "D" in gal.cows
+
+
+# ------------------------------------------------------------------ the cameras' clocks
+
+def test_linker_measures_how_late_a_cameras_frames_come():
+    """Cows walking on two cameras whose floor plans agree, camera b's frames 1.2 s late: her two tracks are joined
+    and the linker says b is 1.2 s late (what time_offset_s = -1.2 on b puts right)."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 2000, 0], [1, 1, 2000, 1000], [0, 1, 0, 1000]]
+    box = lambda x, y: [x / 2000 - 0.03, y / 1000 - 0.08, x / 2000 + 0.03, y / 1000]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0)
+    for late in (1.2, -0.7, 0.0):
+        lk = mct.TrackletLinker(cfg)
+        where = lambda t, y0: (200 + 60 * max(0.0, t - 30), y0)         # 30 s still, then walking 60 cm/s
+        for k in range(150):
+            out = lk.update_all(float(k), {"a": [{"box": box(*where(k, y))} for y in (300, 700)],
+                                           "b": [{"box": box(*where(k - late, y))} for y in (300, 700)]})
+        assert out["a"] == out["b"]
+        (lag, n, sharp), = lk.clocks(min_n=1).values()
+        assert abs(lag - late) <= 0.15 and sharp > 20, (late, lag, n, sharp)
+
+
+def test_neighbours_on_floor_plans_of_their_own_joined_by_look():
+    """cam3 and cam4 each calibrated on a plane of its own, placed far apart on the plan (the barn's config): by place
+    they never meet, so their strip is joined by look, as for neighbours with no floor mapping."""
+    import mct
+    plan = lambda x0: [[0, 0, x0, 0], [1, 0, x0 + 1000, 0], [1, 1, x0 + 1000, 1000], [0, 1, x0, 1000]]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": "cam3", "mask": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]], "floor_points": plan(200000)},
+                      {"id": "cam4", "mask": [[0.5, 0], [1, 0], [1, 1], [0.5, 1]], "floor_points": plan(400000)},
+                      {"id": "cam5", "mask": [], "floor_points": plan(400500)}]
+    cfg["mct"].update(neighbours=[["cam3", "cam4"], ["cam4", "cam5"]])
+    assert mct.TrackletLinker(cfg).by_look == [("cam3", "cam4")]

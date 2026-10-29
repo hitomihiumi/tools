@@ -143,6 +143,7 @@ python herd/herd.py report --config barn.toml alerts --day 2026-10-07
 python herd/herd.py report --config barn.toml verdict --alert 12 --confirmed yes --diagnosis "..."
 python herd/herd.py report --config barn.toml alert-stats
 python herd/herd.py gallery --config barn.toml
+python herd/herd.py merges page --config barn.toml --out merges.html      # one cow under two names? you decide
 python herd/herd.py barn sheet --cache barn/training_cache --out tracks.html   # name the cows -> merges.csv
 python herd/herd.py barn export --cache barn/training_cache --merges merges.csv # -> herd_barn_feat_*.tgz (reid_pod.sh)
 python herd/herd.py barn video --config barn.toml --videos rec --out barn_video  # recordings -> barn_video/training_cache
@@ -180,6 +181,7 @@ time on tracks no cow could be given.
 | `mct.py` | one track per cow across cameras (`[mct]`; a frame id from the herd model on one frame) |
 | `mct_eval.py`, `mct_pod.sh` | that tracker scored on MmCows' four synchronised cameras (GUIDE 4.8) |
 | `mct_sim.py` | the cross-camera joining rules on a made-up barn where the truth is known (`link_rule = "llr"`, GUIDE 4.8) |
+| `merges.py` | `herd.py merges`: the pairs of cow names the night was unsure are one cow, put to a person (faces side by side) |
 | `show_ids.py` | `herd.py show-ids`: who is who, drawn on a recorded file from the store (video + stills) |
 | `reid.py`, `reid_pod.sh` | identity taught on sets with cow ids (MultiCamCows2024, Cows2021, OpenCows2020, AerialCattle2017, CowDataset - from WildlifeReID-10k -, CoBRA, SideViewCows2026, MmCows by its human labels), trained from scratch on all of them (`--init` fine-tunes); `[model] identity` |
 | `eval_pod.sh` | the MmCows check again on a fresh pod with a trained identity model (herd_reid_*.tgz): no training, no training sets; thresholds recalibrated on 7/25 (`CALIBRATE=0`: as they are) |
