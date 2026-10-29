@@ -408,7 +408,19 @@ the second camera against where you named her, the far ones red and named - and 
 Misses count half on each camera's picture (a cow far from one camera is small on it and large on the
 other's). `--planes 3` (the default) also tries up to three floor planes, each pair on the one it fits
 best - the bedding, the alley and a lens one plane cannot follow - and says how well that matches; `--apply`
-still writes one plane. `--apply`, when one of the two is
+still writes one plane.
+
+No plane at all: the mapping learnt from the pairs themselves, from where each box is, how big and how
+tall (a standing cow's centre is higher than a lying one's) - once as one smooth mapping, once from each
+box's nearest pairs (a step between the bedding and the alley stays a step). Within one recording a lying
+cow's other moments teach her own place, so check it on another recording too, where the cows lie elsewhere:
+
+```bash
+docker compose run --rm herd crosscam --config /data/barn.toml --boxes /data/boxes_first10 --labels /data/labels_first10.json --also /data/boxes /data/labels.json
+```
+
+`--also`: fitted on one recording, checked on the other, both ways. The cows' names need not match between
+the two sets - only within each. `--apply`, when one of the two is
 calibrated and the other not: the other gets floor_points on its floor (barn.toml.bak kept), so
 `[mct] link` joins the two cameras' tracks by it. Both calibrated: `--apply --onto cam1` keeps cam1's
 and replaces the other's. It maps by the better of the two points, and writes `floor_at = "centre"`

@@ -123,6 +123,27 @@ def test_crosscam_two_floor_levels_want_two_planes(capsys):
         assert "in 2 planes" in capsys.readouterr().out
 
 
+def test_crosscam_learnt_mapping_holds_on_another_recording(capsys):
+    """Two floor levels and a bent lens on cam2: the learnt mapping (no plane) matches the cows, fitted moment
+    by moment and fitted on one recording, checked on another with the cows elsewhere."""
+    import crosscam
+    with tempfile.TemporaryDirectory() as d, tempfile.TemporaryDirectory() as d2:
+        _scene(d, n_cows=24, alley=True, k2=-0.3, seed=5)
+        _scene(d2, n_cows=24, alley=True, k2=-0.3, seed=9)
+        crosscam.main(["--config", os.path.join(d, "barn.toml"), "--boxes", os.path.join(d, "boxes"),
+                       "--labels", os.path.join(d, "labels.json"), "--planes", "1", "--gate", "0.06",
+                       "--also", os.path.join(d2, "boxes"), os.path.join(d2, "labels.json")])
+        r = json.load(open(os.path.join(d, "boxes", "crosscam.json")))["cam1->cam2"]
+        rate = lambda y: y["right"] / y["cows"]
+        assert rate(r["learnt_local"]) > 0.9 and r["learnt_local"]["right"] > r["bottom"]["right"], r["learnt_local"]
+        assert rate(r["learnt"]) > rate(r["bottom"])
+        for k in ("learnt_other_recording", "learnt_from_other_recording"):       # the cows elsewhere: honest
+            assert r[k + "_local"]["cows"] > 100 and rate(r[k + "_local"]) > 0.7, (k, r[k + "_local"])
+            assert rate(r[k + "_local"]) > rate(r[k]) and r[k + "_local"]["wrong"] / r[k + "_local"]["cows"] < 0.05
+        out = capsys.readouterr().out
+        assert "learnt from the boxes" in out and "checked on the other" in out
+
+
 def test_crosscam_onto_a_camera_when_both_are_calibrated():
     """Both calibrated: --apply alone leaves them; --onto cam1 puts cam2 on cam1's floor, floor_at on both."""
     import crosscam

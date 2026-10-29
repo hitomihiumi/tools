@@ -306,6 +306,128 @@ def picture(path, boxes_dir, mos, cam_a, cam_b, model, where):
     return path
 
 
+def box_feats(box, w, h):
+    """A box -> what the learnt mapping reads: where it is (to the third power: a lens's bend, the alley's other
+    level), and how big and how tall (a standing cow's centre is higher than a lying one's)."""
+    u, v = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+    bw, bh = box[2] - box[0], box[3] - box[1]
+    return [1.0, u, v, u * u, u * v, v * v, u ** 3, u * u * v, u * v * v, v ** 3, bw, bh, bh * u, bh * v, bw * bh,
+            bh / max(bw, 1e-3) * 0.1]
+
+
+def centre(box, w, h):
+    ar = w / h if h else 16 / 9
+    return ((box[0] + box[2]) / 2 * ar, (box[1] + box[3]) / 2)
+
+
+def fit_poly(F, T, lam=1e-4, rounds=3):
+    """Ridge least squares F -> T (each pair's other box's centre), refitted without the pairs it misses by
+    far more than most (a name wrong on one camera must not bend the mapping)."""
+    F, T = np.asarray(F, float), np.asarray(T, float)
+    keep = np.ones(len(F), bool)
+    W = None
+    for _ in range(rounds):
+        A = F[keep]
+        W = np.linalg.solve(A.T @ A + lam * np.eye(A.shape[1]), A.T @ T[keep])
+        e = np.hypot(*(F @ W - T).T)
+        keep = e <= max(3 * np.median(e[keep]), RANSAC_THR)
+        if keep.sum() < F.shape[1] + 4:
+            break
+    return W
+
+
+class Local:
+    """Where a box lands on the other picture from the pairs nearest it on its own (k of them, an affine map of
+    where and how tall fitted on those, nearer ones weighing more): a step between the bedding and the alley
+    stays a step, which one smooth mapping would blur."""
+
+    def __init__(self, F, T, k=12):
+        self.F, self.T, self.k = np.asarray(F, float), np.asarray(T, float), k
+        self.P = self.F[:, [1, 2, 11]] * [1.0, 1.0, 0.5]          # u, v, height: what "near" is measured on
+
+    def map(self, Fq):
+        Fq = np.asarray(Fq, float)
+        out = []
+        for f in Fq:
+            q = f[[1, 2, 11]] * [1.0, 1.0, 0.5]
+            d = np.sqrt(((self.P - q) ** 2).sum(1))
+            idx = np.argsort(d)[:self.k]
+            w = 1.0 / (d[idx] + 0.02)
+            A = self.F[idx][:, [0, 1, 2, 11]]
+            Aw = A * w[:, None]
+            X = np.linalg.lstsq(Aw.T @ A + 1e-4 * np.eye(4), Aw.T @ self.T[idx], rcond=None)[0]
+            out.append(f[[0, 1, 2, 11]] @ X)
+        return np.asarray(out)
+
+
+def learn(mos, kind="poly"):
+    """The learnt mapping both ways from moments' pairs (named the same on both) -> (a -> b, b -> a) or None."""
+    Fa, Fb, Ta, Tb = [], [], [], []
+    for mo in mos:
+        ib = {i: (box, w, h) for i, box, w, h in mo["b"]}
+        for i, box, w, h in mo["a"]:
+            if i in ib:
+                bb, wb, hb = ib[i]
+                Fa.append(box_feats(box, w, h))
+                Tb.append(centre(bb, wb, hb))
+                Fb.append(box_feats(bb, wb, hb))
+                Ta.append(centre(box, w, h))
+    if not Fa or len(Fa) < 3 * len(Fa[0]):                     # too few pairs for its 16 numbers a way
+        return None
+    if kind == "local":
+        return Local(Fa, Tb), Local(Fb, Ta)
+    return fit_poly(Fa, Tb), fit_poly(Fb, Ta)
+
+
+def learnt_costs(model, mo):
+    """Every a against every b at one moment: each put on the other's picture by the learnt mapping, the miss
+    half on each picture."""
+    Wab, Wba = model
+    Fa = np.array([box_feats(box, w, h) for _, box, w, h in mo["a"]])
+    Fb = np.array([box_feats(box, w, h) for _, box, w, h in mo["b"]])
+    Ca = np.array([centre(box, w, h) for _, box, w, h in mo["a"]])
+    Cb = np.array([centre(box, w, h) for _, box, w, h in mo["b"]])
+    P, Q = (Wab.map(Fa), Wba.map(Fb)) if isinstance(Wab, Local) else (Fa @ Wab, Fb @ Wba)
+    return 0.5 * (np.hypot(P[:, None, 0] - Cb[None, :, 0], P[:, None, 1] - Cb[None, :, 1]) +
+                  np.hypot(Ca[:, None, 0] - Q[None, :, 0], Ca[:, None, 1] - Q[None, :, 1]))
+
+
+def check_learnt(mos, gate=GATE, train=None, kind="poly"):
+    """The learnt mapping matched moment by moment: fitted without that moment (or, train given, on another
+    recording's moments only) -> the same counts as check()."""
+    from scipy.optimize import linear_sum_assignment
+    n, cows = collections.Counter(), collections.defaultdict(collections.Counter)
+    chance, fixed = [], (learn(train, kind) if train is not None else None)
+    for k, mo in enumerate(mos):
+        model = fixed if train is not None else learn(mos[:k] + mos[k + 1:], kind)
+        if model is None or not mo["a"] or not mo["b"]:
+            n["not_fitted"] += model is None
+            continue
+        D = learnt_costs(model, mo)
+        r, c = linear_sum_assignment(D)
+        got = {i: j for i, j in zip(r, c) if D[i, j] <= gate}
+        idb = [i for i, _, _, _ in mo["b"]]
+        for i, (cid, _, _, _) in enumerate(mo["a"]):
+            if cid not in idb:
+                continue
+            n["cows"] += 1
+            chance.append(1.0 / len(idb))
+            j = got.get(i)
+            what = "none" if j is None else ("right" if idb[j] == cid else "wrong")
+            n[what] += 1
+            cows[cid][what] += 1
+    return {"cows": n["cows"], "right": n["right"], "wrong": n["wrong"], "none": n["none"],
+            "moments_not_fitted": n["not_fitted"], "chance": float(np.mean(chance)) if chance else 0.0,
+            "by_cow": {c: dict(v) for c, v in sorted(cows.items())}}
+
+
+def say(name, y):
+    if not y["cows"]:
+        return f"  {name}: no mapping"
+    return (f"  {name}: the right cow {y['right'] / y['cows']:.0%} (another {y['wrong'] / y['cows']:.0%}, none near "
+            f"{y['none'] / y['cows']:.0%}) of {y['cows']}")
+
+
 def onto(cams, ref, oth, H, mos, where):
     """oth's floor_points on ref's floor: points of oth where your cows stood, through H (oth -> ref) onto ref's
     frame and ref's calibration -> ([[u, v, X, Y]] of oth, as clicked, its lens). mos: oth's moments with ref
@@ -345,6 +467,9 @@ def main(argv=None):
                    help="the uncalibrated camera of each pair onto the calibrated one's floor in barn.toml")
     p.add_argument("--gate", type=float, default=GATE,
                    help="a cow put further than this (frame heights) from every box of the other camera matches none")
+    p.add_argument("--also", nargs=2, default=None, metavar=("BOXES", "LABELS"),
+                   help="another recording's labelled boxes: the learnt mapping fitted on one and checked on the "
+                        "other, both ways - whether it holds beyond the minutes it was learnt on")
     p.add_argument("--planes", type=int, default=3,
                    help="also try this many floor planes, each pair on the one it fits (1: one plane only)")
     p.add_argument("--onto", default=None,
@@ -425,6 +550,24 @@ def main(argv=None):
                 (ca, cb), model = fitted[best], {"Hs": [np.asarray(x["H"])]}
             pic = picture(os.path.join(out_dir, f"crosscam_{a}_{b}.jpg"), args.boxes, mos, ca, cb, model, best)
             print(f"  where each was put: {pic}")
+        # the learnt mapping: no plane, the pairs themselves (where, how big, how tall the box)
+        r["learnt"] = check_learnt(mos, gate=args.gate)
+        r["learnt_local"] = check_learnt(mos, gate=args.gate, kind="local")
+        print(say("learnt from the boxes, one smooth mapping (where, size, height)", r["learnt"]))
+        print(say("learnt from the boxes, from the nearest pairs (steps kept)", r["learnt_local"]))
+        if args.also:
+            fr2 = {f["file"]: f for f in json.load(open(os.path.join(args.also[0], "frames.json"), encoding="utf-8"))["frames"]}
+            mos2 = moments(cfg, fr2, read_labels(args.also[1]), a, b)
+            if mos2:
+                for kind, nm in (("poly", "smooth"), ("local", "nearest pairs")):
+                    x1 = check_learnt(mos2, gate=args.gate, train=mos, kind=kind)
+                    x2 = check_learnt(mos, gate=args.gate, train=mos2, kind=kind)
+                    sfx = "" if kind == "poly" else "_local"
+                    r["learnt_other_recording" + sfx], r["learnt_from_other_recording" + sfx] = x1, x2
+                    print(say(f"{nm}: learnt here, checked on the other recording ({len(mos2)} moments)", x1))
+                    print(say(f"{nm}: learnt on the other, checked here", x2))
+            else:
+                print(f"  --also: no moment with your cows on both {a} and {b} there")
         if args.apply:
             fa, fb = bool(cams[a].get("floor_points")), bool(cams[b].get("floor_points"))
             ref = args.onto if args.onto in (a, b) else (a if fa and not fb else b if fb and not fa else None)
