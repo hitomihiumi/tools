@@ -693,7 +693,9 @@ def merge_by_place(gallery, store, cfg, now):
     evidence = store.evidence(since)
     if not evidence:
         return done
-    tm = track_map(store)                                    # track -> cow, joined tracks and aliases followed
+    # each track by its own bursts (aliases followed, joins not): a joined pair whose tracks two cameras named
+    # differently is the strongest evidence of one cow under two names
+    tm = track_map(store, joins=False)
     aliases = store.aliases()
     canon = lambda c: aliases.get(c, c)
     apart = {(tm[a], tm[b]) for a, b in store.cannot_link_pairs(since)

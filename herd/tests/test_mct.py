@@ -1347,3 +1347,21 @@ def test_trial_relink_joins_a_recorded_trial_anew():
         roots = Store(dst).track_roots()
         assert {frozenset((t, r)) for t, r in roots.items()} == {frozenset(("a1", "b1")), frozenset(("a2", "b2"))}
         assert Store(os.path.join(d, "pass2", "herd.sqlite")).track_roots() == {"b2": "a1"}
+
+
+def test_joined_tracks_two_cameras_two_names_one_cow():
+    """cam1 named her A (7 bursts), cam2 B (10): joined, the two-thirds rule over the group gave no name at all.
+    Each camera clear on its own: the group takes B (more bursts), the night sees A and B as one cow. A camera
+    split between two names still gives none."""
+    import report
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for cam, tr, cow, n in (("cam1", "ta", "A", 7), ("cam2", "tb", "B", 10), ("cam1", "tc", "C", 3),
+                                ("cam1", "tc", "D", 3), ("cam2", "td", "C", 5)):
+            for k in range(n):
+                store.burst((cam, tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        store.link_tracks(150.0, "tb", "ta")
+        store.link_tracks(150.0, "td", "tc")
+        assert report.track_map(store) == {"ta": "B", "tb": "B"}
+        assert report.track_map(store, joins=False) == {"ta": "A", "tb": "B", "td": "C"}

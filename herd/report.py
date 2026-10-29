@@ -27,6 +27,7 @@ both (alerts.lying_directions) - which way is "worse" is the vet's call.
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import datetime as dt
 import json
@@ -58,21 +59,33 @@ def day_expr(cfg):
     return f"date(ts + {off}, 'unixepoch')"
 
 
-def track_map(store, min_share=2 / 3):
-    """track -> cow from its confirmed bursts; tracks without a clear majority are left out."""
+def track_map(store, min_share=2 / 3, joins=True):
+    """track -> cow from its confirmed bursts; tracks without a clear majority are left out.
+
+    joins (store.track_links, mct): tracks joined into one cow are named together - each camera's bursts in the
+    group need a clear majority (min_share) of their own; when two cameras' majorities name her differently (the
+    same cow under each camera's name for her side: the join is the evidence), the group takes the name with
+    more bursts - the night makes the two names one (pipeline.merge_by_place). joins=False: each track by its own
+    bursts alone (what the night compares)."""
     aliases = store.aliases() if hasattr(store, "aliases") else {}   # a merged profile counts as its cow
-    roots = store.track_roots() if hasattr(store, "track_roots") else {}   # tracks joined across cameras
-    votes = {}
-    for track, cow, n in store.query("SELECT track, cow, COUNT(*) FROM bursts WHERE state='confirmed' "
-                                     "GROUP BY track, cow"):
-        cow = aliases.get(cow, cow)
-        key = roots.get(track, track)
-        votes.setdefault(key, {})[cow] = votes.get(key, {}).get(cow, 0) + n
+    roots = (store.track_roots() if hasattr(store, "track_roots") else {}) if joins else {}
+    votes = collections.defaultdict(lambda: collections.defaultdict(collections.Counter))   # group -> cam -> cow
+    for track, cam, cow, n in store.query("SELECT track, cam, cow, COUNT(*) FROM bursts WHERE state='confirmed' "
+                                          "GROUP BY track, cam, cow"):
+        votes[roots.get(track, track)][cam][aliases.get(cow, cow)] += n
     out = {}
-    for track, v in votes.items():
-        cow, n = max(v.items(), key=lambda kv: kv[1])
-        if n >= min_share * sum(v.values()):
-            out[track] = cow
+    for group, per_cam in votes.items():
+        tops = {}
+        for cam, v in per_cam.items():
+            cow, n = v.most_common(1)[0]
+            if n < min_share * sum(v.values()):
+                break                                          # a camera unsure which cow: none
+            tops[cam] = cow
+        else:
+            total = collections.Counter()
+            for v in per_cam.values():
+                total.update(v)
+            out[group] = max(set(tops.values()), key=lambda c: (total[c], c))
     for track, root in roots.items():                          # every joined track is its root's cow
         if root in out:
             out[track] = out[root]
