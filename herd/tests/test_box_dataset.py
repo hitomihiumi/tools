@@ -416,6 +416,10 @@ def test_fix_videos_first_or_last_minutes_same_stretch_on_every_camera(monkeypat
     kept, (a, b), _ = fix_videos.stretch(files, 10, first=True)
     assert {os.path.basename(d): cut for _, d, cut in kept} == {
         "cam1_2026-10-27_12-00-05.mp4": (5.0, 600.0), "cam2_2026-10-27_12-00-05.mp4": (0.0, 600.0)}
+    # --from 12:10 with --first 10: from 12:10:00 on both
+    kept, (a, b), _ = fix_videos.stretch(files, 10, first=True, start_at="12:10")
+    assert {os.path.basename(d): cut for _, d, cut in kept} == {
+        "cam1_2026-10-27_12-10-00.mp4": (600.0, 600.0), "cam2_2026-10-27_12-10-00.mp4": (595.0, 600.0)}
     vf = fix_videos.command("in.ts", "out.mp4", 25.0, cut=(1185.0, 600.0))
     assert "trim=start=1185.000:duration=600.000" in vf[vf.index("-vf") + 1]
     cp = fix_videos.command("in.ts", "out.mp4", 25.0, copy=True, cut=(10.0, 5.0))

@@ -7,6 +7,7 @@ tools read them wrong (one camera's clock standing still, frames missing, decode
     python herd/herd.py fix-videos --videos /srv/herd/rec --out /srv/herd/rec_fixed
     python herd/herd.py fix-videos --videos rec --out rec_fixed --fps 25 --copy    # only re-wrap, no encode
     python herd/herd.py fix-videos --videos rec --out rec_first10 --cameras cam1 cam2 --first 10
+    python herd/herd.py fix-videos --videos rec --out rec_1400 --cameras cam1 cam2 --first 10 --from 14:00
 
 --first N / --last N: only the first / last N minutes, the same stretch of time on every camera (it starts
 where the camera that started last started / ends where the camera that stopped first stopped); each file
@@ -101,10 +102,11 @@ def restamp(name, shift_s):
     return name[:m.start()] + new + name[m.end():]
 
 
-def stretch(files, minutes, first=False):
+def stretch(files, minutes, first=False, start_at=None):
     """[(src, dst, camera)] -> ([(src, dst renamed, (start, length))], the window, what each camera covers):
     the last `minutes` before the first camera stopped (first: the first after the last camera started),
-    the same stretch of time for all."""
+    the same stretch of time for all. start_at "HH:MM[:SS]" (or "YYYY-MM-DD HH:MM[:SS]"): `minutes` from then,
+    in the clock of the names (the day the recordings start on, when no date is given)."""
     spans = []
     for src, dst, cam in files:
         t, _ = stamp(os.path.basename(src))
@@ -116,7 +118,17 @@ def stretch(files, minutes, first=False):
     for _, _, cam, t0, d in spans:
         ends[cam] = max(ends.get(cam, 0.0), t0 + d)
         starts[cam] = min(starts.get(cam, t0), t0)
-    if first:
+    if start_at:
+        day = dt.datetime.fromtimestamp(max(starts.values()), dt.timezone.utc)
+        parts = start_at.strip().replace("T", " ").split()
+        try:
+            hms = [int(x) for x in parts[-1].replace("-", ":").split(":")] + [0, 0]
+            d = dt.date.fromisoformat(parts[0]) if len(parts) > 1 else day.date()
+        except ValueError:
+            sys.exit(f"[fix] --from {start_at}: want HH:MM, HH:MM:SS or YYYY-MM-DD HH:MM")
+        start = dt.datetime(d.year, d.month, d.day, hms[0], hms[1], hms[2], tzinfo=dt.timezone.utc).timestamp()
+        end = start + minutes * 60.0
+    elif first:
         start = max(starts.values())
         end = start + minutes * 60.0
     else:
@@ -185,6 +197,9 @@ def main(argv=None):
     p.add_argument("--first", type=float, default=None,
                    help="only the first this many minutes, the same stretch on every camera; files named by their "
                         "new start")
+    p.add_argument("--from", dest="start_at", default=None,
+                   help="with --first N: N minutes from this time (HH:MM[:SS], the clock of the names; or "
+                        "YYYY-MM-DD HH:MM) instead of from the start")
     p.add_argument("--last", type=float, default=None,
                    help="only the last this many minutes, the same stretch on every camera; files named by their "
                         "new start")
@@ -192,6 +207,8 @@ def main(argv=None):
     if args.first and args.last:
         p.error("--first or --last, not both")
     minutes = args.first or args.last
+    if args.start_at and not args.first:
+        p.error("--from needs --first N: N minutes from then")
     if minutes and args.copy:                    # a copied stream starts at a keyframe: seconds off, names wrong
         p.error("--first / --last cut frame-exact only when the video is encoded again: leave --copy out")
     if not shutil.which("ffmpeg"):
@@ -218,9 +235,11 @@ def main(argv=None):
     if minutes and todo:
         if not args.cameras:                      # every camera on its own: the id before the date in the name
             todo = [(s, d, re.split(r"[_ .-]", os.path.basename(s))[0]) for s, d, _ in todo]
-        kept, (w0, w1), cover = stretch(todo, minutes, first=bool(args.first))
+        kept, (w0, w1), cover = stretch(todo, minutes, first=bool(args.first), start_at=args.start_at)
         fmt = lambda t: dt.datetime.fromtimestamp(t, dt.timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
-        print(f"[fix] the {'first' if args.first else 'last'} {minutes:g} min: {fmt(w0)} - {fmt(w1)} (the times in the names), the same on every "
+        what = (f"{minutes:g} min from {args.start_at}" if args.start_at else
+                f"the {'first' if args.first else 'last'} {minutes:g} min")
+        print(f"[fix] {what}: {fmt(w0)} - {fmt(w1)} (the times in the names), the same on every "
               "camera", flush=True)
         for c, secs in sorted(cover.items()):
             print(f"[fix]   {c}: {secs / 60:.1f} min of it" + ("" if secs >= 0.95 * (w1 - w0) else

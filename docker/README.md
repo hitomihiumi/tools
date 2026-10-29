@@ -228,7 +228,9 @@ docker compose run --rm herd fix-videos --videos /data/rec_new --out /data/rec_f
 `--cameras`: only these cameras' files. `--first 10` / `--last 10`: the first / last 10 minutes, the
 same stretch of time on every camera - it starts where the camera that started last started / ends where
 the camera that stopped first stopped - each file named by its new start (the time in its name moved
-on), so the tools still put the cameras side by side. Frame-exact, so not with `--copy`.
+on), so the tools still put the cameras side by side. Frame-exact, so not with `--copy`. `--first 10 --from
+14:00`: ten minutes from 14:00 (the clock of the names) - another stretch of the same day, e.g. for
+`crosscam --also`, best hours later, once the cows have moved and lie elsewhere.
 
 **Naming the cows** (`herd/SETUP.md` section 11):
 
