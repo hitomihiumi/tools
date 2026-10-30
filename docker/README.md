@@ -616,7 +616,16 @@ joining too. Two settings from ByteTrack (`herd/GUIDE.md` section 4.8):
 [tracker]
 kalman = true        # a walking cow's box looked for where her speed puts it
 low_score = 0.2      # boxes the detector is unsure of (under [detector] threshold) keep a cow's track, never start one
+inside_low = 0.8     # a box 80% inside a bigger one (a piece of a crowded cow) keeps a track, never starts one
 ```
+
+**Tracks that jump between cows standing close** (`trial`'s `split` and `merged` full of neighbours; in
+`boxes.html` one cow's ring changing colour at the fence): where standing cows crowd the detector also boxes
+pieces of them - a head, a back half - that come and go; each started a track and took a neighbour's. The barn's
+cam1 (a row of cows at the right edge, 6 cows and 5-10 boxes a second): a labelled cow on her own track 42% of
+the time, 60% with `inside_low = 0.8` (cam2 71% -> 75%); more boxes are left without a track (cam1 16% -> 25%
+of your labelled ones: a cow half hidden behind another whose track had broken), so check `trial`'s IDF1 and
+the cows on two cameras with it on and off.
 
 **One clock.** Joining compares two cameras at the same second. Turn on time sync in every camera's web page
 (PTP if it has it, else NTP, against the same server as this computer). A camera's stream may still come late:

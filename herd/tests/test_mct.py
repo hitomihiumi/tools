@@ -1475,3 +1475,30 @@ def test_fused_seconds_meet_by_the_recordings_clock_however_slow_a_camera():
     got = dict(calls)
     assert all(got[float(t)] == ("a", "b") for t in range(100, 108))
     assert got[108.0] == ("a", "b", "c") and got[110.0] == ("a", "c")
+
+
+def test_inside_low_a_piece_of_a_cow_takes_no_track():
+    """[tracker] inside_low: a box inside a bigger one (a piece of a crowded cow) starts no track and takes no
+    neighbour's; a cow half hidden behind another keeps the track that expects her."""
+    import mct
+    cfg = _cfg()
+    cfg["mct"]["enabled"] = False
+    cfg["tracker"]["inside_low"] = 0.8
+    gt = mct.GlobalTracker(cfg)
+    near, behind = [0.5, 0.3, 0.9, 0.9], [0.55, 0.35, 0.7, 0.6]           # behind: 100% inside near's box
+    her = lambda x: {"box": [x, 0.33, x + 0.17, 0.6], "emb": None}         # a cow walking behind the near one
+    a, b = gt.update("c1", 0.0, [{"box": near, "emb": None}, her(0.30)])
+    assert a and b
+    # a piece of the near cow shows up: no track of its own
+    a2, b2, piece = gt.update("c1", 1.0, [{"box": near, "emb": None}, her(0.35),
+                                         {"box": [0.6, 0.4, 0.75, 0.55], "emb": None}])
+    assert (a2, b2) == (a, b) and piece is None
+    # she walks on behind the near cow (at 0.5 wholly inside its box): her track expects her, she keeps it
+    for t, x in ((2.0, 0.40), (3.0, 0.45), (4.0, 0.50)):
+        got = gt.update("c1", t, [{"box": near, "emb": None}, her(x)])
+        assert got == [a, b], (t, got)
+    # off (0): the piece would have started a track
+    cfg["tracker"]["inside_low"] = 0.0
+    g0 = mct.GlobalTracker(cfg)
+    g0.update("c1", 0.0, [{"box": near, "emb": None}])
+    assert g0.update("c1", 1.0, [{"box": near, "emb": None}, {"box": behind, "emb": None}])[1] is not None

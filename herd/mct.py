@@ -45,6 +45,21 @@ from common import BoxKalman, floor_mapper, in_mask, in_polygon, iou, same_place
 NEG = -1e9
 
 
+def inside_low(dets, share):
+    """[tracker] inside_low: each box at least `share` inside a bigger box of the same frame marked low (unsure) -
+    it continues a track that expects it, starts none, takes no other's."""
+    def area(b):
+        return max(0.0, b[2] - b[0]) * max(0.0, b[3] - b[1])
+
+    def inside(a, b):
+        ix = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
+        iy = max(0.0, min(a[3], b[3]) - max(a[1], b[1]))
+        return ix * iy / max(1e-9, area(a))
+    return [dict(d, low=True) if not d.get("low") and any(
+        area(o["box"]) > area(d["box"]) and inside(d["box"], o["box"]) >= share for o in dets if o is not d)
+        else d for d in dets]
+
+
 def assign(score):
     """The assignment of rows to columns with the highest summed score; NEG pairs are never made.
     Hungarian (scipy), or greedy best pairs first without it. -> [(row, col)]"""
@@ -209,6 +224,7 @@ class GlobalTracker:
         self.min_iou, self.max_age = cfg["tracker"]["iou"], cfg["tracker"]["max_age_s"]
         self.kalman = bool(cfg["tracker"].get("kalman", False))
         self.low_iou = cfg["tracker"].get("low_iou", 0.5)
+        self.inside_low = cfg["tracker"].get("inside_low", 0.0)
         self.neighbours = collections.defaultdict(set)
         for a, b in m.get("neighbours", []):
             self.neighbours[a].add(b), self.neighbours[b].add(a)
@@ -242,6 +258,8 @@ class GlobalTracker:
         this camera had a moment ago, or a cow lying still at her place (ByteTrack's second round) - else None."""
         f = self.floor.get(cam)
         dets = [dict(d, xy=f(d["box"], d.get("p_lying", 0.5)) if f else None) for d in dets]
+        if self.inside_low:
+            dets = inside_low(dets, self.inside_low)
         hi = [j for j, d in enumerate(dets) if not d.get("low")]
         lo = [j for j, d in enumerate(dets) if d.get("low")]
         sure = [dets[j] for j in hi]

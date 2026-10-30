@@ -46,9 +46,13 @@ DEFAULTS = {
     # low_score > 0 (under [detector] threshold): ByteTrack's second round - boxes the detector is unsure of
     # (low_score <= score < threshold) only continue a track the camera had a moment ago (IoU low_iou with
     # where it is expected), or a cow lying still at her place; they never start a track (mct_sim.py --detector)
+    # inside_low > 0 (e.g. 0.8): a box at least that much inside a bigger box of the same frame is taken as unsure
+    # too - a piece of a cow (her head, her back half) where standing cows crowd, which started tracks of its own
+    # and took her neighbours' (the barn's cam1, a row of cows at the fence: a labelled cow on her own track
+    # 42% -> 60% of the time); a cow half hidden behind another keeps the track that expects her
     "tracker": {"iou": 0.3, "max_age_s": 5, "still_s": 60.0, "still_long_s": 300.0, "still_iou": 0.5,
                 "still_contain": 0.8, "still_for_s": 30.0, "still_moved": 0.3,
-                "kalman": False, "low_score": 0.0, "low_iou": 0.5},
+                "kalman": False, "low_score": 0.0, "low_iou": 0.5, "inside_low": 0.0},
     "identity": {"prototypes_per_cow": 6, "history_days": 7, "max_error": 0.01,
                  "new_cow_similarity": 0.55, "new_cow_min_bursts": 20, "retire_after_hours": 48,
                  # the herd's size (0: no limit): at it, no new ids are made - unknown bursts wait in the pool

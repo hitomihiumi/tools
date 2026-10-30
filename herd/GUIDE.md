@@ -530,6 +530,16 @@ nor harms (IDF1 0.797 without, 0.793 with): it matters where tracks break. Its b
 better of where her speed puts her and where she was - a cow stopping short of the guess keeps her
 track. Both are off by default; try them in `trial` on your labels and keep what raises IDF1.
 
+`inside_low` (e.g. 0.8): a box at least that much inside a bigger box of the same frame is unsure as
+well - it continues a track that expects it, starts none. Where standing cows crowd (the barn's cam1, a
+row at the fence: 6 cows, 5-10 boxes a second, two thirds of the seconds a different count) the detector
+boxes pieces of them that come and go, and each piece started a track and took a neighbour's: of a
+labelled cow's track changes 165 of 180 went to a track that already existed, 2 were a track ending. The
+barn's trial replayed through the camera's tracker (`seconds`' boxes, 10 minutes, scored on the labels):
+a labelled cow on her own track (best one-to-one of cows and tracks) cam1 42% -> 60%, cam2 71% -> 75%,
+her track changing 174 -> 50 times on cam1; 25% of the labelled boxes without a track instead of 16%
+(cows half hidden whose own track had broken). Kalman, `still_s`, `iou`, `max_age_s` moved none of it.
+
 **One clock (`time_offset_s`, PTP / NTP).** Every rule above compares two cameras at the same
 second, and a live frame is stamped when the server reads it: a camera whose stream comes 1.5 s
 late (encoding, the network, HEVC buffering) puts a walking cow a metre or more behind herself. Turn
