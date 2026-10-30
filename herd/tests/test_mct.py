@@ -1426,3 +1426,52 @@ def test_floor_point_uncertainty_through_the_cameras_mapping():
     assert llr(pf, 150.0) > 0 > llr(pn, 150.0)
     flat = mct.TrackletLinker(dict(cfg, mct=dict(cfg["mct"], link_px=0.0)))
     assert float(flat._llr(np.array([[150.0]]))[0, 0]) < 0          # one sigma for all: far 1.5 m counts against
+
+
+def test_fused_seconds_meet_by_the_recordings_clock_however_slow_a_camera():
+    """Files: a camera a second ahead (pipeline.Lockstep allows one) met the other one second off, every second -
+    by the wall clock (wait_s) the barn's trial joined no track across cameras. By the recordings' clock every
+    second meets, a camera whose recording ends early or begins late holds no one up."""
+    import threading
+    import time
+    import mct
+    import pipeline
+
+    class Rec:
+        stats = {}
+
+        def __init__(self):
+            self.calls = []
+
+        def update_all(self, ts, per):
+            self.calls.append((ts, tuple(sorted(per))))
+            return {c: [None] * len(d) for c, d in per.items()}
+
+    def play(cam, fs, lock, start, seconds, busy):
+        for k in range(seconds * 10):                      # 10 frames a second
+            ts = start + k / 10
+            lock.wait(cam, ts)
+            if k % 10 == 0:
+                time.sleep(busy.get(ts, 0.03))             # the second's work, a burst now and then
+                fs.update(cam, ts, [{"box": [0, 0, 1, 1]}])
+        lock.finish(cam)
+
+    def run():
+        rec = Rec()
+        fs = mct.FusedSeconds(rec, ["a", "b", "c"], wait_s=0.02)
+        lock = pipeline.Lockstep({"a": 100.0, "b": 100.0, "c": 108.0})
+        fs.files(lock, stuck_s=20.0)
+        th = [threading.Thread(target=play, args=("a", fs, lock, 100.0, 12, {103.0: 0.3})),
+              threading.Thread(target=play, args=("b", fs, lock, 100.0, 9, {105.0: 0.2})),     # ends at 109
+              threading.Thread(target=play, args=("c", fs, lock, 108.0, 4, {}))]               # begins at 108
+        for t in th:
+            t.start()
+        for t in th:
+            t.join(timeout=30)
+        assert not any(t.is_alive() for t in th)
+        return rec.calls
+    calls = run()
+    assert len(calls) == 12                                # each second once, every camera of it together
+    got = dict(calls)
+    assert all(got[float(t)] == ("a", "b") for t in range(100, 108))
+    assert got[108.0] == ("a", "b", "c") and got[110.0] == ("a", "c")

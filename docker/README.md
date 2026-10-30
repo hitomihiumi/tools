@@ -564,6 +564,19 @@ only a strip along a fence (cam3-cam4: no floor mapping) by look - a cow one cam
 is one of the other's counted cows, the one her frame ids are clearly nearest to over 10 s. `trial` says
 how many tracks were joined per camera pair.
 
+**A trial before 2026-10-30 that joined nothing at all** (`trial.json`: `"joined_across_cameras": {}`; the log:
+"two cameras' cows never seen at one second on one floor"): the cameras played from files met the linker by the
+wall clock, and a camera one second ahead of the other (a burst takes seconds) met it one second off from then on -
+no second of both cameras ever reached it. Fixed (they now meet by the recordings' clock); the trial already made
+needs no new run, its tracks are joined anew in minutes:
+
+```bash
+docker compose run --rm herd trial --relink --config /data/barn.toml --out /data/trial --boxes /data/boxes --labels /data/labels.json
+```
+
+(the barn's trial of 23 Oct: one joined track for a cow on both cameras 0% -> 40% of the moments, 11 of 23 cows
+under one name, IDF1 45% -> 57%).
+
 **When a trial joins nothing** (the log: "tracks joined across cameras 0", most seconds turned away by
 `link_margin`): the floor mapping is right in only part of the seconds and the cows lie side by side. Join by
 evidence instead of by seconds near (`herd/GUIDE.md` section 4.8):

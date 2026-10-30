@@ -1056,6 +1056,8 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
     off = lambda c: float(c.get("time_offset_s") or 0.0)
     lock = Lockstep({c["id"]: c.get("start_ts", start_ts) + off(c) for c in cfg["cameras"]}) \
         if start is not None else None
+    if lock is not None and cams and hasattr(getattr(cams[0], "glob", None), "files"):
+        cams[0].glob.files(lock)                      # one second of all cameras met by the recordings' clock
     for cam, c in zip(cams, cfg["cameras"]):
         target = (lambda cam=cam, c=c: run_file(cam, c["url"], c.get("start_ts", start_ts) + off(c), lockstep=lock)) \
             if start is not None else \

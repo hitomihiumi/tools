@@ -766,22 +766,39 @@ class FusedSeconds:
         self.alive = {c: None for c in cams}
         self.pending, self.done = {}, {}
         self.cv = threading.Condition()
+        self.lock, self.stuck_s = None, None
+
+    def files(self, lockstep, stuck_s=600.0):
+        """Recordings played together (pipeline.Lockstep): a second waits for every camera that will still hand it
+        in - not done, begun, not past it - however long its work takes (a burst: seconds), stuck_s of wall time at
+        most. By the wall clock (wait_s) a camera a second ahead met the other one second off, every second after:
+        the barn's trial joined no track across cameras."""
+        self.lock, self.stuck_s = lockstep, stuck_s
+
+    def _expect(self, ts):
+        if self.lock is None:
+            return {c for c, t in self.alive.items() if t is not None and ts - t <= self.alive_s}
+        pos, done = dict(self.lock.pos), set(self.lock.done)
+        return {c for c, t in self.alive.items() if c not in done and pos.get(c, ts) <= ts + 0.5
+                and not (t is not None and t > ts)}
 
     def update(self, cam, ts, dets):
-        deadline = time.monotonic() + self.wait
+        deadline = time.monotonic() + (self.wait if self.lock is None else self.stuck_s)
         with self.cv:
             self.alive[cam] = ts
             self.pending.setdefault(ts, {})[cam] = dets
-            expect = {c for c, t in self.alive.items() if t is not None and ts - t <= self.alive_s}
+            self.cv.notify_all()
             while not (ts in self.done and cam in self.done[ts]):
-                ready = set(self.pending.get(ts, {})) >= expect
+                ready = set(self.pending.get(ts, {})) >= self._expect(ts)
                 if ready or time.monotonic() >= deadline:
                     per = self.pending.pop(ts, {})
                     if per:
                         self.done.setdefault(ts, {}).update(self.ft.update_all(ts, per))
                     self.cv.notify_all()
                     continue
-                self.cv.wait(timeout=max(0.01, deadline - time.monotonic()))
+                # files: the others' places in their recordings move outside this lock - looked at again soon
+                self.cv.wait(timeout=max(0.01, min(0.05 if self.lock is not None else 1e9,
+                                                   deadline - time.monotonic())))
             out = self.done[ts][cam]
             for t in [t for t in self.done if t < ts - 30]:
                 del self.done[t]
