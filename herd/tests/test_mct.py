@@ -1436,3 +1436,32 @@ def test_linker_with_a_library_tracker_per_camera():
     for k in range(60):
         out = lk.update_all(float(k), {c: [{"box": box(x)} for x in (0.3, 0.6)] for c in ("a", "b")})
     assert out["a"] == out["b"] and len(set(out["a"])) == 2 and out["a"][0].startswith("a-bytetrack-")
+
+
+def test_camera_second_with_a_library_tracker_through_the_linker():
+    """The barn's run on the test branch: [tracker] kind = "bytetrack" under [mct] link - a new track's first box has
+    no id yet (the library confirms it on the next frame): not counted that second, no crash (it was a TypeError in
+    CoSeen.add); from the next second on one row a second."""
+    import trackers  # noqa: F401
+    import mct
+    import pipeline
+    from store import Store
+    rng = np.random.default_rng(3)
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    cfg = _mct_cfg([("cam1", {"floor_points": pts})], enabled=True, mode="link", link_rule="llr")
+    cfg["cameras"] = [dict(c, min_box_pct=0.0, min_box_side_px=0) for c in cfg["cameras"]]
+    cfg["tracker"]["kind"] = "bytetrack"
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+        models = _FakeModels()
+        cam = pipeline.Camera(cfg["cameras"][0], 0, 1, cfg, models, shared, store, 0.0)
+        cam.glob = mct.FusedSeconds(mct.TrackletLinker(cfg, store, shared.separate), ["cam1"])   # as pipeline.run
+        img = np.zeros((64, 64, 3), np.uint8)
+        for k in range(6):
+            models.boxes = [_box(0.3), _box(0.7)]
+            models.ids = {0.3: _unit(rng.normal(size=8)), 0.7: _unit(rng.normal(size=8))}
+            cam.second(float(k), img)
+        rows = store.query("SELECT ts, track FROM seconds ORDER BY ts")
+        assert [r[0] for r in rows] == [float(k) for k in range(1, 6) for _ in range(2)]
+        assert len({r[1] for r in rows}) == 2 and cam.stats["boxes_without_track"] == 2

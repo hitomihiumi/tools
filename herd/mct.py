@@ -170,7 +170,7 @@ class CoSeen:
     def add(self, ids, boxes, weight=1):
         """One camera at one moment: its tracks and their boxes -> the pairs that became two cows now."""
         new = []
-        items = sorted(zip(ids, boxes), key=lambda x: x[0])
+        items = sorted(((i, b) for i, b in zip(ids, boxes) if i is not None), key=lambda x: x[0])   # None: no track
         with self.lock:
             for i, (a, ba) in enumerate(items):
                 for b, bb in items[i + 1:]:
