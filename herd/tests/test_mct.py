@@ -1400,3 +1400,29 @@ def test_boxes_page_shows_one_cow_joined_across_cameras():
         assert bd["joined"] == {"a1": 1}
         cam2 = next(f for f in bd["frames"] if f["cam"] == "cam2")
         assert sorted(b[6] for b in cam2["its"]) == ["a1", "b2"]
+
+
+def test_floor_point_uncertainty_through_the_cameras_mapping():
+    """link_px (Sternig et al.): a far box's point is metres of floor along the camera's view, a near one's
+    tens of cm - so 1.5 m off far away is still one cow, while 1.5 m off right under the camera is not."""
+    import mct
+    import mct_sim
+    mct_sim.perspective(True)
+    try:
+        cams = [{"id": c, "mask": [], "floor_points": mct_sim.floor_points(c), "floor_at": "centre"} for c in ("a", "b")]
+        far_a, near_a = mct_sim.cow_box("a", 1300.0, 600.0), mct_sim.cow_box("a", 150.0, 600.0)
+    finally:
+        mct_sim.perspective(False)
+    cfg = _cfg()
+    cfg["cameras"] = cams
+    cfg["mct"].update(link_rule="llr", link_sigma=30.0, link_px=8.0)
+    lk = mct.TrackletLinker(cfg)
+    (pf,), (pn,) = lk._points("a", [{"box": far_a}]), lk._points("a", [{"box": near_a}])
+    ev_far, ev_near = np.linalg.eigvalsh(pf[3]), np.linalg.eigvalsh(pn[3])
+    assert np.sqrt(ev_far[-1]) > 2.5 * np.sqrt(ev_near[-1])         # far: much broader
+    assert np.sqrt(ev_far[-1]) > 1.8 * np.sqrt(ev_far[0])            # and long along the view (x, the barn's length)
+    exact = lambda p, dx: (((p[0][0] + dx, p[0][1]), (p[1][0] + dx, p[1][1]), p[2], np.eye(2) * lk.sigma ** 2 / 2))
+    llr = lambda p, dx: float(lk._llr_cov("a", "b", [p], [exact(p, dx)])[0, 0])
+    assert llr(pf, 150.0) > 0 > llr(pn, 150.0)
+    flat = mct.TrackletLinker(dict(cfg, mct=dict(cfg["mct"], link_px=0.0)))
+    assert float(flat._llr(np.array([[150.0]]))[0, 0]) < 0          # one sigma for all: far 1.5 m counts against

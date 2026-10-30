@@ -433,6 +433,31 @@ joins of 25 fewer). Differences of a few hundredths here are noise; the large on
 the camera's tracker below) are not. All runs: `mct_sim` with a deterministic noise, the commands as
 given.
 
+**Each point its own uncertainty (`link_px`, off).** After Sternig et al. (Hough-homography): a
+box's point is off by a few pixels, and a pixel far along a camera's view is metres of floor, under
+it centimetres. With `link_px = 8` each floor point gets the covariance of `link_px` pixels (of a
+1920 x 1080 frame; plus `link_px_sigma` of the box's size) through the floor mapping's derivative
+there, plus `link_sigma`'s (then smaller, e.g. 30: the calibration's floor); two points are compared
+by Mahalanobis distance under the sum of theirs. `link_learn_spread = true` replaces that, per
+`link_offset_cell`, by the spread and shift of the pairs already joined there. `mct_sim
+--perspective` (cameras looking along the barn from its ends, the errors put in the picture: 6 px +
+2% of the box, 15% of the seconds 30-80% of it, the calibration up to 10 px off), 30 min, 3 seeds:
+
+| rule | IDF1 both cameras | cow on both at once, one track | track purity |
+|---|---|---|---|
+| `llr` | 0.677 | 52.8% | 88.3% |
+| `llr`, `link_sigma = 30` | 0.645 | 32.4% | 86.5% |
+| `llr`, `link_sigma = 30`, `link_px = 8` | 0.673 | 50.9% | 88.5% |
+| ... + `link_learn_spread` | 0.673 | 52.1% | 88.1% |
+
+With the picture's errors 2.5x larger (15 px, the calibration 30 px): `llr` 0.663, `link_px = 8`
+0.667, `link_px = 16` 0.671. Noise, both: the error that matters between two cameras is the
+calibration's, smooth over the floor and the same for every cow there - a cow's two points are off
+by it whatever the distance; where the cameras overlap both look from mid-distance, so the
+per-point spread changes little. On the barn's trial (cam1-cam2 replayed, `link_sigma = 30`,
+`link_px = 8`): 6 of the 23 labelled cows seen by both under one name, against 4 with `llr` alone -
+too few to tell. It stays off; a better calibration of cam1-cam2 is worth more.
+
 **One cow under two names, made one by where she stood (`cow_merge_llr`).** Each camera's
 gallery names a cow by the side it sees, so a cow that walks from one camera's floor to the
 other's is enrolled twice unless her two tracks were joined at that moment. With `llr` the

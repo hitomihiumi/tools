@@ -10,6 +10,7 @@ camera in ~50-70% of the seconds (the barn's cam1/cam2: ~70%).
 
     python herd/mct_sim.py                       # the main rules, 30 min, 3 seeds, one process a core
     python herd/mct_sim.py --minutes 45 --cows 40 --bend 80 --wrong 0.3 --seeds 0 1 --rules "share (default)" llr
+    python herd/mct_sim.py --perspective --rules llr llr+px   # cameras along the barn, the errors in the picture
 
 Per rule: IDF1 over both cameras (the reports' number), a cow seen by both at once on one track, track
 purity, wrong joins (two cows on one track at one second), and the share of seconds a cow's true partner
@@ -43,11 +44,39 @@ SPLIT = 1200.0                     # the masks' border
 BOX = (0.10, 0.12)                 # a cow's box, frame widths / heights
 
 
+PERSP = {}                         # cam -> floor-to-frame homography (--perspective), else the flat mapping
+
+
+def perspective(on=True):
+    """--perspective: each camera looks along the barn from its end, as the barn's do - the floor's near edge across
+    the whole frame's bottom, the far edge a narrow band near its top (a true homography): a pixel far away is a
+    lot of floor, near the camera little."""
+    from common import homography
+    PERSP.clear()
+    if not on:
+        return
+    for cam, (near, far) in (("a", VIEW["a"]), ("b", VIEW["b"][::-1])):
+        side = (0.0, PEN[1]) if cam == "a" else (PEN[1], 0.0)
+        src = [(near, side[0]), (near, side[1]), (far, side[0]), (far, side[1])]
+        PERSP[cam] = homography(src, [(0.0, 1.0), (1.0, 1.0), (0.4, 0.18), (0.6, 0.18)])
+
+
 def to_frame(cam, x, y):
     """Floor cm -> 0-1 of the camera's frame (b faces a: both axes turned)."""
+    if cam in PERSP:
+        q = PERSP[cam] @ np.array([x, y, 1.0])
+        return float(q[0] / q[2]), float(q[1] / q[2])
     x0, x1 = VIEW[cam]
     u, v = (x - x0) / (x1 - x0), y / PEN[1]
     return (u, v) if cam == "a" else (1 - u, 1 - v)
+
+
+def cow_box(cam, x, y):
+    """--perspective: the box of a cow's body (2 m x 0.8 m on the floor, its back above it) as the camera sees it."""
+    corners = [to_frame(cam, x + dx, y + dy) for dx in (-100, 100) for dy in (-40, 40)]
+    us, vs = [c[0] for c in corners], [c[1] for c in corners]
+    top = min(vs) - 0.3 * (max(vs) - min(vs) + 0.02)
+    return [min(us), top, max(us), max(vs)]
 
 
 def floor_points(cam):
@@ -56,6 +85,11 @@ def floor_points(cam):
 
 
 def masks():
+    if PERSP:                                          # the floor up to SPLIT, as each camera sees it
+        out = {}
+        for cam, near in (("a", VIEW["a"][0]), ("b", VIEW["b"][1])):
+            out[cam] = [list(to_frame(cam, x, y)) for x, y in ((near, 0), (SPLIT, 0), (SPLIT, PEN[1]), (near, PEN[1]))]
+        return out
     ua, _ = to_frame("a", SPLIT, 0)
     ub, _ = to_frame("b", SPLIT, 0)
     return {"a": [[0, 0], [ua, 0], [ua, 1], [0, 1]], "b": [[0, 0], [ub, 0], [ub, 1], [0, 1]]}
@@ -108,13 +142,14 @@ def bend_field(cam, bend, rng):
                          bend * np.cos(x / 350 + ph[2]) * np.sin(y / 450 + ph[3]))
 
 
-def simulate(n=40, minutes=30, look=0.35, seed=0, miss=0.05, weak=0.0, speed=1.0, lag=0.0):
+def simulate(n=40, minutes=30, look=0.35, seed=0, miss=0.05, weak=0.0, speed=1.0, lag=0.0, persp=False):
     """-> dets {cam: {ts: [(box, emb, p_lying, score)]}}, gt {cam: {ts: [(cow, box)]}}, the cameras' configs, the
     paths. The boxes sit where the cows are (a few cm of jitter): within a camera boxes are reliable; the floor
     mapping's errors are put in by noisy_floor. weak > 0: a lying cow fades for the detector - each second that
     chance of 30-300 s in which her box comes at score 0.3 (under the threshold, 0.5) in 70% of the seconds and
     not at all in the rest; a missed box is then low half the time as well. lag: camera b's frames stamped that
     many s late (its stream's delay): at its second t it shows the cows where they were at t - lag."""
+    perspective(persp)
     rng = np.random.default_rng(seed)
     T = int(minutes * 60)
     pos = cows_path(n, T, rng, speed_x=speed)
@@ -151,16 +186,20 @@ def simulate(n=40, minutes=30, look=0.35, seed=0, miss=0.05, weak=0.0, speed=1.0
                     if not weak or rng.random() < 0.5:
                         continue
                     score = 0.3
-                u, v = to_frame(cam, x + rng.normal(0, 5), y + rng.normal(0, 5))
-                w, h = BOX
-                box = [u - w / 2, v - h, u + w / 2, v]
+                if PERSP:
+                    box = cow_box(cam, x + rng.normal(0, 5), y + rng.normal(0, 5))
+                else:
+                    u, v = to_frame(cam, x + rng.normal(0, 5), y + rng.normal(0, 5))
+                    w, h = BOX
+                    box = [u - w / 2, v - h, u + w / 2, v]
                 emb = unit(look_of[cam][c] + rng.normal(0, 0.15, dim))
                 ds.append((box, emb.tolist(), 0.9 if lie else 0.1, score))
                 gs.append((c, box))
             dets[cam][t] = ds
             gt[cam][t] = gs
     m = masks()
-    cams = [{"id": cam, "mask": m[cam], "floor_points": floor_points(cam)} for cam in VIEW]
+    cams = [dict({"id": cam, "mask": m[cam], "floor_points": floor_points(cam)}, **({"floor_at": "centre"} if PERSP else {}))
+            for cam in VIEW]
     return dets, gt, cams, pos
 
 
@@ -169,6 +208,8 @@ def noisy_floor(f, cam, bend, wrong, jitter, seed):
     a second, and in `wrong` of the seconds 0.8-2 m off (a cow's other side, a wrong height, half hidden) -
     the same for one box whichever height is asked."""
     field = bend_field(cam, bend, np.random.default_rng(seed * 7 + (cam == "b")))
+    if PERSP:                                          # the errors in the picture, as a detector's are
+        return noisy_pixels(f, field, cam, wrong, seed)
 
     def g(box, p_lying=0.5):
         x, y = f(box, p_lying)
@@ -179,6 +220,26 @@ def noisy_floor(f, cam, bend, wrong, jitter, seed):
             a, d = r.uniform(0, 2 * np.pi), r.uniform(80, 200)
             ex, ey = ex + d * np.cos(a), ey + d * np.sin(a)
         return (x + dx + ex, y + dy + ey)
+    return g
+
+
+def noisy_pixels(f, field, cam, wrong, seed, px_abs=6.0, px=0.02, calib_px=10.0):
+    """--perspective: the errors in the picture, as a detector's and a calibration's are - a box's point off by
+    px_abs pixels (of 1920 x 1080) plus px of its own size each second, in `wrong` of the seconds by 30-80% of its
+    size (a cow's other end, half hidden), and the calibration off by up to calib_px pixels, smoothly over the
+    picture (spots clicked a little wrong): through the camera's mapping cm near it, metres far away."""
+    ph = np.random.default_rng(seed * 13 + (cam == "b")).uniform(0, 2 * np.pi, 4)
+
+    def g(box, p_lying=0.5):
+        r = np.random.default_rng(zlib.crc32(repr((seed, cam) + tuple(round(v, 6) for v in box)).encode()))
+        w, h = box[2] - box[0], box[3] - box[1]
+        cu, cv = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+        eu = r.normal(0, px * w + px_abs / 1920) + calib_px / 1920 * np.sin(3 * cu + ph[0]) * np.cos(2 * cv + ph[1])
+        ev = r.normal(0, px * h + px_abs / 1080) + calib_px / 1080 * np.cos(2 * cu + ph[2]) * np.sin(3 * cv + ph[3])
+        if r.random() < wrong:
+            a, d = r.uniform(0, 2 * np.pi), r.uniform(0.3, 0.8)
+            eu, ev = eu + d * w * np.cos(a), ev + d * h * np.sin(a)
+        return f([box[0] + eu, box[1] + ev, box[2] + eu, box[3] + ev], p_lying)
     return g
 
 
@@ -285,6 +346,10 @@ RULES = [
     ("llr", {"mode": "link", "link_rule": "llr"}),
     ("llr+look", {"mode": "link", "link_rule": "llr", "link_look_cm": 300.0}),
     ("llr+self-calib", {"mode": "link", "link_rule": "llr", "link_learn_offset": True}),
+    # each floor point its own uncertainty through the camera's mapping (link_px_sigma), and learnt per cell
+    ("llr+sigma30", {"mode": "link", "link_rule": "llr", "link_sigma": 30.0}),
+    ("llr+px", {"mode": "link", "link_rule": "llr", "link_sigma": 30.0, "link_px": 8.0}),
+    ("llr+px+spread", {"mode": "link", "link_rule": "llr", "link_sigma": 30.0, "link_px": 8.0, "link_learn_spread": True}),
     ("llr+look+self-calib", {"mode": "link", "link_rule": "llr", "link_look_cm": 300.0, "link_learn_offset": True}),
     # the camera's own tracker ([tracker]): Kalman, ByteTrack's second round for unsure boxes (--weak > 0)
     ("llr+kalman", {"mode": "link", "link_rule": "llr", "_tracker": {"kalman": True}}),
@@ -302,7 +367,7 @@ def one(job):
     import io
     seed, name, a = job
     dets, gt, cams, _ = simulate(a["cows"], a["minutes"], look=a["look"], seed=seed, weak=a["weak"], speed=a["speed"],
-                                 lag=a["lag"])
+                                 lag=a["lag"], persp=a["perspective"])
     floors = floors_of(cams, a["bend"], a["wrong"], a["jitter"], seed)
     with contextlib.redirect_stdout(io.StringIO()):          # the linker's notes, once a place
         r, stats = run(dets, gt, cams, floors, dict(RULES)[name])
@@ -322,12 +387,14 @@ def main(argv=None):
     ap.add_argument("--speed", type=float, default=1.0, help="walking cows this many times faster (0.5-0.9 m/s x)")
     ap.add_argument("--lag", type=float, default=0.0, help="camera b's frames stamped this many s late (its stream's "
                     "delay, no time_offset_s); the linker should measure it")
+    ap.add_argument("--perspective", action="store_true", help="cameras looking along the barn from its ends (far cows "
+                    "small near the frame's top) and the errors in pixels, as the barn's - not flat")
     ap.add_argument("--seeds", type=int, nargs="+", default=[0, 1, 2])
     ap.add_argument("--rules", nargs="*", default=DEFAULT_RULES, help=f"of: {', '.join(n for n, _ in RULES)}")
     ap.add_argument("--jobs", type=int, default=os.cpu_count() or 1)
     args = ap.parse_args(argv)
     import concurrent.futures as cf
-    a = {k: getattr(args, k) for k in ("cows", "minutes", "look", "bend", "wrong", "jitter", "weak", "speed", "lag")}
+    a = {k: getattr(args, k) for k in ("cows", "minutes", "look", "bend", "wrong", "jitter", "weak", "speed", "lag", "perspective")}
     jobs = [(seed, name, a) for seed in args.seeds for name in args.rules]
     res = collections.defaultdict(list)
     with cf.ProcessPoolExecutor(max(1, args.jobs)) as ex:

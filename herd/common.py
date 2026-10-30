@@ -139,6 +139,12 @@ DEFAULTS = {
             "link_rule": "near", "link_sigma": 0.0, "link_wrong": 0.3, "link_spread": 0.0, "link_llr": 40.0,
             "link_llr_margin": 20.0, "link_window_s": 120.0, "link_learn_offset": False, "link_offset_cell": 0.0,
             "link_offset_min": 30,
+            # link_px > 0 (e.g. 8): each floor point its own uncertainty - link_px pixels (of a 1920 x 1080 frame)
+            # plus link_px_sigma of the box's size in the picture, through the floor mapping's derivative there
+            # (cm near the camera, metres far along its view), plus link_sigma's (then smaller: the calibration's
+            # floor, e.g. 30); pairs compared by Mahalanobis distance. link_learn_spread: per link_offset_cell the
+            # joined pairs' own spread and shift, once link_offset_min of them
+            "link_px": 0.0, "link_px_sigma": 0.0, "link_learn_spread": False,
             # with link_rule "llr", nightly: one cow under two names (each camera's gallery naming her side) made
             # one when the evidence of all their tracks together reaches cow_merge_llr, cow_merge_margin ahead of
             # every rival (pipeline.merge_by_place, mct.cow_merges; 0: off)

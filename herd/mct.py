@@ -822,6 +822,7 @@ class TrackletLinker:
                              for c in cfg["cameras"]])
         self.cam_tracker = GlobalTracker(solo, None, None)
         self.floor = {c["id"]: floor_mapper(c, m) for c in cfg["cameras"]}
+        self.floor_model = dict(self.floor)                  # the calibration itself: its derivative (link_px_sigma)
         self.dist = m.get("link_dist", 120.0)
         self.disjoint = {frozenset(p) for p in m.get("disjoint", [])}   # no floor shared: never compared
         self.min_s = m.get("link_min_s", 5)
@@ -853,6 +854,17 @@ class TrackletLinker:
         self.learn = bool(m.get("link_learn_offset", False))
         self.cell = m.get("link_offset_cell") or 2 * self.dist
         self.offset_min = m.get("link_offset_min", 30)
+        # link_px_sigma > 0: each floor point its own uncertainty (Sternig et al., multi-camera Hough tracking): a box's
+        # point is off by about link_px_sigma of the box's size in the picture, and the camera's floor mapping turns that
+        # into an ellipse on the floor - a few cm near the camera, metres along its view far away (J S_px J^T, J the
+        # mapping's derivative there) - plus link_sigma's own (calibration); two cameras' points compared by
+        # Mahalanobis distance under the sum of the two. link_learn_spread: per link_offset_cell the joined pairs'
+        # own spread (and median shift) once there are link_offset_min of them
+        self.px_rel = m.get("link_px_sigma", 0.0)             # of the box's own size
+        self.px_abs = m.get("link_px", 0.0)                   # px of a 1920 x 1080 frame, whatever the box
+        self.px = self.px_rel > 0 or self.px_abs > 0          # each point its own covariance
+        self.learn_spread = bool(m.get("link_learn_spread", False))
+        self.spreads = collections.defaultdict(lambda: collections.deque(maxlen=400))   # (ca, cb, cell) -> [b - a]
         self.ev = collections.defaultdict(dict)                # track -> {other camera's track: summed log-likelihood}
         # the same, fading with link_window_s (the joins weigh pairs on their recent seconds: a cow's new track, after
         # her old one was lost, is not outweighed by the hours her neighbour's track has had)
@@ -1055,10 +1067,28 @@ class TrackletLinker:
                   "there (then cut one back: herd.py zones page)", flush=True)
 
     def _points(self, cam, ds):
+        """[(floor point lying, standing, p_lying[, its covariance (link_px_sigma)])] of a camera's boxes."""
         f = self.floor.get(cam)
         if f is None:
             return None
-        return [(f(d["box"], 1.0), f(d["box"], 0.0), d.get("p_lying", 0.5)) for d in ds]
+        out = [(f(d["box"], 1.0), f(d["box"], 0.0), d.get("p_lying", 0.5)) for d in ds]
+        if self.px:
+            fm = self.floor_model.get(cam) or f
+            out = [p + (self._cov(fm, d["box"], p[2]),) for p, d in zip(out, ds)]
+        return out
+
+    def _cov(self, f, box, p_lying, eps=1e-3):
+        """The floor covariance of a box's point: its pixel spread - link_px pixels of a 1920 x 1080 frame (as in the
+        paper: a constant in the picture, so far away it is a lot of floor) plus link_px_sigma of the box's own width
+        and height - through the mapping's derivative at that place (numeric), plus half link_sigma squared each way
+        (so a pair's sum has link_sigma's)."""
+        pl = 0.5 if p_lying is None else p_lying
+        x0 = np.array(f(box, pl))
+        J = np.stack([(np.array(f([box[0] + eps, box[1], box[2] + eps, box[3]], pl)) - x0) / eps,
+                      (np.array(f([box[0], box[1] + eps, box[2], box[3] + eps], pl)) - x0) / eps], 1)
+        su = self.px_rel * max(box[2] - box[0], 1e-3) + self.px_abs / 1920.0
+        sv = self.px_rel * max(box[3] - box[1], 1e-3) + self.px_abs / 1080.0
+        return J @ np.diag([su * su, sv * sv]) @ J.T + np.eye(2) * self.sigma ** 2 / 2
 
     @staticmethod
     def _look(da, db):
@@ -1099,6 +1129,48 @@ class TrackletLinker:
             best = d if best is None else np.minimum(best, d)
         return best
 
+    def _llr_cov(self, ca, cb, A, B, look=None):
+        """link_px_sigma: every a against every b, the log-likelihood that they are one cow under the sum of their
+        floor covariances (or the cell's learnt spread, link_learn_spread) - at the height where it is best, the
+        posture a prior; the look (link_look_cm) as that many cm more."""
+        like = lambda P: np.array([0.5 if p[2] is None else p[2] for p in P], float)
+        pa, pb = np.array([p[:2] for p in A], float), np.array([q[:2] for q in B], float)
+        la, lb = like(A), like(B)
+        S = np.array([p[3] for p in A])[:, None] + np.array([q[3] for q in B])[None, :]     # na x nb x 2 x 2
+        shift = np.zeros((len(A), 1, 2))
+        if self.learn_spread:
+            for x, p in enumerate(A):
+                got = self._spread(ca, cb, self._at(p))
+                if got is not None:
+                    shift[x, 0], S[x] = got[0], got[1]
+        det = np.maximum(S[..., 0, 0] * S[..., 1, 1] - S[..., 0, 1] * S[..., 1, 0], 1e-9)
+        inv = np.stack([np.stack([S[..., 1, 1], -S[..., 0, 1]], -1), np.stack([-S[..., 1, 0], S[..., 0, 0]], -1)], -2) \
+            / det[..., None, None]
+        scale = np.sqrt(np.sqrt(det))                          # the pair's sigma, one number (for the penalties)
+        extra = 0.0 if look is None else self.look_cm * look
+        best = None
+        for h, wa, wb in ((0, la, lb), (1, 1 - la, 1 - lb)):
+            diff = pb[None, :, h, :] - pa[:, None, h, :] - shift
+            d2 = np.einsum("abi,abij,abj->ab", diff, inv, diff)
+            q = np.square((self.pen * (2 - wa[:, None] - wb[None, :]) / 2 + extra) / scale)
+            L = np.log((1 - self.wrong) * self.spread ** 2 / (2 * np.sqrt(det)) * np.exp(-(d2 + q) / 2) + self.wrong)
+            best = L if best is None else np.maximum(best, L)
+        return best
+
+    def _spread(self, ca, cb, p):
+        """The learnt (median b - a, covariance) of the joined pairs in a's cell at p, robust: the pairs within three
+        MADs of the median; None until link_offset_min of them."""
+        r = self.spreads.get((ca, cb, self._cell(p)))
+        if r is None or len(r) < self.offset_min:
+            return None
+        R = np.asarray(r)
+        med = np.median(R, 0)
+        mad = 1.4826 * np.median(np.abs(R - med), 0) + 1e-6
+        keep = R[(np.abs(R - med) <= 3 * mad).all(1)]
+        if len(keep) < max(3, self.offset_min // 2):
+            return None
+        return med, np.cov(keep.T) + np.eye(2) * 1.0
+
     def _llr(self, D):
         """log p(this distance | one cow) / p(it | two cows): one cow's two points a 2-D normal of link_sigma, in
         link_wrong of the seconds anywhere; two cows' anywhere within link_spread."""
@@ -1128,9 +1200,10 @@ class TrackletLinker:
         pa = np.array([self._at(p) for p in A], float)
         pb = np.array([self._at(q) for q in B], float)
         D = self._dist(A, B, self._offset(ca, cb, pa) if self.learn else None)
-        if self.look_cm:
-            D = D + self.look_cm * self._look(per_cam[ca], per_cam[cb])
-        L = self._llr(D)
+        look = self._look(per_cam[ca], per_cam[cb]) if self.look_cm else None
+        if look is not None:
+            D = D + self.look_cm * look
+        L = self._llr_cov(ca, cb, A, B, look) if self.px else self._llr(D)
         ga, gb = ids[ca], ids[cb]
         bx, by = D.argmin(1), D.argmin(0)
         for x, y in enumerate(bx):
@@ -1144,12 +1217,15 @@ class TrackletLinker:
                 v, last = self.recent.get(k, (0.0, ts))
                 self.recent[k] = (v * np.exp(-(ts - last) / self.window) + float(L[x, y]), ts)
                 self.dirty.add(k)
-        if self.learn:                                         # the bend, from the cows already joined
+        if self.learn or self.learn_spread:                    # the bend (and spread), from the cows already joined
             for x, y in enumerate(bx):
-                if by[y] == x and D[x, y] <= 3 * self.sigma and self.root(ga[x]) == self.root(gb[y]):
+                if by[y] == x and self.root(ga[x]) == self.root(gb[y]):
                     o = pb[y] - pa[x]
-                    self.offsets[(ca, cb, self._cell(pa[x]))].append(o)
-                    self.offsets[(ca, cb, None)].append(o)
+                    if self.learn_spread:
+                        self.spreads[(ca, cb, self._cell(pa[x]))].append(o)
+                    if self.learn and D[x, y] <= 3 * self.sigma:
+                        self.offsets[(ca, cb, self._cell(pa[x]))].append(o)
+                        self.offsets[(ca, cb, None)].append(o)
         # the joins: the two cameras' tracks of this second matched one to one by their evidence (best assignment -
         # a row of cows seen shifted by half a stall is told by the row, not by each cow); a pair is joined when
         # forbidding it costs the assignment link_llr_margin
