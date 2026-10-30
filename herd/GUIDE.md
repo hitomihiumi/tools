@@ -387,6 +387,14 @@ within 1 m of herself in 63% of the pairs, two different cows in 0.7%. So: calib
 the cameras (`floor_points`) before turning `[mct]` on; without calibration keep
 handover off (`handover_min_sim = 0.8`).
 
+**A plan from the cows' widths has the depth anyhow (`crosscam --depth auto`).** `autocalib`
+straightens a camera's floor so that cows are one width near and far: that fixes the across, not the
+depth along its view - the barn's cam1 had its 23 cows on a strip 3 m deep. `crosscam` finds, from
+your labels, the stretch of the plan (1.5-32 times along one direction) under which a cow's two points
+match best, and with `--depth auto` writes it to every camera of that floor and `link_dist` to the new
+scale (docker/README.md: the barn's cam1-cam2, on 5 minutes it was not fitted on, 29% of the cows
+right unstretched, 51% stretched 24x).
+
 **Evidence, not seconds near (`[mct] link_rule = "llr"`).** The barn's cam1/cam2 floor
 mapping puts a cow's true partner nearest in ~70% of the seconds; `link_share` asks for 60%
 of the seconds near *and* no other cow within `link_margin`, which cows lying side by side

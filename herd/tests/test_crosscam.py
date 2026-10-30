@@ -191,3 +191,39 @@ def test_crosscam_without_labels_on_both_says_so(capsys):
         crosscam.main(["--config", os.path.join(d, "barn.toml"), "--boxes", os.path.join(d, "boxes"),
                        "--labels", os.path.join(d, "labels.json")])
         assert "too few" in capsys.readouterr().out
+
+
+def test_crosscam_depth_stretches_a_squashed_floor_plan(capsys):
+    """cam1's plan a quarter of the floor's depth (as autocalib's from the cows' widths can be): the cows'
+    neighbours too near on it. --depth auto finds the stretch along Y, writes it to both cameras of the floor
+    and link_dist to the new scale; without --depth it is only said."""
+    import crosscam
+    from common import floor_mapper, load_config
+    with tempfile.TemporaryDirectory() as d:
+        _scene(d, n_cows=20, noise=0.01)
+        path = os.path.join(d, "barn.toml")
+        text = open(path).read()
+        pts = json.loads(text.split("floor_points = ")[1].split("\n")[0])
+        text = text.replace(json.dumps([[round(x, 5) for x in r] for r in pts]),
+                            json.dumps([[u, v, X, round(Y / 4, 3)] for u, v, X, Y in pts]))
+        open(path, "w").write(text)
+        args = ["--config", path, "--boxes", os.path.join(d, "boxes"), "--labels", os.path.join(d, "labels.json"),
+                "--planes", "1", "--apply"]
+        crosscam.main(args)
+        out = capsys.readouterr().out
+        assert "--depth auto writes it" in out
+        squashed = load_config(path)
+        crosscam.main(args[:-1] + ["--depth", "auto"])
+        r = json.load(open(os.path.join(d, "boxes", "crosscam.json")))["cam1->cam2"]["depth"]
+        assert r["stretch"] >= 2 and 60 <= r["degrees"] <= 120, r              # along Y, the squashed one
+        assert r["right"] > r["as_is"]["right"] + 0.03 and r["cameras"] == ["cam1", "cam2"]
+        cfg = load_config(path)
+        assert cfg["mct"]["link_dist"] == r["link_dist"] != 160
+        old = {c["id"]: c for c in squashed["cameras"]}
+        new = {c["id"]: c for c in cfg["cameras"]}
+        box = [0.45, 0.6, 0.55, 0.72]
+        for cam in ("cam1", "cam2"):                  # one stretch of the whole plan: the same map on both
+            p0 = np.array(floor_mapper(old[cam], cfg["mct"])(box))
+            p1 = np.array(floor_mapper(new[cam], cfg["mct"])(box))
+            e = np.array([np.cos(np.radians(r["degrees"])), np.sin(np.radians(r["degrees"]))])
+            assert np.allclose(crosscam.stretch([p0], np.array(r["centre"]), e, r["stretch"])[0], p1, atol=1.0)

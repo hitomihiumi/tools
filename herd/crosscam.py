@@ -19,6 +19,15 @@ Your labels give it with no measuring: a cow of yours on two cameras at one mome
   4. OUT/crosscam.json; --apply (one of the two calibrated, floor_points; both: --onto names the one to
      keep): the other camera's floor_points onto its floor, by the better of the two points (floor_at on
      both cameras says which the run then maps), so [mct] link joins them - barn.toml.bak kept
+  5. the floor plan's depth: a plan made from cows of one width near and far (autocalib, nothing measured)
+     has the across right and the depth along the camera's view anyhow - the barn's cam1 had its 23 cows
+     on a strip 3 m deep, neighbours 60 cm apart. The stretch (1.5-32 times along one direction of the plan,
+     the other kept) under which your cows' two points are matched best, said always; --depth auto writes it
+     to every camera on that floor (each pair of [mct] neighbours joined to it) and [mct] link_dist to the
+     new scale, --depth 4 that much. Past the barn's true depth it still helps while the two cameras agree
+     along that direction better than across it: the plan is then the linker's scale, not centimetres (the
+     floor plan is read by [mct] alone). The barn's cam1-cam2, fitted on 5 minutes and checked on the next 5:
+     the right cow 29% unstretched, 38% at 8x, 50% at 16x, 51% at 24x, 44% at 40x (the config before: 22%)
 """
 
 from __future__ import annotations
@@ -42,6 +51,9 @@ GATE = 0.15           # a cow put further than this from every box of the other 
 AT_ONCE_S = 1.0       # two cameras' frames this close are one moment
 MIN_PAIRS = 6
 K_GRID = (0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6)    # lens distortions tried (common.undistort's k)
+DEPTH = (1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0)   # the plan's stretches tried, each every 15 deg
+DEPTH_GAIN = 0.03     # --depth auto: kept when it matches the right cow this much more often than the plan as is
+UNSEEN = 1.3          # one cow's two points further apart on minutes the mapping was not learnt from (barn: 1.2-1.3)
 
 
 def lens(cam, w, h):
@@ -500,6 +512,81 @@ def onto(cams, ref, oth, H, mos, where):
     return out, ko, aro
 
 
+def plan_of(mos, cam_a, cam_b, mct):
+    """Your cows on the floor plan as the run maps them (floor_points, floor_at), moment by moment:
+    [(ids on a, their points, ids on b, theirs)]; None while either camera has no floor_points."""
+    from common import floor_mapper
+    fa, fb = floor_mapper(cam_a, mct), floor_mapper(cam_b, mct)
+    if fa is None or fb is None:
+        return None
+    return [([x[0] for x in mo["a"]], np.array([fa(x[1]) for x in mo["a"]], float),
+             [x[0] for x in mo["b"]], np.array([fb(x[1]) for x in mo["b"]], float)) for mo in mos if mo["a"] and mo["b"]]
+
+
+def stretch(P, c, e, s):
+    """Floor points s times further from c along the unit direction e, across it as they were."""
+    d = np.asarray(P, float) - c
+    return c + d + (s - 1) * np.outer(d @ e, e)
+
+
+def plan_match(plan, c, e, s):
+    """On the stretched plan each moment's cows matched one to one by distance -> (the right cow's share, her
+    own point the nearest's share, the median distance of one cow's two points, how many cows)."""
+    from scipy.optimize import linear_sum_assignment
+    right = near = n = 0
+    apart = []
+    for ia, A, ib, B in plan:
+        A, B = stretch(A, c, e, s), stretch(B, c, e, s)
+        D = np.hypot(A[:, None, 0] - B[None, :, 0], A[:, None, 1] - B[None, :, 1])
+        rows, cols = linear_sum_assignment(D)
+        got = {ia[i]: ib[j] for i, j in zip(rows, cols)}
+        jb = {x: j for j, x in enumerate(ib)}
+        for i, x in enumerate(ia):
+            if x in jb:
+                n += 1
+                right += got.get(x) == x
+                near += int(np.argmin(D[i])) == jb[x]
+                apart.append(D[i, jb[x]])
+    return right / max(1, n), near / max(1, n), float(np.median(apart)) if apart else 0.0, n
+
+
+def find_depth(plan, scales=DEPTH):
+    """The plan's stretch under which your cows' two points are matched best -> (s, its direction, the
+    centre, its match, the plan's own match)."""
+    c = np.median(np.vstack([np.vstack([A, B]) for _, A, _, B in plan]), 0)
+    base = plan_match(plan, c, np.array([1.0, 0.0]), 1.0)
+    best = (1.0, np.array([1.0, 0.0]), base)
+    tried = [best]
+    for s in scales:
+        if s <= 1:
+            continue
+        for deg in range(0, 180, 15):
+            e = np.array([np.cos(np.radians(deg)), np.sin(np.radians(deg))])
+            tried.append((s, e, plan_match(plan, c, e, s)))
+    best = max(tried, key=lambda t: (t[2][0], t[2][1]))
+    return best[0], best[1], c, best[2], base
+
+
+def extent(plan, c, e, s):
+    """Where your cows were (5-95%), along e and across it, cm -> (along, across)."""
+    P = stretch(np.vstack([np.vstack([A, B]) for _, A, _, B in plan]), c, e, s) - c
+    q = lambda x: float(np.subtract(*np.percentile(x, [95, 5])))
+    return q(P @ e), q(P @ np.array([-e[1], e[0]]))
+
+
+def one_floor(cams, links, start):
+    """The calibrated cameras on start's floor plan: joined to it by pairs that share floor."""
+    seen, todo = {start}, [start]
+    while todo:
+        x = todo.pop()
+        for a, b in links:
+            for y, z in ((a, b), (b, a)):
+                if y == x and z not in seen and z in cams and cams[z].get("floor_points"):
+                    seen.add(z)
+                    todo.append(z)
+    return sorted(seen)
+
+
 def main(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--config", required=True)
@@ -520,14 +607,25 @@ def main(argv=None):
     p.add_argument("--onto", default=None,
                    help="with --apply, both of a pair calibrated: the camera the other is put onto (its own "
                         "floor_points replaced)")
+    p.add_argument("--depth", default=None,
+                   help="auto: the floor plan stretched along the direction and as much (1.5-8 times) as matches your "
+                        "cows best, written to every camera on that floor (with --apply after it, or alone on two "
+                        "calibrated cameras); a number: that much, along the best direction")
     args = p.parse_args(argv)
+    if args.depth not in (None, "auto"):
+        try:
+            if float(args.depth) < 1:
+                raise ValueError
+        except ValueError:
+            p.error("--depth: auto or a number of at least 1")
     from box_dataset import read_labels
     cfg = load_config(args.config)
     cams = {c["id"]: c for c in cfg["cameras"]}
     frames = {f["file"]: f for f in json.load(open(os.path.join(args.boxes, "frames.json"), encoding="utf-8"))["frames"]}
     labels = read_labels(args.labels)
     pairs = args.cameras or cfg["mct"].get("neighbours") or list(itertools.combinations(sorted(cams), 2))
-    report, calib, shared = {}, {}, []
+    report, calib, shared, learnt = {}, {}, [], []
+    link_dist = cfg["mct"].get("link_dist", 160)
     for a, b in pairs:
         if a not in cams or b not in cams:
             print(f"[crosscam] {a} / {b}: not in the config")
@@ -538,6 +636,7 @@ def main(argv=None):
             print(f"[crosscam] {a} -> {b}: {npairs} of your cows on both at one moment - too few to learn from")
             continue
         r = {"moments": len(mos), "pairs": npairs}
+        learnt.append((a, b))
         print(f"[crosscam] {a} -> {b}: {npairs} pairs of your cows at {len(mos)} moments")
         fitted = {}
         for where in ("bottom", "centre"):
@@ -661,14 +760,49 @@ def main(argv=None):
             shared.append((a, b))
             print(f"  --apply: {oth} onto {ref}'s floor ({len(pts)} points, by the boxes' {best}s"
                   + ("; its own calibration replaced" if cams[oth].get("floor_points") else "") + ")")
+        cur = {c: dict(cams[c], **calib.get(c, {})) for c in (a, b)}      # the floor as the run will map it
+        plan = plan_of(mos, cur[a], cur[b], cfg["mct"])
+        if plan:
+            sc = DEPTH if args.depth in (None, "auto") else (1.0, float(args.depth))
+            s, e, c, m, base = find_depth(plan, sc)
+            deg = int(round(np.degrees(np.arctan2(e[1], e[0])))) % 180
+            r["depth"] = {"stretch": s, "degrees": deg, "centre": c.tolist(), "right": m[0], "nearest": m[1],
+                          "apart_cm": m[2], "as_is": {"right": base[0], "nearest": base[1], "apart_cm": base[2]}}
+            say_m = lambda x: (f"the right cow {x[0]:.0%}, her own point the nearest {x[1]:.0%}, one cow's two "
+                               f"points {x[2]:.0f} apart (median)")
+            print(f"  the floor plan as it is: {say_m(base)} of {base[3]}")
+            gain = m[0] - base[0]
+            if s > 1 and (gain >= DEPTH_GAIN or args.depth not in (None, "auto")):
+                (l0, c0), (l1, c1) = extent(plan, c, e, 1.0), extent(plan, c, e, s)
+                print(f"  stretched {s:g}x along {deg} degrees of the plan (0: X, 90: Y): {say_m(m)}; your cows "
+                      f"{l0 / 100:.0f} x {c0 / 100:.0f} m -> {l1 / 100:.0f} x {c1 / 100:.0f} m (along x across)")
+                if args.depth is None:
+                    print("  --depth auto writes it (the plan's depth: autocalib cannot tell it from the cows' widths)")
+                else:
+                    on = one_floor({x: dict(cams[x], **calib.get(x, {})) for x in cams},
+                                   [tuple(x) for x in cfg["mct"].get("neighbours") or []] + learnt, a)
+                    for x in on:
+                        pts = dict(cams[x], **calib.get(x, {}))["floor_points"]
+                        q = stretch([pt[2:4] for pt in pts], c, e, s)
+                        calib.setdefault(x, {})["floor_points"] = [list(pt[:2]) + [round(float(v), 1) for v in xy]
+                                                                   for pt, xy in zip(pts, q)]
+                        cams[x] = dict(cams[x], floor_points=calib[x]["floor_points"])   # the next pairs see it
+                    # llr's link_sigma = link_dist / 2.5: one cow's two points a 2-D normal, median 1.18 sigma
+                    link_dist = 2.5 * UNSEEN * m[2] / 1.177
+                    r["depth"].update(cameras=on, link_dist=int(link_dist))
+                    print(f"  --depth: {', '.join(on)} stretched {s:g}x along {deg} degrees; [mct] link_dist "
+                          f"{int(link_dist)} (one cow's two points {m[2]:.0f} apart here, ~{UNSEEN:g}x that on minutes "
+                          f"it was not learnt from - after a trial, its log's 50th percentile is the truer)")
+            elif s > 1 and args.depth == "auto":
+                print(f"  --depth: {gain:+.0%} only - the plan kept")
     out = args.out or os.path.dirname(os.path.abspath(os.path.join(args.boxes, "frames.json")))
     os.makedirs(out, exist_ok=True)
     with open(os.path.join(out, "crosscam.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
     print(f"-> {os.path.join(out, 'crosscam.json')}")
-    if args.apply and calib:
+    if (args.apply or args.depth) and calib:
         from autocalib import apply_config
-        apply_config(args.config, calib, cfg["mct"].get("link_dist", 160), shared=shared)
+        apply_config(args.config, calib, link_dist, shared=shared)
         print(f"-> {args.config} (the old one: {args.config}.bak)")
 
 

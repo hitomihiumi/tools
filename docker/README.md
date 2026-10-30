@@ -429,6 +429,26 @@ and replaces the other's. It maps by the better of the two points, and writes `f
 (or `"bottom"`) on both cameras: the point of a box the run then puts on the floor. `--gate` (0.15 of
 the frame height): how far from every box of the other camera a cow may land and still match one.
 
+**The floor plan's depth** (`--depth auto`). A plan made by `autocalib` (cows of one width near and far,
+nothing measured) has the across right and the depth along the camera's view anyhow: the barn's cam1
+had its 23 cows on a strip 3 m deep, neighbours 60 cm apart, so half a metre off put a cow on her
+neighbour. `crosscam` always says how your cows match on the plan as it is and, when it would help,
+stretched along one direction (1.5-32 times, the other kept); `--depth auto` writes that stretch to
+every camera on the floor (the pair and the [mct] neighbours joined to it) and `[mct] link_dist` to the
+new scale; `--depth 8` stretches that much along the best direction. With `--apply` it comes after,
+on the new calibration:
+
+```bash
+docker compose run --rm herd crosscam --config /data/barn.toml --boxes /data/boxes --labels /data/labels.json --cameras cam1 cam2 --apply --onto cam1 --depth auto
+```
+
+Past the barn's true depth it still helps while the two cameras agree along that direction better than
+across it - the plan is then the linker's scale, not centimetres (only `[mct]` reads it). The barn's
+cam1-cam2 (labels of 10 minutes; fitted on the first 5, checked on the next 5): the right cow 22% with
+the config before, 29% after `--apply`, 38% stretched 8x, 50% 16x, 51% 24x, 44% 40x. On the labels it
+was fitted on the numbers are higher (74% at 8x): label minutes of another hour, when the cows lie
+elsewhere, and run it again on all of them.
+
 **Box by box, every camera at once:** `trial/boxes.html` (written with the score; `--score-only` writes
 it again for a trial already made). Each labelled moment shows its cameras side by side, your boxes
 with your ids and the cow the system gave each: green the right cow, red another, orange not found,
