@@ -555,9 +555,11 @@ class Camera:
             lying = POSTURES.index("lying")
             gids = self.glob.update(self.id, ts, [{"box": b, "emb": e, "p_lying": float(p[lying]), "low": k >= n_sure}
                                                   for k, (b, e, p) in enumerate(zip(boxes, ids, pp))])
-            if len(boxes) > n_sure:
-                keep = [k for k, g in enumerate(gids) if g is not None]
-                self.stats["low_boxes_kept"] += sum(k >= n_sure for k in keep)
+            # a box with no track (an unsure one that continued none: low_score, or inside_low - a box the
+            # tracker itself found unsure) is no cow this second
+            keep = [k for k, g in enumerate(gids) if g is not None]
+            self.stats["low_boxes_kept"] += sum(k >= n_sure for k in keep)
+            if len(keep) < len(gids):
                 gids, boxes = [gids[k] for k in keep], [boxes[k] for k in keep]
                 pp, pa = pp[keep], pa[keep]
             if len(gids) > 1 and hasattr(self.gallery, "together"):

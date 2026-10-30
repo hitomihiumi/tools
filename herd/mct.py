@@ -185,7 +185,7 @@ class CoSeen:
     def add(self, ids, boxes, weight=1):
         """One camera at one moment: its tracks and their boxes -> the pairs that became two cows now."""
         new = []
-        items = sorted(zip(ids, boxes), key=lambda x: x[0])
+        items = sorted(((i, b) for i, b in zip(ids, boxes) if i is not None), key=lambda x: x[0])
         with self.lock:
             for i, (a, ba) in enumerate(items):
                 for b, bb in items[i + 1:]:
@@ -279,7 +279,8 @@ class GlobalTracker:
                     out[j] = t.gid
                     self.stats["new"] += 1
                 self._observe(self.tracks[out[j]], cam, ts, d)
-            low_out = self._low(cam, ts, [dets[j] for j in lo], taken)
+            # every track a sure box has this second, the ones it started too: a low box takes none of them
+            low_out = self._low(cam, ts, [dets[j] for j in lo], taken | set(out))
             if self.m.get("late_sim", 0) > 0:
                 self._late(cam, ts, out)
             full = [None] * len(dets)

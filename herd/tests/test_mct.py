@@ -246,6 +246,32 @@ def test_overlap_counts_every_second_once():
         assert {r[0] for r in rows} == {"cam1", "cam2"}                          # owned by each in turn
 
 
+def test_a_box_the_tracker_found_unsure_is_no_cow_this_second():
+    """[tracker] inside_low with no low box from the detector: the piece the tracker leaves without a track is
+    left out of the second (it crashed CoSeen: a None among the tracks)."""
+    import mct
+    import pipeline
+    from store import Store
+    rng = np.random.default_rng(4)
+    cfg = _mct_cfg([("cam1", {})], enabled=True)
+    cfg["cameras"] = [dict(c, min_box_pct=0.0, min_box_side_px=0) for c in cfg["cameras"]]
+    cfg["tracker"]["inside_low"] = 0.8
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+        models = _FakeModels()
+        cam = pipeline.Camera(cfg["cameras"][0], 0, 1, cfg, models, shared, store, 0.0)
+        cam.glob = mct.GlobalTracker(cfg, store, shared.separate)
+        img = np.zeros((64, 64, 3), np.uint8)
+        cow, other, piece = _box(0.3, s=0.15), _box(0.75), [0.25, 0.4, 0.35, 0.5]     # piece: inside cow
+        models.ids = {0.3: _unit(rng.normal(size=8)), 0.75: _unit(rng.normal(size=8))}
+        for k in range(3):
+            models.boxes = [cow, other, piece]
+            cam.second(float(k), img)
+        rows = store.query("SELECT track, x1 FROM seconds")
+        assert len(rows) == 6 and len({r[0] for r in rows}) == 2                 # the two cows, every second
+
+
 def test_frame_id_training_points_frames_at_their_burst():
     import json as js
     import model as mdl
