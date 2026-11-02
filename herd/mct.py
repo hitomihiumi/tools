@@ -889,6 +889,10 @@ class TrackletLinker:
         # beside the newcomer - and that now goes against its group's other cameras (its recent evidence with them
         # under -link_strayed: it went on with another cow, a swap) - takes that track out of its group instead
         self.strayed = m.get("link_strayed", 0.0)
+        # link_rival (llr, > 0): ... or whose evidence with its group's other cameras is at least link_rival under
+        # the newcomer's (summed over their lives: a join made early that the evidence since has turned against,
+        # or a short track that went on with another cow and ended)
+        self.rival = m.get("link_rival", 0.0)
         self.pen = m.get("height_penalty", 40.0)
         # link_rule "llr": every second both are seen adds the log-likelihood that a pair is one cow, from their
         # floor distance - one cow's two points ~ link_sigma apart, link_wrong of the seconds anywhere; two cows
@@ -1041,10 +1045,28 @@ class TrackletLinker:
     def _strayed(self, t, group, ts):
         """t's recent evidence with its group's tracks on other cameras: under -link_strayed - it went off with
         another cow (one camera's track swapped onto a neighbour, its group's other cameras still on her)."""
+        if not self.strayed:
+            return False
         cam = self.life[t][0]
         v = [val * np.exp(-(ts - last) / self.window) for o in group if o != t and self.life[o][0] != cam
              and self._key(t, o) in self.recent for val, last in [self.recent[self._key(t, o)]]]
         return bool(v) and sum(v) < -self.strayed
+
+    def _outdone(self, m, rival, group):
+        """m's evidence with its group's tracks on other cameras at least link_rival under its rival's (the
+        newcomer of m's camera): the group is the rival's cow."""
+        if not self.rival:
+            return False
+        others = [o for o in group if o != m and self.life[o][0] != self.life[m][0]]
+        if not others:
+            return False
+        sums = lambda t: (sum(self.ev.get(t, {}).get(o, 0.0) for o in others),
+                          sum(self.both.get(self._key(t, o), 0) for o in others))
+        (mine, n_mine), (theirs, n_theirs) = sums(m), sums(rival)
+        # and a second together as good, at least half: a neighbour lying 1.2 m off for hours sums up as
+        # much as the cow herself on a shorter track, a second at a time she is several times better
+        per = lambda v, n: v / max(1, n)
+        return theirs - mine >= self.rival and per(theirs, n_theirs) >= 0.5 * per(mine, n_mine)
 
     def _swapped_out(self, a, b, ts):
         """The tracks that alone keep a and b's groups apart and went off with another cow (link_strayed); None
@@ -1059,9 +1081,9 @@ class TrackletLinker:
                 if self._key(x, y) in self.never:
                     return None
                 if cx == cy and fx <= ly and fy <= lx:
-                    if y != b and self._strayed(y, gb, ts):
+                    if y != b and (self._strayed(y, gb, ts) or self._outdone(y, x, gb)):
                         out.add(y)
-                    elif x != a and self._strayed(x, ga, ts):
+                    elif x != a and (self._strayed(x, ga, ts) or self._outdone(x, y, ga)):
                         out.add(x)
                     else:
                         return None
@@ -1072,7 +1094,7 @@ class TrackletLinker:
         if ra == rb:
             return
         if not self._mergeable(ra, rb):
-            gone = self._swapped_out(a, b, ts) if self.strayed and not self.contra else None
+            gone = self._swapped_out(a, b, ts) if (self.strayed or self.rival) and not self.contra else None
             if not gone:
                 self.stats["link_refused"] += 1
                 return

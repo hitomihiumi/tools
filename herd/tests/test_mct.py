@@ -1538,7 +1538,7 @@ def _swap_scene(strayed):
     box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
     cfg = _cfg()
     cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
-    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_strayed=strayed)
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_strayed=strayed, link_rival=0.0)
     lk = mct.TrackletLinker(cfg)
     X, Y = 0.3, 0.7
     for k in range(200):
@@ -1588,3 +1588,31 @@ def test_the_store_keeps_each_cameras_own_tracks_the_gallery_the_joined():
             cam.second(0.0, np.zeros((64, 64, 3), np.uint8))
         assert sorted(store.query("SELECT cam, track FROM seconds")) == [("cam1", "t1"), ("cam2", "t2")]
         assert seen == [("t1",), ("t1",)]                                  # the gallery: one cow
+
+
+def _crossed_scene(rival):
+    """Two cows, given tracks: for the first 40 s camera b's floor puts each where the other is (the two joined
+    crossed), then right for 300 s. -> the linker."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_strayed=0.0, link_rival=rival)
+    lk = mct.TrackletLinker(cfg)
+    X, Y = 0.3, 0.5
+    for k in range(340):
+        bx, by = (Y, X) if k < 40 else (X, Y)
+        lk.update_all(float(k), {"a": [{"box": box(X), "track": "aX"}, {"box": box(Y), "track": "aY"}],
+                                 "b": [{"box": box(bx), "track": "bX"}, {"box": box(by), "track": "bY"}]})
+    return lk
+
+
+def test_link_rival_a_crossed_join_the_evidence_turned_against_is_undone():
+    """Two cows joined crossed at first (each to the other's track on camera b): the evidence since says
+    otherwise, and the join follows it (link_rival); without it they stay crossed."""
+    lk = _crossed_scene(200.0)
+    assert lk.root("aX") == lk.root("bX") and lk.root("aY") == lk.root("bY")
+    assert lk.root("aX") != lk.root("aY")
+    lk0 = _crossed_scene(0.0)
+    assert lk0.root("aX") == lk0.root("bY")                                # crossed for good

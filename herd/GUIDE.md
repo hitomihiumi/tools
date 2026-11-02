@@ -475,6 +475,18 @@ with another cow now). The barn's three trials of 23 Oct played again (`trial --
 71.2 -> 72.5%, 71.1 -> 73.1%; a cow on both cameras at one moment under one name 54 -> 59%, 62 -> 70%,
 55 -> 64%. 20 alike, 40 worse; `mct_sim` 0.683 -> 0.688, the wrong joins 421 -> 386.
 
+**A join the evidence turned against is undone (`link_rival`, 200).** Joins are for good, and a join made in
+the first seconds can be wrong: the barn's cows 6 and 9, standing side by side, were joined crossed (cam1's
+track of 6 to cam2's of 9 and back) and stayed so for ten minutes while the evidence went the other way (the
+crossed pairs -33 and 924, the right ones 1518 and 1389). With `link_rival` a join refused only by a track of the
+same camera in the other group takes that track out when the newcomer's evidence with the group's other cameras,
+summed, is `link_rival` above its own, and a second together at least half as good (a neighbour lying 1.2 m off
+for hours sums up as much as the cow on a shorter track; a second at a time she is several times better). The
+barn's four trials of 23 Oct played again: IDF1 67.8 -> 68.2%, 72.5 -> 74.0%, 73.1 -> 77.7%, 71.9 -> 76.1%; a cow
+on both cameras at one moment under one name 62 -> 74% (trial_36). `mct_sim`: IDF1 alike (0.688 -> 0.692), one
+track on both 73 -> 79%, but two cows on one track 386 -> 553 seconds - the four trials are one recording:
+check it on another of yours (`trial --relink` with `link_rival = 0` against the default).
+
 The store keeps each camera's own tracks (`seconds`, `bursts`); the joins are `track_links`, which the reports
 follow - the gallery sees the joined track at once. Before 2026-11-02 a joined camera's rows were written
 under the other camera's track: a join could not be undone and `trial --relink` on such a trial was wrong.

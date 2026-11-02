@@ -176,6 +176,14 @@ DEFAULTS = {
             # 23 Oct relinked: IDF1 +1.3-2.0, a cow on both cameras under one name 54-62% -> 59-70% (at 10;
             # 20 alike, 40 worse); mct_sim 0.683 -> 0.688. 0: off
             "link_strayed": 10.0,
+            # link_rival (llr, > 0): ... or whose evidence with its group's other cameras, summed over their lives, is
+            # link_rival under the newcomer's (and a second together at least half as good as the newcomer's): a join
+            # made early that the evidence since turned against (the barn's cows 6 and 9 crossed for 10 minutes:
+            # -33 against 1518 and 1389), a short track gone off with another cow. The barn's four trials of 23 Oct
+            # relinked: IDF1 67.8 -> 68.2, 72.5 -> 74.0, 73.1 -> 77.7, 71.9 -> 76.1%; mct_sim IDF1 alike
+            # (0.688 -> 0.692), a cow on both cameras one track 73 -> 79%, but two cows on one track 386 -> 553
+            # seconds: check it on a recording of your own. 0: off
+            "link_rival": 200.0,
             "body_height_lying": 55.0, "body_height_standing": 90.0,
             # the cameras' clocks from cows walking on two of them (TrackletLinker.clocks; said at the end of a run):
             # the shift of one's floor path, within lag_max_s, that lays it best on the other's over lag_window_s.
