@@ -893,6 +893,10 @@ class TrackletLinker:
         # the newcomer's (summed over their lives: a join made early that the evidence since has turned against,
         # or a short track that went on with another cow and ended)
         self.rival = m.get("link_rival", 0.0)
+        # link_overlap_s (llr): two tracks of one camera that lived at the same time for at most this long, the one
+        # begun first ended (gone 10 s) before the other: a handing over, one cow (her box split from a neighbour's,
+        # her old track lingering a moment on the rest), not two cows
+        self.overlap_s = m.get("link_overlap_s", 0.0)
         self.pen = m.get("height_penalty", 40.0)
         # link_rule "llr": every second both are seen adds the log-likelihood that a pair is one cow, from their
         # floor distance - one cow's two points ~ link_sigma apart, link_wrong of the seconds anywhere; two cows
@@ -1024,14 +1028,27 @@ class TrackletLinker:
     def _key(a, b):
         return (a, b) if a <= b else (b, a)
 
+    def _clash(self, x, y):
+        """Two tracks that cannot be one cow: one camera's, alive at the same time (beyond link_overlap_s of a
+        handing over: the earlier one ended, a short while after the later one began)."""
+        cx, fx, lx = self.life[x]
+        cy, fy, ly = self.life[y]
+        if cx != cy or not (fx <= ly and fy <= lx):
+            return False
+        if self.overlap_s:
+            (f1, l1), (f2, l2) = sorted(((fx, lx), (fy, ly)))
+            if l2 > l1 and l1 - f2 <= self.overlap_s and (self.last_ts or l1) - l1 >= 10.0:
+                return False
+        return True
+
     def _mergeable(self, ra, rb):
         """Never two tracks of one camera that lived at the same time; with link_contra, never two tracks of
         other cameras that were seen together long enough and mostly apart; never a pair found two cows."""
         for a in self.members[ra] or {ra}:
-            ca, fa, la = self.life[a]
+            ca = self.life[a][0]
             for b in self.members[rb] or {rb}:
-                cb, fb, lb = self.life[b]
-                if ca == cb and fa <= lb and fb <= la:
+                cb = self.life[b][0]
+                if self._clash(a, b):
                     return False
                 if self._key(a, b) in self.never:
                     return False
@@ -1075,12 +1092,10 @@ class TrackletLinker:
         gb = (self.members[self.root(b)] or {self.root(b)}) | {self.root(b)}
         out = set()
         for x in ga:
-            cx, fx, lx = self.life[x]
             for y in gb:
-                cy, fy, ly = self.life[y]
                 if self._key(x, y) in self.never:
                     return None
-                if cx == cy and fx <= ly and fy <= lx:
+                if self._clash(x, y):
                     if y != b and (self._strayed(y, gb, ts) or self._outdone(y, x, gb)):
                         out.add(y)
                     elif x != a and (self._strayed(x, ga, ts) or self._outdone(x, y, ga)):
@@ -1133,6 +1148,30 @@ class TrackletLinker:
             for t in rest:
                 if t != new_root:
                     self.store.link_tracks(ts, t, new_root)
+
+    def _seen_together(self, ts, ids):
+        """Two tracks of one camera seen this second in one group are two cows - joined when one seemed gone (a
+        track taken back later: still_s, reacquire_s; or a handing over, link_overlap_s, that was none): the one with
+        less evidence with the group's other cameras leaves it."""
+        for cam, gs in ids.items():
+            by_root = collections.defaultdict(list)
+            for g in gs:
+                by_root[self.root(g)].append(g)
+            for r, tracks in by_root.items():
+                if len(tracks) < 2:
+                    continue
+                group = (self.members.get(r) or {r}) | {r}
+                others = [o for o in group if o in self.life and self.life[o][0] != cam]
+
+                def now(t):                            # with the group now (the recent evidence), then over all
+                    rec = [self.recent[self._key(t, o)] for o in others if self._key(t, o) in self.recent]
+                    return (round(sum(v * np.exp(-(ts - last) / self.window) for v, last in rec), 3),
+                            sum(self.ev.get(t, {}).get(o, 0.0) for o in others))
+                keep = max(tracks, key=now)
+                for t in tracks:
+                    if t != keep:
+                        self._unlink(t, ts)
+                        self.stats["unlinked_seen_together"] += 1
 
     def _counted_twice(self, ts, per_cam, ids):
         """A joined cow counted by two cameras at once (each in its own mask) for unlink_s seconds: two cows."""
@@ -1498,6 +1537,7 @@ class TrackletLinker:
                     c, first, _ = self.life.get(g, (cam, ts, ts))
                     self.life[g] = (cam, first, ts)
                     self.members.setdefault(g, set())
+            self._seen_together(ts, ids)
             self._counted_twice(ts, per_cam, ids)
             if self.by_look:
                 self._by_look(ts, per_cam, ids)

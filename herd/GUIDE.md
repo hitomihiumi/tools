@@ -487,6 +487,21 @@ on both cameras at one moment under one name 62 -> 74% (trial_36). `mct_sim`: ID
 track on both 73 -> 79%, but two cows on one track 386 -> 553 seconds - the four trials are one recording:
 check it on another of yours (`trial --relink` with `link_rival = 0` against the default).
 
+**A handing over is one cow (`link_overlap_s`, 60).** The barn's cow 19 lay with her neighbour in one box for
+4.5 minutes on cam1; then the detector split them - her own box, a new track - and the old track lingered 31 s on
+the neighbour's part and ended. 31 s of two tracks at once kept her two cameras apart for the rest of the
+recording. Two tracks of one camera alive together at most `link_overlap_s`, the earlier one ended (gone 10 s)
+before the later, may be one cow now; and any group holding two tracks of one camera seen at the same second (a
+track taken back after a join, or a handing over that was none) is taken apart, the one with less recent
+evidence with the group's other cameras leaving (before, a track taken back late could leave two cows in one group
+for minutes). The barn's four trials relinked: IDF1 68.2 -> 69.0%, 74.0%, 77.7 -> 79.1%, 77.5 -> 78.9%; cow 19 on
+one track on both cameras 27 -> 56 of 56 moments; `mct_sim` alike (0.692 -> 0.693).
+
+**A camera unsure of a joined cow's name no longer undoes it.** `report.track_map` named a joined group only when
+every camera's bursts had a two-thirds majority: the barn's cow 10 (cam1 4 bursts to 3, cam2 2 to 0) went unnamed
+for the whole recording. Now the cameras that are sure name her, the unsure one left out (none sure: all the
+group's bursts together, two thirds). trial_36: IDF1 76.1 -> 77.6%, boxes found but unnamed 3% -> 1%.
+
 The store keeps each camera's own tracks (`seconds`, `bursts`); the joins are `track_links`, which the reports
 follow - the gallery sees the joined track at once. Before 2026-11-02 a joined camera's rows were written
 under the other camera's track: a join could not be undone and `trial --relink` on such a trial was wrong.

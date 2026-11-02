@@ -1378,7 +1378,7 @@ def test_trial_relink_joins_a_recorded_trial_anew():
 def test_joined_tracks_two_cameras_two_names_one_cow():
     """cam1 named her A (7 bursts), cam2 B (10): joined, the two-thirds rule over the group gave no name at all.
     Each camera clear on its own: the group takes B (more bursts), the night sees A and B as one cow. A camera
-    split between two names still gives none."""
+    split between two names is left out: the other's clear C names the group (cam1's C/D 3 to 3 undid it before)."""
     import report
     from store import Store
     with tempfile.TemporaryDirectory() as d:
@@ -1389,7 +1389,7 @@ def test_joined_tracks_two_cameras_two_names_one_cow():
                 store.burst((cam, tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
         store.link_tracks(150.0, "tb", "ta")
         store.link_tracks(150.0, "td", "tc")
-        assert report.track_map(store) == {"ta": "B", "tb": "B"}
+        assert report.track_map(store) == {"ta": "B", "tb": "B", "tc": "C", "td": "C"}
         assert report.track_map(store, joins=False) == {"ta": "A", "tb": "B", "td": "C"}
 
 
@@ -1616,3 +1616,83 @@ def test_link_rival_a_crossed_join_the_evidence_turned_against_is_undone():
     assert lk.root("aX") != lk.root("aY")
     lk0 = _crossed_scene(0.0)
     assert lk0.root("aX") == lk0.root("bY")                                # crossed for good
+
+
+def test_report_names_a_joined_cow_though_one_camera_is_unsure():
+    """A joined cow whose bursts on one camera split 4 to 3 and on the other agree: named by the sure camera (the
+    barn's cow 10 was unnamed for the whole recording); every camera unsure, by all their bursts together."""
+    import report
+    from store import Store
+    row = lambda cam, tr, k, cow: (cam, tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100)
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for k, cow in enumerate("AAAABBB"):
+            store.burst(row("cam1", "t1", k, cow))
+        for k in range(2):
+            store.burst(row("cam2", "t2", 10 + k, "A"))
+        store.link_tracks(150.0, "t2", "t1")
+        assert report.track_map(store) == {"t1": "A", "t2": "A"}
+        store2 = Store(os.path.join(d, "s2.sqlite"))                    # both unsure: 4+3 A, 3+0... together
+        for k, cow in enumerate("AAAABBB"):
+            store2.burst(row("cam1", "u1", k, cow))
+        for k, cow in enumerate("AAAB"):
+            store2.burst(row("cam2", "u2", 10 + k, cow if k else "B"))
+        store2.link_tracks(150.0, "u2", "u1")
+        assert report.track_map(store2) == {}                           # 6 A of 11: no clear majority
+        assert report.track_map(store2, joins=False) == {}
+
+
+def _handover_scene(overlap):
+    """Cow X on two cameras, given tracks: camera a follows her as "a1" for 100 s, then her box splits from a
+    neighbour's - "a2" on her from 80 s, "a1" lingers on the neighbour's place to 110 s and ends; camera b
+    follows her as "bX" all along. -> the linker."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_overlap_s=overlap, link_rival=0.0,
+                      link_strayed=0.0)
+    lk = mct.TrackletLinker(cfg)
+    X, N = 0.3, 0.45
+    for k in range(300):
+        a = []
+        if k < 80:
+            a.append({"box": box(X), "track": "a1"})
+        elif k < 110:
+            a.append({"box": box(N), "track": "a1"})
+        if k >= 80:
+            a.append({"box": box(X), "track": "a2"})
+        lk.update_all(float(k), {"a": a, "b": [{"box": box(X), "track": "bX"}]})
+    return lk
+
+
+def test_link_overlap_s_a_handing_over_is_one_cow():
+    """A camera's track of a cow handed on to a new one with 30 s of both: one cow on both cameras
+    (link_overlap_s 60); without it the new track never joins."""
+    lk = _handover_scene(60.0)
+    assert lk.root("a2") == lk.root("bX") == lk.root("a1")
+    lk0 = _handover_scene(0.0)
+    assert lk0.root("a2") != lk0.root("bX")
+
+
+def test_two_tracks_of_one_camera_seen_together_leave_one_group():
+    """Two tracks of one camera in one group (joined while one seemed gone) seen together again: the one with less
+    evidence with the group's other cameras leaves."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5)
+    lk = mct.TrackletLinker(cfg)
+    for k in range(60):                                   # a1 and bX: one cow, joined
+        lk.update_all(float(k), {"a": [{"box": box(0.3), "track": "a1"}], "b": [{"box": box(0.3), "track": "bX"}]})
+    for k in range(60, 120):                              # a1 gone, a2 on her: joined too
+        lk.update_all(float(k), {"a": [{"box": box(0.3), "track": "a2"}], "b": [{"box": box(0.3), "track": "bX"}]})
+    assert lk.root("a1") == lk.root("a2") == lk.root("bX")
+    for k in range(120, 130):                             # a1 back, on another cow far off: two cows at once
+        lk.update_all(float(k), {"a": [{"box": box(0.3), "track": "a2"}, {"box": box(0.8), "track": "a1"}],
+                                 "b": [{"box": box(0.3), "track": "bX"}]})
+    assert lk.root("a2") == lk.root("bX") != lk.root("a1")
+    assert lk.stats["unlinked_seen_together"] == 1

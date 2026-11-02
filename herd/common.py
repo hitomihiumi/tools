@@ -184,6 +184,12 @@ DEFAULTS = {
             # (0.688 -> 0.692), a cow on both cameras one track 73 -> 79%, but two cows on one track 386 -> 553
             # seconds: check it on a recording of your own. 0: off
             "link_rival": 200.0,
+            # link_overlap_s (llr): two tracks of one camera alive at the same time for at most this long, the one begun
+            # first ended (gone 10 s) before the other: a handing over, one cow - her box split from a neighbour's, her
+            # old track lingering on the rest a moment (the barn's cow 19: 31 s, then her cameras apart for good).
+            # Any group holding two tracks of one camera seen together is taken apart (the weaker one leaves). The
+            # barn's four trials relinked: IDF1 68.2 / 74.0 / 77.7 -> 79.1 / 77.5 -> 78.9% (120 alike). 0: off
+            "link_overlap_s": 60.0,
             "body_height_lying": 55.0, "body_height_standing": 90.0,
             # the cameras' clocks from cows walking on two of them (TrackletLinker.clocks; said at the end of a run):
             # the shift of one's floor path, within lag_max_s, that lays it best on the other's over lag_window_s.

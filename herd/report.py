@@ -62,10 +62,12 @@ def day_expr(cfg):
 def track_map(store, min_share=2 / 3, joins=True):
     """track -> cow from its confirmed bursts; tracks without a clear majority are left out.
 
-    joins (store.track_links, mct): tracks joined into one cow are named together - each camera's bursts in the
-    group need a clear majority (min_share) of their own; when two cameras' majorities name her differently (the
-    same cow under each camera's name for her side: the join is the evidence), the group takes the name with
-    more bursts - the night makes the two names one (pipeline.merge_by_place). joins=False: each track by its own
+    joins (store.track_links, mct): tracks joined into one cow are named together - by each camera whose bursts in
+    the group have a clear majority (min_share) of their own, a camera unsure left out (the barn's cow 10: cam1 4
+    to 3, cam2 2 to 0 - unnamed for the whole recording while any camera unsure undid the group); none sure, all
+    the group's bursts together. When two cameras' majorities name her differently (the same cow under each
+    camera's name for her side: the join is the evidence), the group takes the name with more bursts - the night
+    makes the two names one (pipeline.merge_by_place). joins=False: each track by its own
     bursts alone (what the night compares)."""
     aliases = store.aliases() if hasattr(store, "aliases") else {}   # a merged profile counts as its cow
     roots = (store.track_roots() if hasattr(store, "track_roots") else {}) if joins else {}
@@ -78,14 +80,17 @@ def track_map(store, min_share=2 / 3, joins=True):
         tops = {}
         for cam, v in per_cam.items():
             cow, n = v.most_common(1)[0]
-            if n < min_share * sum(v.values()):
-                break                                          # a camera unsure which cow: none
-            tops[cam] = cow
-        else:
-            total = collections.Counter()
-            for v in per_cam.values():
-                total.update(v)
+            if n >= min_share * sum(v.values()):
+                tops[cam] = cow                                # a camera unsure which cow: left out
+        total = collections.Counter()
+        for v in per_cam.values():
+            total.update(v)
+        if tops:
             out[group] = max(set(tops.values()), key=lambda c: (total[c], c))
+        elif len(per_cam) > 1:                                 # every camera unsure: all their bursts together
+            cow, n = total.most_common(1)[0]
+            if n >= min_share * sum(total.values()):
+                out[group] = cow
     for track, root in roots.items():                          # every joined track is its root's cow
         if root in out:
             out[track] = out[root]
