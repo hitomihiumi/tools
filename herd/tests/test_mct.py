@@ -1528,3 +1528,63 @@ def test_inside_low_a_piece_of_a_cow_takes_no_track():
     g0 = mct.GlobalTracker(cfg)
     g0.update("c1", 0.0, [{"box": near, "emb": None}])
     assert g0.update("c1", 1.0, [{"box": near, "emb": None}, {"box": behind, "emb": None}])[1] is not None
+
+
+def _swap_scene(strayed):
+    """Two cows on two cameras, given tracks: cam a's track of cow X swaps onto cow Y at second 60 and X goes on
+    under a new track there; camera b follows both all along. -> (the linker, its answers at the end)."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_strayed=strayed)
+    lk = mct.TrackletLinker(cfg)
+    X, Y = 0.3, 0.7
+    for k in range(200):
+        # a: before 60 "a1" on X, "a2" on Y; after it "a1" on Y (a swap: a2 lost), "a3" on X
+        a = [{"box": box(X), "track": "a1"}, {"box": box(Y), "track": "a2"}] if k < 60 else \
+            [{"box": box(Y), "track": "a1"}, {"box": box(X), "track": "a3"}]
+        out = lk.update_all(float(k), {"a": a, "b": [{"box": box(X), "track": "bX"}, {"box": box(Y), "track": "bY"}]})
+    return lk, out
+
+
+def test_link_strayed_a_swapped_track_leaves_and_the_cow_is_joined_again():
+    """One swap on one camera: the track that went on with the other cow leaves its group, and the cow's new
+    track joins her other camera's (link_strayed); without it she stays apart for good."""
+    lk, out = _swap_scene(10.0)
+    assert lk.root("a3") == lk.root("bX")                                  # X: her new track on a, and b's
+    assert lk.root("a1") != lk.root("bX")                                  # the swapped track out of X
+    assert lk.stats["unlinked_strayed"] >= 1
+    lk0, _ = _swap_scene(0.0)
+    assert lk0.root("a3") != lk0.root("bX") and lk0.root("a1") == lk0.root("bX")
+
+
+def test_the_store_keeps_each_cameras_own_tracks_the_gallery_the_joined():
+    """[mct] link: a cow joined across cameras is one track to the gallery, but the store keeps each camera's own
+    track (the join is a track_link) - so a join undone, or played again by trial --relink, holds."""
+    import pipeline
+    from store import Store
+
+    class Glob:                                   # cam2's own track "t2" is joined to cam1's "t1"
+        def update(self, cam, ts, dets):
+            return ["t1"]
+
+        def raw(self, cam, ts):
+            return ["t1" if cam == "cam1" else "t2"]
+
+    cfg = _mct_cfg([("cam1", {}), ("cam2", {})], enabled=True)
+    cfg["cameras"] = [dict(c, min_box_pct=0.0, min_box_side_px=0) for c in cfg["cameras"]]
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+        models = _FakeModels()
+        models.boxes, models.ids = [_box(0.5)], {0.5: _unit(np.ones(8))}
+        seen = []
+        shared.counted = lambda cam, ts, tracks: seen.append(tuple(tracks))
+        for i, c in enumerate(cfg["cameras"]):
+            cam = pipeline.Camera(c, i, 2, cfg, models, shared, store, 0.0)
+            cam.glob = Glob()
+            cam.second(0.0, np.zeros((64, 64, 3), np.uint8))
+        assert sorted(store.query("SELECT cam, track FROM seconds")) == [("cam1", "t1"), ("cam2", "t2")]
+        assert seen == [("t1",), ("t1",)]                                  # the gallery: one cow

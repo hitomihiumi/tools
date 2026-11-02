@@ -348,6 +348,7 @@ RULES = [
     ("llr+self-calib", {"mode": "link", "link_rule": "llr", "link_learn_offset": True}),
     # each floor point its own uncertainty through the camera's mapping (link_px_sigma), and learnt per cell
     ("llr+sigma30", {"mode": "link", "link_rule": "llr", "link_sigma": 30.0}),
+    ("llr-strayed", {"mode": "link", "link_rule": "llr", "link_strayed": 0.0}),     # link_strayed off
     ("llr+px", {"mode": "link", "link_rule": "llr", "link_sigma": 30.0, "link_px": 8.0}),
     ("llr+px+spread", {"mode": "link", "link_rule": "llr", "link_sigma": 30.0, "link_px": 8.0, "link_learn_spread": True}),
     ("llr+look+self-calib", {"mode": "link", "link_rule": "llr", "link_look_cm": 300.0, "link_learn_offset": True}),

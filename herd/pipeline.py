@@ -555,31 +555,39 @@ class Camera:
             lying = POSTURES.index("lying")
             gids = self.glob.update(self.id, ts, [{"box": b, "emb": e, "p_lying": float(p[lying]), "low": k >= n_sure}
                                                   for k, (b, e, p) in enumerate(zip(boxes, ids, pp))])
+            # the store keeps the camera's own tracks (the joins are track_links); the gallery sees them joined
+            own = self.glob.raw(self.id, ts) if hasattr(self.glob, "raw") else None
+            own = own if own is not None and len(own) == len(gids) else gids
             # a box with no track (an unsure one that continued none: low_score, or inside_low - a box the
             # tracker itself found unsure) is no cow this second
             keep = [k for k, g in enumerate(gids) if g is not None]
             self.stats["low_boxes_kept"] += sum(k >= n_sure for k in keep)
             if len(keep) < len(gids):
-                gids, boxes = [gids[k] for k in keep], [boxes[k] for k in keep]
+                gids, own, boxes = [gids[k] for k in keep], [own[k] for k in keep], [boxes[k] for k in keep]
                 pp, pa = pp[keep], pa[keep]
             if len(gids) > 1 and hasattr(self.gallery, "together"):
                 self.gallery.together(gids, ts, boxes)              # two cows, with evidence (mct.CoSeen)
-            for gid, b, p, a in zip(gids, boxes, pp, pa):
+            counted = []
+            for gid, g_own, b, p, a in zip(gids, own, boxes, pp, pa):
                 if in_mask(b, self.mask):
-                    rows.append((self.id, gid, ts, *b, POSTURES[int(p.argmax())], ACTIVITIES[int(a.argmax())],
+                    rows.append((self.id, g_own, ts, *b, POSTURES[int(p.argmax())], ACTIVITIES[int(a.argmax())],
                                  float(p[POSTURES.index("lying")])))
+                    counted.append(gid)
             owned_n = len(rows)
             if rows:
                 self.store.seconds(rows)
                 if hasattr(self.gallery, "counted"):
-                    self.gallery.counted(self.id, ts, [r[1] for r in rows])
+                    self.gallery.counted(self.id, ts, counted)
         self.stats["seconds"] += 1
         self.stats["cow_seconds"] += owned_n
         self.stats["cow_seconds_tracked_not_owned"] += len(boxes) - owned_n
         self._time("second", ts, start=start, end=time.time(), cows=owned_n)
 
-    def _track_of(self, ts, box):
+    def _track_of(self, ts, box, own=False):
+        """The track there: joined across cameras (the gallery's), or with own the camera's own (the store's)."""
         if self.glob is not None:
+            if own and hasattr(self.glob, "track_at_raw"):
+                return self.glob.track_at_raw(self.id, ts, box)
             return self.glob.track_at(self.id, ts, box)
         with self.trk_lock:
             return self.tracker.track_at(ts, box)
@@ -607,6 +615,7 @@ class Camera:
             if self.glob is not None and not in_mask(ch[mid], self.mask):
                 continue                                  # tracked here, counted by the camera that owns it
             tid = self._track_of(mid, ch[mid]) or f"{self.id}-burst-{int(t0)}-{times[0]:.0f}"
+            own = self._track_of(mid, ch[mid], own=True) or tid      # the camera's own track: what the store keeps
             valid = np.array([times[0] - 0.5 <= ts <= times[-1] + 0.5 for ts, _ in frames])
             boxes = [interpolate_box(ch, ts) for ts, _ in frames]
             t = time.perf_counter()
@@ -631,7 +640,7 @@ class Camera:
             area = float(np.mean([(b[2] - b[0]) * (b[3] - b[1]) for b in ch.values()]))
             # kept until the burst's decision: only what the training cache needs, not every crop
             keep_feats = feats.float().cpu().numpy() if self.cache is not None else None
-            done.append((tid, out, area, keep_feats, rel, valid, motion, boxes, crops[len(crops) // 2]))
+            done.append((tid, out, area, keep_feats, rel, valid, motion, boxes, crops[len(crops) // 2], own))
             cows += 1
             crops_n += len(crops)
             rum_p.append(round(out["rumination"], 3))
@@ -645,14 +654,14 @@ class Camera:
         decisions = (self.gallery.decide_batch([(d[1], d[2], d[0]) for d in done], t0)
                      if hasattr(self.gallery, "decide_batch") else
                      [self.gallery.decide(d[1], d[2], t0, d[0]) for d in done])
-        for (tid, out, area, feats, rel, valid, motion, boxes, mid_crop), decision in zip(done, decisions):
-            self.store.burst((self.id, tid, t0, decision["state"], decision["cow"], decision["sim"],
+        for (tid, out, area, feats, rel, valid, motion, boxes, mid_crop, own), decision in zip(done, decisions):
+            self.store.burst((self.id, own, t0, decision["state"], decision["cow"], decision["sim"],
                               decision["margin"], decision["p"], out["rumination"], out["posture"],
                               out["activity"], out["lameness"], out["quality_max"], int(valid.sum()),
                               int(out["ruminating"])))
             if self.cache is not None:
                 from model import box_pos
-                self.cache.add(self.id, tid, t0, feats, rel, valid, motion,
+                self.cache.add(self.id, own, t0, feats, rel, valid, motion,
                                np.mean([box_pos(b) for b in boxes], 0), mid_crop,
                                {"state": decision["state"], "cow": decision["cow"], "sim": decision["sim"],
                                 "p": decision["p"], "area": area})

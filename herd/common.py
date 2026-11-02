@@ -169,6 +169,13 @@ DEFAULTS = {
             # MmCows: link_margin 50 halved the wrong joins (2330 -> 1309) at the same IDF1 (0.498);
             # link_contra barely helped and with the margin cost IDF1 - off
             "link_margin": 50.0, "link_contra_s": 10, "link_contra": 0.0,
+            # link_rule "llr", link_strayed > 0: a join refused only because the other group holds a track of the
+            # same camera that lived beside the newcomer - and that track's recent evidence with its group's other
+            # cameras is under -link_strayed (it went on with another cow: a swap) - takes that track out of its
+            # group, and the newcomer in (else one swap kept a cow apart for good). The barn's three trials of
+            # 23 Oct relinked: IDF1 +1.3-2.0, a cow on both cameras under one name 54-62% -> 59-70% (at 10;
+            # 20 alike, 40 worse); mct_sim 0.683 -> 0.688. 0: off
+            "link_strayed": 10.0,
             "body_height_lying": 55.0, "body_height_standing": 90.0,
             # the cameras' clocks from cows walking on two of them (TrackletLinker.clocks; said at the end of a run):
             # the shift of one's floor path, within lag_max_s, that lays it best on the other's over lag_window_s.

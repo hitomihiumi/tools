@@ -577,6 +577,9 @@ docker compose run --rm herd trial --relink --config /data/barn.toml --out /data
 (the barn's trial of 23 Oct: one joined track for a cow on both cameras 0% -> 40% of the moments, 11 of 23 cows
 under one name, IDF1 45% -> 57%).
 
+A trial made between that fix and 2026-11-02 that joined tracks wrote a joined camera's rows under the other
+camera's track: `--relink` on it is wrong (it cannot take the joins apart). Play such a trial again.
+
 **When a trial joins nothing** (the log: "tracks joined across cameras 0", most seconds turned away by
 `link_margin`): the floor mapping is right in only part of the seconds and the cows lie side by side. Join by
 evidence instead of by seconds near (`herd/GUIDE.md` section 4.8):

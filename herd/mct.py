@@ -783,7 +783,7 @@ class FusedSeconds:
     def __init__(self, tracker, cams, wait_s=0.8, alive_s=10.0):
         self.ft, self.wait, self.alive_s = tracker, wait_s, alive_s
         self.alive = {c: None for c in cams}
-        self.pending, self.done = {}, {}
+        self.pending, self.done, self.done_raw = {}, {}, {}
         self.cv = threading.Condition()
         self.lock, self.stuck_s = None, None
 
@@ -813,6 +813,7 @@ class FusedSeconds:
                     per = self.pending.pop(ts, {})
                     if per:
                         self.done.setdefault(ts, {}).update(self.ft.update_all(ts, per))
+                        self.done_raw.setdefault(ts, {}).update(getattr(self.ft, "raw_last", None) or {})
                     self.cv.notify_all()
                     continue
                 # files: the others' places in their recordings move outside this lock - looked at again soon
@@ -821,10 +822,21 @@ class FusedSeconds:
             out = self.done[ts][cam]
             for t in [t for t in self.done if t < ts - 30]:
                 del self.done[t]
+                self.done_raw.pop(t, None)
         return out
+
+    def raw(self, cam, ts):
+        """The camera's own tracks of its boxes at ts (update gives them joined): what the store keeps - the
+        joins are track_links, so a join undone or played again (herd.py trial --relink) still holds."""
+        with self.cv:
+            return self.done_raw.get(ts, {}).get(cam)
 
     def track_at(self, cam, ts, box):
         return self.ft.track_at(cam, ts, box)
+
+    def track_at_raw(self, cam, ts, box):
+        f = getattr(self.ft, "track_at_raw", None)
+        return f(cam, ts, box) if f else self.ft.track_at(cam, ts, box)
 
     def track_only(self, cam, ts, dets):
         """Frames between the seconds go to the camera's own tracker, not through the second's rendezvous."""
@@ -873,6 +885,10 @@ class TrackletLinker:
         self.margin = m.get("link_margin", 0.0)
         self.contra_s = m.get("link_contra_s", 10)
         self.contra = m.get("link_contra", 0.0)
+        # link_strayed (llr, > 0): a join refused only by a track of the other group on the same camera that lived
+        # beside the newcomer - and that now goes against its group's other cameras (its recent evidence with them
+        # under -link_strayed: it went on with another cow, a swap) - takes that track out of its group instead
+        self.strayed = m.get("link_strayed", 0.0)
         self.pen = m.get("height_penalty", 40.0)
         # link_rule "llr": every second both are seen adds the log-likelihood that a pair is one cow, from their
         # floor distance - one cow's two points ~ link_sigma apart, link_wrong of the seconds anywhere; two cows
@@ -1022,13 +1038,51 @@ class TrackletLinker:
                         return False
         return True
 
+    def _strayed(self, t, group, ts):
+        """t's recent evidence with its group's tracks on other cameras: under -link_strayed - it went off with
+        another cow (one camera's track swapped onto a neighbour, its group's other cameras still on her)."""
+        cam = self.life[t][0]
+        v = [val * np.exp(-(ts - last) / self.window) for o in group if o != t and self.life[o][0] != cam
+             and self._key(t, o) in self.recent for val, last in [self.recent[self._key(t, o)]]]
+        return bool(v) and sum(v) < -self.strayed
+
+    def _swapped_out(self, a, b, ts):
+        """The tracks that alone keep a and b's groups apart and went off with another cow (link_strayed); None
+        when anything else does (two cows found, two tracks of one camera both still with their cows)."""
+        ga = (self.members[self.root(a)] or {self.root(a)}) | {self.root(a)}
+        gb = (self.members[self.root(b)] or {self.root(b)}) | {self.root(b)}
+        out = set()
+        for x in ga:
+            cx, fx, lx = self.life[x]
+            for y in gb:
+                cy, fy, ly = self.life[y]
+                if self._key(x, y) in self.never:
+                    return None
+                if cx == cy and fx <= ly and fy <= lx:
+                    if y != b and self._strayed(y, gb, ts):
+                        out.add(y)
+                    elif x != a and self._strayed(x, ga, ts):
+                        out.add(x)
+                    else:
+                        return None
+        return out
+
     def _union(self, a, b, ts):
         ra, rb = self.root(a), self.root(b)
         if ra == rb:
             return
         if not self._mergeable(ra, rb):
-            self.stats["link_refused"] += 1
-            return
+            gone = self._swapped_out(a, b, ts) if self.strayed and not self.contra else None
+            if not gone:
+                self.stats["link_refused"] += 1
+                return
+            for t in gone:                                   # out of its group, the newcomer in its place
+                self._unlink(t, ts)
+                self.stats["unlinked_strayed"] += 1
+            ra, rb = self.root(a), self.root(b)
+            if ra == rb or not self._mergeable(ra, rb):
+                self.stats["link_refused"] += 1
+                return
         keep, gone = (ra, rb) if self.life[ra][1] <= self.life[rb][1] else (rb, ra)
         self.parent[gone] = keep
         self.members[keep] |= (self.members.pop(gone, set()) or {gone}) | {keep}
@@ -1476,11 +1530,16 @@ class TrackletLinker:
                                     self._union(k[0], k[1], ts)
                             elif self.near[k] >= self.share * self.both[k]:
                                 self._union(k[0], k[1], ts)
+            self.raw_last = raw
             return {cam: [None if g is None else self.root(g) for g in gs] for cam, gs in raw.items()}
 
     def track_at(self, cam, ts, box):
         t = self.cam_tracker.track_at(cam, ts, box)
         return None if t is None else self.root(t)
+
+    def track_at_raw(self, cam, ts, box):
+        """The camera's own track there (track_at: the joined one)."""
+        return self.cam_tracker.track_at(cam, ts, box)
 
     def track_only(self, cam, ts, dets):
         """A frame between the seconds: the camera's own tracker only (no joining - that is per second)."""

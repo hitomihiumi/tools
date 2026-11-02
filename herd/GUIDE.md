@@ -466,6 +466,19 @@ per-point spread changes little. On the barn's trial (cam1-cam2 replayed, `link_
 `link_px = 8`): 6 of the 23 labelled cows seen by both under one name, against 4 with `llr` alone -
 too few to tell. It stays off; a better calibration of cam1-cam2 is worth more.
 
+**One swap must not keep a cow apart for good (`link_strayed`, 10).** Two tracks of one camera that lived
+at the same time are never one cow - so when a camera's track of a joined cow swapped onto her neighbour and
+went on there, the cow's new track on that camera could never join her other camera's again: her old track
+still sat in the group, beside the new one. With `link_strayed` a join refused only by such a track takes it out
+of its group instead, when its recent evidence with the group's other cameras is under -`link_strayed` (it is
+with another cow now). The barn's three trials of 23 Oct played again (`trial --relink`): IDF1 66.3 -> 67.8%,
+71.2 -> 72.5%, 71.1 -> 73.1%; a cow on both cameras at one moment under one name 54 -> 59%, 62 -> 70%,
+55 -> 64%. 20 alike, 40 worse; `mct_sim` 0.683 -> 0.688, the wrong joins 421 -> 386.
+
+The store keeps each camera's own tracks (`seconds`, `bursts`); the joins are `track_links`, which the reports
+follow - the gallery sees the joined track at once. Before 2026-11-02 a joined camera's rows were written
+under the other camera's track: a join could not be undone and `trial --relink` on such a trial was wrong.
+
 **One cow under two names, made one by where she stood (`cow_merge_llr`).** Each camera's
 gallery names a cow by the side it sees, so a cow that walks from one camera's floor to the
 other's is enrolled twice unless her two tracks were joined at that moment. With `llr` the
