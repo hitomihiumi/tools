@@ -88,8 +88,7 @@ def track_map(store, min_share=2 / 3, joins=True):
         if tops:
             ranked = sorted(set(tops.values()), key=lambda c: (total[c], c), reverse=True)   # ties: as before
             out[group] = ranked[0]
-            clean = all(per_cam[cam][c] >= 0.9 * sum(per_cam[cam].values()) for cam, c in tops.items())
-            if len(ranked) > 1 and clean:                      # its cameras named it differently, each all but sure
+            if len(ranked) > 1:                                # its cameras named it differently
                 options[group] = [(c, total[c]) for c in ranked]
         elif len(per_cam) > 1:                                 # every camera unsure: all their bursts together
             cow, n = total.most_common(1)[0]
@@ -104,12 +103,13 @@ def track_map(store, min_share=2 / 3, joins=True):
 
 
 def _one_name_each(store, roots, aliases, out, options):
-    """Two groups with tracks of one camera alive at once, each named A by one camera and B by the other - one
-    A/B, the other B/A - are two cows named crossed (the gallery named them while their joins were crossed, the
-    joins since put right): each takes one of the two, the way most of their bursts say. Before, both took the name
-    with more bursts (the barn's cows 25 and 35 of 19 Oct both -07). Groups named differently for other reasons
-    (a track holding two cows: its camera's bursts split, under 90% for one name) keep their name. The tracks'
-    lives from their bursts."""
+    """Two groups with tracks of one camera alive at once are two cows: one name each where they can. Two such
+    groups each named A by one camera and B by the other, the other way round (the gallery named them while their
+    joins were crossed, the joins since put right: the barn's cows 25 and 35 of 19 Oct, both -07) take one each,
+    the way most of their bursts say. Any other two that took one name (the barn's cows 6 and 8 of 23 Oct, cam1's
+    gallery naming 8 as cam2's named 6: both -01, 975 s): the one whose own other name (its cameras named it
+    differently: options, most bursts first) costs it least to take, takes it - if no group beside it has it.
+    The tracks' lives from their bursts."""
     life = collections.defaultdict(list)                       # group -> [(cam, first, last)]
     for track, cam, first, last in store.query("SELECT track, cam, MIN(ts), MAX(ts) FROM bursts GROUP BY track, cam"):
         life[roots.get(track, track)].append((cam, first, last))
@@ -129,6 +129,28 @@ def _one_name_each(store, roots, aliases, out, options):
             out[g], out[h] = a, b
         else:
             out[g], out[h] = b, a
+    # any two groups alive at once on one camera that took one name: the one with another name of its own (its
+    # cameras named it differently) whose move costs it least takes that other name, if no group beside it has it
+    by_name = collections.defaultdict(list)
+    for g, cow in out.items():
+        by_name[cow].append(g)
+    for cow, groups in list(by_name.items()):
+        rivals = [g for g in groups if any(h != g and clash(g, h) for h in groups)]
+        if len(rivals) < 2:
+            continue
+        free = lambda g: [(c, n) for c, n in options.get(g, []) if c != cow
+                          and not any(clash(g, h) for h in by_name.get(c, []) if h != g)]
+        movers = [g for g in rivals if free(g)]
+        if not movers:
+            continue
+        v = lambda g: dict(options.get(g, [])).get(cow, 0)
+        stay = max(rivals, key=lambda g: (v(g) - (free(g)[0][1] if free(g) else 0), g))
+        for g in movers:
+            if g != stay and any(clash(g, h) for h in by_name[cow] if h != g):
+                nxt = free(g)[0][0]
+                by_name[cow].remove(g)
+                by_name[nxt].append(g)
+                out[g] = nxt
 
 
 def daily(store, cfg, since=None, until=None):

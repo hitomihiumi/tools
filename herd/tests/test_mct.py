@@ -1777,3 +1777,21 @@ def test_a_camera_of_its_own_tiles_asks_the_detector_so():
         for i, c in enumerate(cfg["cameras"]):
             pipeline.Camera(c, i, 2, cfg, models, shared, store, 0.0).second(0.0, np.zeros((64, 64, 3), np.uint8))
         assert models.asked == [None, True]
+
+
+def test_report_two_cows_alive_at_once_do_not_share_a_name():
+    """Two joined cows alive at once on one camera both took name X (cow 8's cam1 track named so by the gallery,
+    cow 6's cam2 track too): the one whose other name costs it less (4 X / 3 Y against 6 X / 4 Z) takes Y."""
+    import report
+    from store import Store
+    row = lambda cam, tr, k, cow: (cam, tr, 100.0 + 60 * k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100)
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for tr, cam, cow, n in (("a1", "cam1", "X", 4), ("a2", "cam2", "Y", 3),      # cow 8
+                                ("b2", "cam2", "X", 6), ("b1", "cam1", "Z", 4)):     # cow 6
+            for k in range(n):
+                store.burst(row(cam, tr, k, cow))
+        store.link_tracks(150.0, "a2", "a1")
+        store.link_tracks(150.0, "b1", "b2")
+        tm = report.track_map(store)
+        assert tm["a1"] == tm["a2"] == "Y" and tm["b1"] == tm["b2"] == "X"

@@ -524,6 +524,10 @@ barn's cows 25 and 35 of 19 Oct: cam1 -18 / cam2 -07 and cam1 -07 / cam2 -18); t
 held both names and took the one with more bursts - both -07. Two groups alive at once on one camera, each named
 A by one camera and B by the other, the other way round, each camera all but sure (90% of its bursts): each takes
 one, the way most of their bursts say. 19 Oct relinked: IDF1 78.2 -> 80.2%; the four trials of 23 Oct unchanged.
+Any other two groups alive at once on one camera that took one name (23 Oct: cam1's gallery named cow 8 as cam2's
+had named cow 6 - both -01 for 975 s): the one whose other name (its cameras named it differently) costs it less to
+take, takes it, if no group beside it has it. trial_39 of 23 Oct: IDF1 77.4 -> 78.9%, one cow twice on one camera
+975 -> 2 s; the other trials unchanged (one -0.1).
 
 **A camera of its own tiles (`[[cameras]] tiles = true`).** The barn's cam4 of 19 Oct missed 32% of the labelled
 cows; of those inside its tracking zone two thirds (131 of 197) lay in one box with a neighbour - a row of far cows
