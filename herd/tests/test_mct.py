@@ -1736,3 +1736,22 @@ def test_link_cross_a_lost_cows_track_takes_no_box_its_other_camera_says_is_anot
     assert got != x_a                                                       # Y's box: not X's track
     lk0, x_a0, _, got0 = _steal_scene(False)
     assert got0 == x_a0                                                     # without: X's track took it
+
+
+def test_report_two_cows_named_crossed_get_a_name_each():
+    """Two joined cows alive at once, named crossed by the gallery (cam1 A / cam2 B and cam1 B / cam2 A, each
+    camera sure): each takes one of the two names, the way most bursts say - not both the one with more bursts."""
+    import report
+    from store import Store
+    row = lambda cam, tr, k, cow: (cam, tr, 100.0 + 60 * k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100)
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for tr, cam, cow, n in (("x1", "cam1", "B", 6), ("x2", "cam2", "A", 8),      # cow X
+                                ("y1", "cam1", "A", 8), ("y2", "cam2", "B", 5)):     # cow Y
+            for k in range(n):
+                store.burst(row(cam, tr, k, cow))
+        store.link_tracks(150.0, "x2", "x1")
+        store.link_tracks(150.0, "y2", "y1")
+        tm = report.track_map(store)
+        assert tm["x1"] == tm["x2"] != tm["y1"] == tm["y2"]
+        assert tm["y1"] == "A" and tm["x1"] == "B"                          # 8 + 6 beats 8 + 5

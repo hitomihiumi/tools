@@ -75,7 +75,7 @@ def track_map(store, min_share=2 / 3, joins=True):
     for track, cam, cow, n in store.query("SELECT track, cam, cow, COUNT(*) FROM bursts WHERE state='confirmed' "
                                           "GROUP BY track, cam, cow"):
         votes[roots.get(track, track)][cam][aliases.get(cow, cow)] += n
-    out = {}
+    out, options = {}, {}
     for group, per_cam in votes.items():
         tops = {}
         for cam, v in per_cam.items():
@@ -86,15 +86,49 @@ def track_map(store, min_share=2 / 3, joins=True):
         for v in per_cam.values():
             total.update(v)
         if tops:
-            out[group] = max(set(tops.values()), key=lambda c: (total[c], c))
+            ranked = sorted(set(tops.values()), key=lambda c: (total[c], c), reverse=True)   # ties: as before
+            out[group] = ranked[0]
+            clean = all(per_cam[cam][c] >= 0.9 * sum(per_cam[cam].values()) for cam, c in tops.items())
+            if len(ranked) > 1 and clean:                      # its cameras named it differently, each all but sure
+                options[group] = [(c, total[c]) for c in ranked]
         elif len(per_cam) > 1:                                 # every camera unsure: all their bursts together
             cow, n = total.most_common(1)[0]
             if n >= min_share * sum(total.values()):
                 out[group] = cow
+    if joins and options:
+        _one_name_each(store, roots, aliases, out, options)
     for track, root in roots.items():                          # every joined track is its root's cow
         if root in out:
             out[track] = out[root]
     return out
+
+
+def _one_name_each(store, roots, aliases, out, options):
+    """Two groups with tracks of one camera alive at once, each named A by one camera and B by the other - one
+    A/B, the other B/A - are two cows named crossed (the gallery named them while their joins were crossed, the
+    joins since put right): each takes one of the two, the way most of their bursts say. Before, both took the name
+    with more bursts (the barn's cows 25 and 35 of 19 Oct both -07). Groups named differently for other reasons
+    (a track holding two cows: its camera's bursts split, under 90% for one name) keep their name. The tracks'
+    lives from their bursts."""
+    life = collections.defaultdict(list)                       # group -> [(cam, first, last)]
+    for track, cam, first, last in store.query("SELECT track, cam, MIN(ts), MAX(ts) FROM bursts GROUP BY track, cam"):
+        life[roots.get(track, track)].append((cam, first, last))
+    clash = lambda g, h: any(c1 == c2 and f1 <= l2 and f2 <= l1 for c1, f1, l1 in life[g] for c2, f2, l2 in life[h])
+    pairs = collections.defaultdict(list)                      # the two names -> groups named so
+    for g, opts in options.items():
+        if len(opts) == 2:
+            pairs[frozenset(c for c, _ in opts)].append(g)
+    for names, groups in pairs.items():
+        if len(groups) != 2 or not clash(*groups) or any(out.get(h) in names for h in out
+                                                           if h not in groups and any(clash(h, g) for g in groups)):
+            continue
+        g, h = groups
+        a, b = sorted(names)
+        v = lambda grp, c: dict(options[grp]).get(c, 0)
+        if v(g, a) + v(h, b) >= v(g, b) + v(h, a):
+            out[g], out[h] = a, b
+        else:
+            out[g], out[h] = b, a
 
 
 def daily(store, cfg, since=None, until=None):

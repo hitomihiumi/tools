@@ -519,6 +519,12 @@ on both cameras under one name 92%) against 78.1% (82%) at 230; 23 Oct 78.0 / 79
 the barn's cam1-cam2; `crosscam --depth` now says about 2.1 x one cow's two points' median distance (no margin).
 Yours: `trial --relink` at a few values - minutes, no GPU.
 
+**Two cows named crossed get a name each.** While two cows' joins were crossed the gallery named them so (the
+barn's cows 25 and 35 of 19 Oct: cam1 -18 / cam2 -07 and cam1 -07 / cam2 -18); the joins put right, each group
+held both names and took the one with more bursts - both -07. Two groups alive at once on one camera, each named
+A by one camera and B by the other, the other way round, each camera all but sure (90% of its bursts): each takes
+one, the way most of their bursts say. 19 Oct relinked: IDF1 78.2 -> 80.2%; the four trials of 23 Oct unchanged.
+
 **A camera unsure of a joined cow's name no longer undoes it.** `report.track_map` named a joined group only when
 every camera's bursts had a two-thirds majority: the barn's cow 10 (cam1 4 bursts to 3, cam2 2 to 0) went unnamed
 for the whole recording. Now the cameras that are sure name her, the unsure one left out (none sure: all the
