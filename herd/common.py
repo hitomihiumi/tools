@@ -190,6 +190,17 @@ DEFAULTS = {
             # Any group holding two tracks of one camera seen together is taken apart (the weaker one leaves). The
             # barn's four trials relinked: IDF1 68.2 / 74.0 / 77.7 -> 79.1 / 77.5 -> 78.9% (120 alike). 0: off
             "link_overlap_s": 60.0,
+            # link_cross_* (llr): a joined track chooses its box with its other camera's word - where its joined track
+            # there sees the cow now (the pair's own offset over the last minute taken off), in sigmas of
+            # link_cross_sigma (0: link_sigma, else link_dist / 2.5). link_cross_w: a bonus of up to it for a box right
+            # there; link_cross_confirm: a box taken other than by overlap (at her place when lost - still_s - taken
+            # back, an unsure box) only if her other camera sees her within that many sigmas, and no box another
+            # joined cow's other camera says is hers; link_cross_veto (0: off): no box at all farther. The barn's
+            # 19 Oct: three cows side by side swapped tracks on cam2 (one walked in front of another) while cam1 saw
+            # each where she was - played again, none swapped; a cow on her own track cam2 88 -> 92%, cam1 of 23 Oct
+            # 56 -> 68%, a cow on both cameras in her one group 66 -> 68% / 51 -> 59%. The veto lost on 23 Oct
+            # (cameras' floors farther apart there): off
+            "link_cross_w": 0.2, "link_cross_confirm": 2.0, "link_cross_veto": 0.0, "link_cross_sigma": 0.0,
             "body_height_lying": 55.0, "body_height_standing": 90.0,
             # the cameras' clocks from cows walking on two of them (TrackletLinker.clocks; said at the end of a run):
             # the shift of one's floor path, within lag_max_s, that lays it best on the other's over lag_window_s.

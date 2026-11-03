@@ -351,6 +351,7 @@ RULES = [
     ("llr-strayed", {"mode": "link", "link_rule": "llr", "link_strayed": 0.0}),     # link_strayed off
     ("llr-rival", {"mode": "link", "link_rule": "llr", "link_rival": 0.0}),          # link_rival off
     ("llr-overlap", {"mode": "link", "link_rule": "llr", "link_overlap_s": 0.0}),    # link_overlap_s off
+    ("llr-cross", {"mode": "link", "link_rule": "llr", "link_cross_w": 0.0, "link_cross_confirm": 0.0}),  # off
     ("llr+px", {"mode": "link", "link_rule": "llr", "link_sigma": 30.0, "link_px": 8.0}),
     ("llr+px+spread", {"mode": "link", "link_rule": "llr", "link_sigma": 30.0, "link_px": 8.0, "link_learn_spread": True}),
     ("llr+look+self-calib", {"mode": "link", "link_rule": "llr", "link_look_cm": 300.0, "link_learn_offset": True}),

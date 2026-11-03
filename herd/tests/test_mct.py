@@ -1696,3 +1696,43 @@ def test_two_tracks_of_one_camera_seen_together_leave_one_group():
                                  "b": [{"box": box(0.3), "track": "bX"}]})
     assert lk.root("a2") == lk.root("bX") != lk.root("a1")
     assert lk.stats["unlinked_seen_together"] == 1
+
+
+def _steal_scene(cross):
+    """Cows X and Y seen by two cameras a and b, joined. Then on camera a X is hidden and Y walks unseen into X's
+    place; camera b sees X go off and Y come there. -> the track camera a gives the box at X's place."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x, y: [x - 0.05, y - 0.05, x + 0.05, y + 0.05]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_cross_w=0.2 if cross else 0.0,
+                      link_cross_confirm=2.0 if cross else 0.0)
+    lk = mct.TrackletLinker(cfg)
+    for k in range(90):
+        xb = (0.3, min(0.9, 0.5 + 0.04 * max(0, k - 59)))                    # b: X walks off along y from 60
+        yb = (max(0.3, 0.6 - 0.0375 * max(0, k - 61)), 0.5)                  # b: Y walks to X's place from 62
+        a = [] if k < 60 else None
+        if k < 60:
+            a = [{"box": box(0.3, 0.5)}, {"box": box(0.6, 0.5)}]
+        elif k < 64:
+            a = [{"box": box(0.6, 0.5)}]                                      # a: X hidden, Y still there
+        elif k < 70:
+            a = []                                                            # a: Y unseen too
+        else:
+            a = [{"box": box(0.3, 0.5)}]                                      # a: Y at X's place
+        out = lk.update_all(float(k), {"a": a, "b": [{"box": box(*xb)}, {"box": box(*yb)}]})
+        if k == 59:
+            x_a, x_b = lk.raw_last["a"][0], lk.raw_last["b"][0]
+        if k == 75:
+            return lk, x_a, x_b, lk.raw_last["a"][0]
+
+
+def test_link_cross_a_lost_cows_track_takes_no_box_its_other_camera_says_is_another():
+    """Camera a lost cow X; her neighbour walked unseen into X's place. X's track there, waiting at her place
+    (still_s), took her box - unless her other camera, which sees X gone off, is asked (link_cross_confirm)."""
+    lk, x_a, x_b, got = _steal_scene(True)
+    assert lk.root(x_a) == lk.root(x_b)                                     # X joined across the cameras
+    assert got != x_a                                                       # Y's box: not X's track
+    lk0, x_a0, _, got0 = _steal_scene(False)
+    assert got0 == x_a0                                                     # without: X's track took it

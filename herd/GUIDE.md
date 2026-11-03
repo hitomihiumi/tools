@@ -497,6 +497,20 @@ evidence with the group's other cameras leaving (before, a track taken back late
 for minutes). The barn's four trials relinked: IDF1 68.2 -> 69.0%, 74.0%, 77.7 -> 79.1%, 77.5 -> 78.9%; cow 19 on
 one track on both cameras 27 -> 56 of 56 moments; `mct_sim` alike (0.692 -> 0.693).
 
+**A joined track asks its other camera (`link_cross_w` 0.2, `link_cross_confirm` 2).** On 19 Oct three cows
+side by side swapped tracks on cam2 (one walked in front of another and hid her: the hidden cow's track, waiting
+at her place - `still_s` - took the walker's box, an unsure one because a merged box held it) while cam1 saw each
+where she was. A camera's track joined across cameras now chooses its box with the other camera's word: where
+its joined track there sees the cow now (the pair's own offset over the last minute taken off), in sigmas of
+`link_cross_sigma` (0: `link_sigma`, else `link_dist` / 2.5) - a bonus of up to `link_cross_w` for a box right
+there, and a box taken other than by overlap (at her place when lost, taken back, an unsure box) only if her
+other camera sees her within `link_cross_confirm` sigmas, and never one another joined cow's other camera says
+is hers. Both cameras' tracker played again over the trials' boxes: on 19 Oct none of the three swapped, a cow on
+her own track cam2 88 -> 92% (changes 7 -> 3); on 23 Oct cam1 56 -> 68%, a cow on both cameras in her one group
+51 -> 59%; `mct_sim` one track on both 80 -> 83%, two cows on one track 554 -> 378 seconds. `link_cross_veto`
+(no box at all farther than that many sigmas) helped 19 Oct but lost on 23 Oct, where the two floors lie
+farther apart: off. A wrong join can lead a track astray with it - the joins' own rules undo those.
+
 **A camera unsure of a joined cow's name no longer undoes it.** `report.track_map` named a joined group only when
 every camera's bursts had a two-thirds majority: the barn's cow 10 (cam1 4 bursts to 3, cam2 2 to 0) went unnamed
 for the whole recording. Now the cameras that are sure name her, the unsure one left out (none sure: all the

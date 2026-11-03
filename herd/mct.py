@@ -225,6 +225,10 @@ class GlobalTracker:
         self.kalman = bool(cfg["tracker"].get("kalman", False))
         self.low_iou = cfg["tracker"].get("low_iou", 0.5)
         self.inside_low = cfg["tracker"].get("inside_low", 0.0)
+        # set by TrackletLinker ([mct] link_cross_w / link_cross_veto): (cam, gid, ts) -> where another camera sees
+        # this track's cow now (floor), or None; a box's own floor point in d["xy_link"]
+        self.partner, self.cross_w, self.cross_veto, self.cross_sigma = None, 0.0, 0.0, 1.0
+        self.cross_confirm, self._there = 0.0, {}
         self.neighbours = collections.defaultdict(set)
         for a, b in m.get("neighbours", []):
             self.neighbours[a].add(b), self.neighbours[b].add(a)
@@ -264,6 +268,10 @@ class GlobalTracker:
         lo = [j for j, d in enumerate(dets) if d.get("low")]
         sure = [dets[j] for j in hi]
         with self.lock:
+            # where another camera sees each of this camera's joined cows now (TrackletLinker), for both rounds
+            hold = max(self.m["reacquire_s"], self.m.get("still_s", 0), self.m.get("still_long_s", 0))
+            self._there = {t.gid: th for t in self.tracks.values() if cam in t.cams and ts - t.cams[cam]["last"] <= hold
+                           for th in [self.partner(cam, t.gid, ts)] if th is not None} if self.partner else {}
             out = [None] * len(sure)
             taken = set()
             self._same_camera(cam, ts, sure, out, taken)
@@ -308,9 +316,14 @@ class GlobalTracker:
         for i, t in enumerate(mine):
             seen = t.cams[cam]
             age = ts - seen["last"]
+            there = self._there.get(t.gid)
             for k, d in enumerate(lows):
+                if self._cross(there, d) is None:        # another camera sees her elsewhere
+                    continue
                 v = max(iou(self._expected(seen, ts), d["box"]), iou(seen["box"], d["box"])) \
                     if age <= self.max_age else 0.0
+                if v < self.low_iou and not self._weak_ok(t.gid, there, d):
+                    continue                             # at her place only if her other camera agrees
                 if v >= self.low_iou:
                     S[i, k] = v
                 elif (age <= m.get("still_s", 0) or (age <= m.get("still_long_s", 0) and self._was_still(seen))) \
@@ -346,28 +359,61 @@ class GlobalTracker:
         if not mine or not dets:
             return
         S = np.full((len(mine), len(dets)), NEG)
+        theres = [self._there.get(t.gid) for t in mine]
         for i, t in enumerate(mine):
             seen = t.cams[cam]
             age = ts - seen["last"]
             ref = self._expected(seen, ts) if age <= self.max_age else seen["box"]
+            there = theres[i]
             for j, d in enumerate(dets):
+                x = self._cross(there, d)
+                if x is None:                            # another camera sees her elsewhere: not this box
+                    continue
+                weak_ok = self._weak_ok(t.gid, there, d)
                 # where her speed puts her, or where she was (a cow that stopped short of the guess)
                 v, c = max(iou(ref, d["box"]), iou(seen["box"], d["box"])), self._cos(t, d)
                 if age <= self.max_age and v >= self.min_iou:
-                    S[i, j] = m["w_iou"] * v + (1 - m["w_iou"]) * (0.5 if c is None else c)
+                    S[i, j] = m["w_iou"] * v + (1 - m["w_iou"]) * (0.5 if c is None else c) + x
+                elif not weak_ok:
+                    continue
                 elif (age <= m.get("still_s", 0) or (age <= m.get("still_long_s", 0) and self._was_still(seen))) \
                         and self._same_place(seen["box"], d["box"], iou(seen["box"], d["box"])):
-                    S[i, j] = m["w_iou"] * max(iou(seen["box"], d["box"]), 0.3)   # lying still: back at the same place
+                    S[i, j] = m["w_iou"] * max(iou(seen["box"], d["box"]), 0.3) + x   # lying still: back at her place
                 elif age <= m["reacquire_s"] and c is not None and c >= m["reacquire_sim"]:
                     # lost a moment (hidden, missed): near where she was and still looking like her
                     (ax, ay), (bx, by) = _centre(seen["box"]), _centre(d["box"])
                     if ((ax - bx) ** 2 + (ay - by) ** 2) ** 0.5 <= m["reacquire_dist"]:
-                        S[i, j] = (1 - m["w_iou"]) * c
+                        S[i, j] = (1 - m["w_iou"]) * c + x
         for i, j in assign(S):
             out[j] = mine[i].gid
             taken.add(mine[i].gid)
             if ts - mine[i].cams[cam]["last"] > self.max_age or iou(mine[i].cams[cam]["box"], dets[j]["box"]) < self.min_iou:
                 self.stats["reacquired"] += 1
+
+    def _cross(self, there, d):
+        """A box against where another camera sees the track's cow now (TrackletLinker: her joined track there):
+        None when farther than cross_veto sigmas (the box is another cow's), else a bonus of up to cross_w for a
+        box right there; 0 with no other camera to ask."""
+        q = d.get("xy_link")
+        if there is None or q is None:
+            return 0.0
+        z2 = ((there[0] - q[0]) ** 2 + (there[1] - q[1]) ** 2) / self.cross_sigma ** 2
+        if self.cross_veto and z2 > self.cross_veto ** 2:
+            return None
+        return self.cross_w * float(np.exp(-z2 / 2))
+
+    def _weak_ok(self, gid, there, d):
+        """A track may take box d other than by overlap (at its lost cow's place, taken back, an unsure box there)
+        only if its other camera sees her there (within cross_confirm sigmas) - and no other joined track's other
+        camera says d is its cow (within a sigma). With no other camera to ask: as before."""
+        q = d.get("xy_link")
+        if q is None or not self._there:
+            return True
+        z = lambda th: ((th[0] - q[0]) ** 2 + (th[1] - q[1]) ** 2) ** 0.5 / self.cross_sigma
+        if there is not None and self.cross_confirm and z(there) > self.cross_confirm:
+            return False
+        mine = z(there) if there is not None else None
+        return not any(g != gid and z(th) <= 1.0 and (mine is None or z(th) < mine) for g, th in self._there.items())
 
     def _same_place(self, a, b, v):
         m = self.m
@@ -869,6 +915,19 @@ class TrackletLinker:
                     cameras=[{k: v for k, v in c.items() if k not in ("proj_mat", "floor_points")}
                              for c in cfg["cameras"]])
         self.cam_tracker = GlobalTracker(solo, None, None)
+        # link_cross_w / link_cross_veto (llr): a joined track's box chosen with where its other camera sees the cow
+        # now (her joined track there, the pair's own offset of the last minute taken off): a bonus of up to
+        # link_cross_w for a box right there, and no box farther than link_cross_veto sigmas - by overlap, at her
+        # place when she was lost (still_s), taken back (reacquire_s), or an unsure one. One camera's tracks of
+        # cows side by side swapped while the other camera saw them where they were (the barn's 19 Oct, cam2)
+        self.cross_w, self.cross_veto = m.get("link_cross_w", 0.0), m.get("link_cross_veto", 0.0)
+        self.cross_confirm = m.get("link_cross_confirm", 0.0)
+        if m.get("link_rule") == "llr" and (self.cross_w or self.cross_veto or self.cross_confirm):
+            self.cam_tracker.partner = self._partner_at
+            self.cam_tracker.cross_w, self.cam_tracker.cross_veto = self.cross_w, self.cross_veto
+            self.cam_tracker.cross_confirm = self.cross_confirm
+            self.cam_tracker.cross_sigma = m.get("link_cross_sigma") or (m.get("link_sigma") or
+                                                                          m.get("link_dist", 120.0) / 2.5)
         self.floor = {c["id"]: floor_mapper(c, m) for c in cfg["cameras"]}
         self.floor_model = dict(self.floor)                  # the calibration itself: its derivative (link_px_sigma)
         self.dist = m.get("link_dist", 120.0)
@@ -1522,7 +1581,10 @@ class TrackletLinker:
             self.last_ts = ts
             if self.rule == "llr" and (self.flushed is None or ts - self.flushed >= 600):
                 self._forget(ts)
-            # each camera's tracks as given (a store replayed: herd.py relink), else its own tracker's
+            # each camera's tracks as given (a store replayed: herd.py relink), else its own tracker's - its boxes'
+            # floor points along, for a joined track to ask its other camera where the cow is (link_cross_*)
+            if self.cam_tracker.partner is not None:
+                per_cam = {cam: self._with_floor(cam, ds) for cam, ds in per_cam.items()}
             raw = {cam: ([d["track"] for d in ds] if ds and all("track" in d for d in ds)
                          else self.cam_tracker.update(cam, ts, ds)) for cam, ds in per_cam.items()}
             # the low boxes no track took ([tracker] low_score) are no cow here: left out, None in the answer
@@ -1595,6 +1657,34 @@ class TrackletLinker:
             self.raw_last = raw
             return {cam: [None if g is None else self.root(g) for g in gs] for cam, gs in raw.items()}
 
+    def _with_floor(self, cam, ds):
+        pts = self._points(cam, ds) if ds and not all("track" in d for d in ds) else None
+        return [dict(d, xy_link=self._at(p)) for d, p in zip(ds, pts)] if pts else ds
+
+    def _partner_at(self, cam, gid, ts):
+        """Where the cameras gid is joined to see its cow now (their tracks' last second, each pair's offset over
+        the last minute taken off) - None when none saw her a moment ago."""
+        r = self.root(gid)
+        group = self.members.get(r) or set()
+        if len(group) < 2:
+            return None
+        mine = self.path.get(gid)
+        out = []
+        for o in group | {r}:
+            if o == gid or o not in self.life or self.life[o][0] == cam:
+                continue
+            q = self.path.get(o)
+            if not q or ts - q[-1][0] > 2.0:
+                continue
+            off = (0.0, 0.0)
+            if mine:
+                at = {t: (x, y) for t, x, y in q if t >= ts - 60}
+                d = [(x - at[t][0], y - at[t][1]) for t, x, y in mine if t in at]
+                if len(d) >= 10:
+                    off = tuple(np.median(np.array(d), 0))
+            out.append((q[-1][1] + off[0], q[-1][2] + off[1]))
+        return tuple(np.mean(np.array(out), 0)) if out else None
+
     def track_at(self, cam, ts, box):
         t = self.cam_tracker.track_at(cam, ts, box)
         return None if t is None else self.root(t)
@@ -1604,6 +1694,9 @@ class TrackletLinker:
         return self.cam_tracker.track_at(cam, ts, box)
 
     def track_only(self, cam, ts, dets):
-        """A frame between the seconds: the camera's own tracker only (no joining - that is per second)."""
+        """A frame between the seconds: the camera's own tracker only (no joining - that is per second); its boxes'
+        floor points along for a joined track to ask its other camera (link_cross_*)."""
         with self.lock:
+            if self.cam_tracker.partner is not None:
+                dets = self._with_floor(cam, dets)
             self.cam_tracker.update(cam, ts, dets)
