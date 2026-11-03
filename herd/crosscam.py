@@ -53,7 +53,9 @@ MIN_PAIRS = 6
 K_GRID = (0.0, -0.1, -0.2, -0.3, -0.4, -0.5, -0.6)    # lens distortions tried (common.undistort's k)
 DEPTH = (1.0, 1.5, 2.0, 3.0, 4.0, 6.0, 8.0, 12.0, 16.0, 24.0, 32.0)   # the plan's stretches tried, each every 15 deg
 DEPTH_GAIN = 0.03     # --depth auto: kept when it matches the right cow this much more often than the plan as is
-UNSEEN = 1.3          # one cow's two points further apart on minutes the mapping was not learnt from (barn: 1.2-1.3)
+UNSEEN = 1.0          # link_dist from one cow's two points as learnt here: the barn's trials of 19 and 23 Oct joined best
+                      # at 140-180 (crosscam had said 230 with 1.3 for minutes it did not learn from: cows side by side
+                      # joined crossed - a neighbour 1.3 m off still evidence for)
 
 
 def lens(cam, w, h):
@@ -791,8 +793,8 @@ def main(argv=None):
                     link_dist = 2.5 * UNSEEN * m[2] / 1.177
                     r["depth"].update(cameras=on, link_dist=int(link_dist))
                     print(f"  --depth: {', '.join(on)} stretched {s:g}x along {deg} degrees; [mct] link_dist "
-                          f"{int(link_dist)} (one cow's two points {m[2]:.0f} apart here, ~{UNSEEN:g}x that on minutes "
-                          f"it was not learnt from - after a trial, its log's 50th percentile is the truer)")
+                          f"{int(link_dist)} (one cow's two points {m[2]:.0f} apart here; a trial played again with "
+                          f"trial --relink at a few link_dist says which joins best)")
             elif s > 1 and args.depth == "auto":
                 print(f"  --depth: {gain:+.0%} only - the plan kept")
     out = args.out or os.path.dirname(os.path.abspath(os.path.join(args.boxes, "frames.json")))

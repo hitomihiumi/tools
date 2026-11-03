@@ -511,6 +511,14 @@ her own track cam2 88 -> 92% (changes 7 -> 3); on 23 Oct cam1 56 -> 68%, a cow o
 (no box at all farther than that many sigmas) helped 19 Oct but lost on 23 Oct, where the two floors lie
 farther apart: off. A wrong join can lead a track astray with it - the joins' own rules undo those.
 
+**How wide (`link_dist`).** llr's sigma is `link_dist` / 2.5: at 230 (what `crosscam --depth` said with a margin
+for minutes it had not learnt from) a neighbour 1.3 m off still adds +2.6 a second against the cow's +3.5 - the
+barn's cows 25 and 35 of 19 Oct, joined crossed in the first two minutes (25 then hid 35 on cam2), stayed so. The
+two recordings played again (`trial --relink`) at 110 / 140 / 160 / 180 / 230: 19 Oct IDF1 78.2% at 110-180 (a cow
+on both cameras under one name 92%) against 78.1% (82%) at 230; 23 Oct 78.0 / 79.4 / 79.7 / 79.5 / 78.9%. 160 for
+the barn's cam1-cam2; `crosscam --depth` now says about 2.1 x one cow's two points' median distance (no margin).
+Yours: `trial --relink` at a few values - minutes, no GPU.
+
 **A camera unsure of a joined cow's name no longer undoes it.** `report.track_map` named a joined group only when
 every camera's bursts had a two-thirds majority: the barn's cow 10 (cam1 4 bursts to 3, cam2 2 to 0) went unnamed
 for the whole recording. Now the cameras that are sure name her, the unsure one left out (none sure: all the
