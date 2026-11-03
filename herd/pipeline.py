@@ -264,14 +264,15 @@ class Models:
         if self.dev.type == "cuda":
             self.torch.cuda.synchronize()
 
-    def detect(self, img, urgent=False, kind="detect"):
-        return self.detect_many([img], urgent=urgent, kind=kind)[0]
+    def detect(self, img, urgent=False, kind="detect", tiles=None):
+        return self.detect_many([img], urgent=urgent, kind=kind, tiles=tiles)[0]
 
-    def detect_split(self, img, urgent=False, kind="detect"):
+    def detect_split(self, img, urgent=False, kind="detect", tiles=None):
         """(sure boxes, low boxes): low ones under the detector's threshold, down to [tracker] low_score."""
-        return self.detect_many([img], urgent=urgent, kind=kind, split=True)[0]
+        return self.detect_many([img], urgent=urgent, kind=kind, split=True, tiles=tiles)[0]
 
-    def detect_many(self, imgs, batch=8, urgent=False, kind="detect", split=False):
+    def detect_many(self, imgs, batch=8, urgent=False, kind="detect", split=False, tiles=None):
+        """tiles: a camera's own ([[cameras]] tiles: far cows the detector merged), else [detector] tiles."""
         from PIL import Image
         out = []
         many = getattr(self.detector, "many", None)
@@ -279,7 +280,8 @@ class Models:
         for i in range(0, len(imgs), step):
             pils = [Image.fromarray(x) for x in imgs[i:i + step]]
             with self.gpu(urgent, kind):
-                res = many(pils) if many else [self.detector(pils[0])]
+                res = ((many(pils, tiles=tiles) if tiles is not None else many(pils)) if many
+                       else [self.detector(pils[0])])
             for r in res:
                 sure = [c["bbox"] for c in r if c.get("det_score", 1.0) >= self.det_high]
                 out.append((sure, [c["bbox"] for c in r if c.get("det_score", 1.0) < self.det_high]) if split else sure)
@@ -397,6 +399,9 @@ class Camera:
         self.cam, self.cfg, self.models, self.gallery, self.store = cam, cfg, models, gallery, store
         self.id = cam["id"]
         self.mask = cam.get("mask", [])
+        # [[cameras]] tiles = true: this camera's frames to the detector whole and in square tiles (far cows ~1.8x
+        # wider: a row of them seen far off as one box, the barn's cam4), the others as [detector] tiles says
+        self.tiles = {"tiles": bool(cam["tiles"])} if cam.get("tiles") is not None else {}
         self.fps_out = s["fps"]
         self.burst_s, self.burst_every, self.burst_det_fps = s["burst_seconds"], s["burst_every_s"], s["burst_detect_fps"]
         self.width = s["frame_width"]
@@ -498,8 +503,8 @@ class Camera:
         low_on = (self.cfg["tracker"].get("low_score") or 0) > 0 and hasattr(self.models, "detect_split") and \
             not (self.glob is not None and self.cfg["mct"].get("mode") == "fused")
         if not low_on:
-            return self.zone(self.models.detect(self.blank(img), urgent=True, kind=kind), img), []
-        sure, low = self.models.detect_split(self.blank(img), urgent=True, kind=kind)
+            return self.zone(self.models.detect(self.blank(img), urgent=True, kind=kind, **self.tiles), img), []
+        sure, low = self.models.detect_split(self.blank(img), urgent=True, kind=kind, **self.tiles)
         return self.zone(sure, img), self.zone(low, img)
 
     def track_only(self, ts, img):
@@ -599,7 +604,8 @@ class Camera:
         step = max(1, int(round(len(frames) / (self.burst_s * self.burst_det_fps))))
         sampled = frames[::step]
         t = time.perf_counter()
-        detections = self.models.detect_many([self.blank(img) for _, img in sampled], kind="burst_detect")
+        detections = self.models.detect_many([self.blank(img) for _, img in sampled], kind="burst_detect",
+                                             **self.tiles)
         part["detect"] += time.perf_counter() - t
         chains = link_chains([(ts, self.zone(found, img)) for (ts, img), found in zip(sampled, detections)],
                              self.cfg["tracker"]["iou"])

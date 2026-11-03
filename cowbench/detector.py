@@ -379,16 +379,18 @@ class Live:
         """PIL image -> [{"bbox": [x1, y1, x2, y2] (0-1), "det_score"}], above the threshold."""
         return self.many([img])[0]
 
-    def many(self, imgs):
-        """Several PIL images in one pass (herd's bursts): a list per image."""
+    def many(self, imgs, tiles=None):
+        """Several PIL images in one pass (herd's bursts): a list per image. tiles: this call's (a camera's own
+        [[cameras]] tiles), else the detector's."""
+        tiles = self.tiles if tiles is None else bool(tiles)
         with self._lock:
             # keep=threshold: nothing below it is used, and NMS over tiles stays small
             if self._predict is not None:
                 res = (predict_tiled(None, None, list(imgs), keep=self.threshold, predict_fn=self._predict)
-                       if self.tiles else self._predict(list(imgs), self.threshold))
+                       if tiles else self._predict(list(imgs), self.threshold))
             else:
-                res = (predict_tiled if self.tiles else predict)(self.model, self.processor, list(imgs),
-                                                                  keep=self.threshold)
+                res = (predict_tiled if tiles else predict)(self.model, self.processor, list(imgs),
+                                                             keep=self.threshold)
         return [[{"bbox": calibrate_box(b[:4], self.calib), "det_score": b[4]} for b in boxes if b[4] >= self.threshold]
                 for boxes in res]
 

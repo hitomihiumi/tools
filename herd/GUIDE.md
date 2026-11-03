@@ -525,6 +525,13 @@ held both names and took the one with more bursts - both -07. Two groups alive a
 A by one camera and B by the other, the other way round, each camera all but sure (90% of its bursts): each takes
 one, the way most of their bursts say. 19 Oct relinked: IDF1 78.2 -> 80.2%; the four trials of 23 Oct unchanged.
 
+**A camera of its own tiles (`[[cameras]] tiles = true`).** The barn's cam4 of 19 Oct missed 32% of the labelled
+cows; of those inside its tracking zone two thirds (131 of 197) lay in one box with a neighbour - a row of far cows
+the detector saw as one (small: 0.4% of the frame against 0.9% for those found). `[detector] tiles` (the frame
+whole and in square tiles, far cows ~1.8x wider) costs every camera ~3x the detector's work; a camera's own
+`tiles` turns it on for that camera alone (its seconds, the frames between, its bursts; studio and the zones page
+show its cows so too). Check it with `trial` on your labels.
+
 **A camera unsure of a joined cow's name no longer undoes it.** `report.track_map` named a joined group only when
 every camera's bursts had a two-thirds majority: the barn's cow 10 (cam1 4 bursts to 3, cam2 2 to 0) went unnamed
 for the whole recording. Now the cameras that are sure name her, the unsure one left out (none sure: all the

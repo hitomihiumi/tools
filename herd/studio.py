@@ -284,7 +284,9 @@ class Studio:
             self.boxes[cam] = []
             if self.live is not None:
                 from PIL import Image
-                found = self.live(Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB)))
+                pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+                own = next((c.get("tiles") for c in self.cfg["cameras"] if c["id"] == cam), None)
+                found = self.live.many([pil], tiles=own)[0] if own is not None else self.live(pil)
                 self.boxes[cam] = [[round(float(v), 4) for v in d["bbox"]] for d in found]
         return moment
 

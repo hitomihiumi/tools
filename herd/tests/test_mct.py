@@ -1755,3 +1755,25 @@ def test_report_two_cows_named_crossed_get_a_name_each():
         tm = report.track_map(store)
         assert tm["x1"] == tm["x2"] != tm["y1"] == tm["y2"]
         assert tm["y1"] == "A" and tm["x1"] == "B"                          # 8 + 6 beats 8 + 5
+
+
+def test_a_camera_of_its_own_tiles_asks_the_detector_so():
+    """[[cameras]] tiles = true: that camera's frames go to the detector in tiles (far cows seen as one box), the
+    others as [detector] tiles says."""
+    import pipeline
+    from store import Store
+
+    class Models(_FakeModels):
+        def detect(self, img, **kw):
+            self.asked.append(kw.get("tiles"))
+            return self.boxes
+    cfg = _mct_cfg([("cam1", {}), ("cam4", {"tiles": True})], enabled=False)
+    cfg["cameras"] = [dict(c, min_box_pct=0.0, min_box_side_px=0) for c in cfg["cameras"]]
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+        models = Models()
+        models.boxes, models.ids, models.asked = [], {}, []
+        for i, c in enumerate(cfg["cameras"]):
+            pipeline.Camera(c, i, 2, cfg, models, shared, store, 0.0).second(0.0, np.zeros((64, 64, 3), np.uint8))
+        assert models.asked == [None, True]
