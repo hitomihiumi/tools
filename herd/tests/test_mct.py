@@ -1795,3 +1795,36 @@ def test_report_two_cows_alive_at_once_do_not_share_a_name():
         store.link_tracks(150.0, "b1", "b2")
         tm = report.track_map(store)
         assert tm["a1"] == tm["a2"] == "Y" and tm["b1"] == tm["b2"] == "X"
+
+
+def test_claims_hold_a_cow_against_a_neighbours_group_on_another_camera():
+    """Cow A confirmed on cam2's track; cam1's track of her neighbour, never seen with it (another camera), whose
+    joined group holds a cam1 track alive beside A's group's cam1 track: two cows - A is held there too."""
+    import pipeline
+    from store import Store
+    a, b = np.eye(16)[0], np.eye(16)[2]
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {"A": a, "B": b}), store, _cfg(), 1000.0)
+        shared.groups = lambda x, y: {x, y} == {"g-A", "g-n"}        # the linker: two groups, two cows
+        out = lambda v: {"fingerprint": v, "quality_max": 0.5, "quality_mean": 0.5}
+        assert shared.decide(out(_unit(a)), 0.05, 1000.0, "g-A")["cow"] == "A"
+        assert shared.decide(out(_unit(a * 0.9 + b * 0.25)), 0.05, 1010.0, "g-n")["cow"] != "A"
+        assert shared.decide(out(_unit(a)), 0.05, 1020.0, "g-other")["cow"] == "A"   # not known apart: may be her
+
+
+def test_linker_two_cows_by_their_groups():
+    """Two joined groups with tracks of one camera alive at the same time are two cows; one group is one cow."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5)
+    lk = mct.TrackletLinker(cfg)
+    for k in range(60):
+        lk.update_all(float(k), {"a": [{"box": box(0.3), "track": "a1"}, {"box": box(0.7), "track": "a2"}],
+                                 "b": [{"box": box(0.3), "track": "b1"}, {"box": box(0.7), "track": "b2"}]})
+    assert lk.root("a1") == lk.root("b1") and lk.root("a2") == lk.root("b2")
+    assert lk.two_cows("b1", "b2") and lk.two_cows("a1", "b2")            # b2's group holds a2, alive beside a1
+    assert not lk.two_cows("a1", "b1")

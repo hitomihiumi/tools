@@ -309,7 +309,8 @@ What holds even without `[mct]`:
   gallery together (best assignment, no cow twice), and a cow confirmed on one track
   is held by it for `claim_s` (120 s): another track seen at the same time gets her
   only with a burst surer by `claim_steal_margin` (0.08), else the next cow
-  (`claim-kept` events).
+  (`claim-kept` events). With `[mct]` the joins count too: a track joined to one seen
+  together with the cow's track on another camera is another cow.
 - **new cows** are grouped by average linkage of whole tracks, never joining two
   tracks seen together; with `max_cows` set (the herd's size) no new ids are made at
   the limit — the bursts wait (`held_back_herd_full` in the nightly event).
@@ -528,6 +529,15 @@ Any other two groups alive at once on one camera that took one name (23 Oct: cam
 had named cow 6 - both -01 for 975 s): the one whose other name (its cameras named it differently) costs it less to
 take, takes it, if no group beside it has it. trial_39 of 23 Oct: IDF1 77.4 -> 78.9%, one cow twice on one camera
 975 -> 2 s; the other trials unchanged (one -0.1).
+
+**The gallery's claims see the joins.** A cow confirmed on one track is held by it for `claim_s`; another track
+seen at the same time gets her only with a surer burst. "At the same time" was one camera's: a cow on cam1 could
+take a neighbour cam2 held, though cam2's track of hers was alive beside cam2's track of the neighbour. trial_39 of
+23 Oct: cow 10 (cam1 and cam2 joined, 43 moments) was never enrolled - her bursts went to cow 12 (-03) and cow 11
+(-10) at 0.92-0.98 while those two were held on cam2, and her group was left without a name 40 of 43 moments. The
+claims now also ask the linker: two tracks whose joined groups hold two tracks of one camera alive at once are two
+cows (`TrackletLinker.two_cows`), so her bursts go to the next cow or a new one. Only a full `trial` shows it
+(`--relink` keeps the names; the fingerprints are not stored).
 
 **A camera of its own tiles (`[[cameras]] tiles = true`).** The barn's cam4 of 19 Oct missed 32% of the labelled
 cows; of those inside its tracking zone two thirds (131 of 197) lay in one box with a neighbour - a row of far cows

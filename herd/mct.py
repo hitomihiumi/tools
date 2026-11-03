@@ -880,6 +880,10 @@ class FusedSeconds:
     def track_at(self, cam, ts, box):
         return self.ft.track_at(cam, ts, box)
 
+    def two_cows(self, a, b):
+        f = getattr(self.ft, "two_cows", None)
+        return bool(f and f(a, b))
+
     def track_at_raw(self, cam, ts, box):
         f = getattr(self.ft, "track_at_raw", None)
         return f(cam, ts, box) if f else self.ft.track_at(cam, ts, box)
@@ -1656,6 +1660,20 @@ class TrackletLinker:
                                 self._union(k[0], k[1], ts)
             self.raw_last = raw
             return {cam: [None if g is None else self.root(g) for g in gs] for cam, gs in raw.items()}
+
+    def two_cows(self, a, b):
+        """a and b (tracks, or the joined groups they are in) hold tracks of one camera alive at the same time: two
+        cows for certain - whichever camera each was seen on (the gallery's claims: one cow's name not on two). Read
+        without the lock (the gallery asks under its own): a moment's change gives no answer."""
+        try:
+            ra, rb = self.root(a), self.root(b)
+            if ra == rb or ra not in self.life or rb not in self.life:
+                return False
+            ga = set(self.members.get(ra) or ()) | {ra}
+            gb = set(self.members.get(rb) or ()) | {rb}
+            return any(x in self.life and y in self.life and self._clash(x, y) for x in ga for y in gb)
+        except (RuntimeError, KeyError):
+            return False
 
     def _with_floor(self, cam, ds):
         pts = self._points(cam, ds) if ds and not all("track" in d for d in ds) else None

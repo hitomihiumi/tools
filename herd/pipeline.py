@@ -753,6 +753,7 @@ class SharedGallery:
         from mct import CoSeen
         self.co_seen = CoSeen(cfg["identity"].get("cannot_link_min_s", 5), cfg["identity"].get("cannot_link_max_iou", 0.3))
         self.claims = {}                         # cow -> (track, ts, p or sim)
+        self.groups = None                       # [mct] link: (a, b) -> two cows by the joined groups (TrackletLinker)
         self._counted, self._counted_n, self._counted_pruned = {}, {}, start_ts   # counted(): second -> cam -> tracks
         self._masked = {c["id"] for c in cfg.get("cameras", []) if c.get("mask")}
         self._faces = {}                         # (cow, cam) -> ts of the last face kept
@@ -826,7 +827,14 @@ class SharedGallery:
                     self._pending_links.append(k)
 
     def apart(self, a, b):
-        return a != b and (min(a, b), max(a, b)) in self.cannot_link
+        """Two cows: seen at once on one camera (cannot_link) - or, with [mct] link, in two joined groups holding
+        tracks of one camera alive at the same time (a cow on cam1 and her neighbour's group, joined across cameras:
+        the barn's cow 10 of 23 Oct took her neighbour 12's name while 12 was confirmed on cam2)."""
+        if a == b:
+            return False
+        if (min(a, b), max(a, b)) in self.cannot_link:
+            return True
+        return bool(self.groups is not None and self.groups(a, b))
 
     def _maintain(self, ts):
         if self.g.migration_due(ts):
@@ -1059,6 +1067,8 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
             glob = GlobalTracker(cfg, store, shared.separate)
         for cam in cams:
             cam.glob = glob
+        if hasattr(glob, "two_cows"):
+            shared.groups = glob.two_cows               # the claims ask the joins which tracks are two cows
     if cfg["training_cache"]["enabled"]:
         from barn_dataset import TrainingCache
         meta = dict(models.features_meta, dim=models.features_meta.get("dim") or models.encoder.out_dim)
