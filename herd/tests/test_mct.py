@@ -1828,3 +1828,36 @@ def test_linker_two_cows_by_their_groups():
     assert lk.root("a1") == lk.root("b1") and lk.root("a2") == lk.root("b2")
     assert lk.two_cows("b1", "b2") and lk.two_cows("a1", "b2")            # b2's group holds a2, alive beside a1
     assert not lk.two_cows("a1", "b1")
+
+
+def test_a_camera_stopped_by_an_error_is_said_and_frees_the_others(monkeypatch, capsys):
+    """An error in one camera's work ends that camera only (Lockstep lets the others on) - and is kept with how far
+    its recording got, for herd.py trial to say beside the score instead of scoring a shorter recording silently."""
+    import threading
+    import pipeline
+
+    class Cam:
+        def __init__(self, cid, bad_at=None):
+            self.id, self.bad_at = cid, bad_at
+
+        def push(self, ts, img):
+            pass
+
+        def step(self, ts):
+            if self.bad_at is not None and ts >= self.bad_at:
+                raise KeyError("boom")
+
+    monkeypatch.setattr(pipeline, "frames_from", lambda url, start: ((100.0 + i, None) for i in range(10)))
+    lock = pipeline.Lockstep({"cam3": 100.0, "cam4": 100.0})
+    ended = {}
+    th = [threading.Thread(target=pipeline.run_file, args=(cam, "x.mp4", 100.0), kwargs={"lockstep": lock, "ended": ended})
+          for cam in (Cam("cam3", bad_at=103.0), Cam("cam4"))]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in th)                   # cam4 did not wait for cam3 for ever
+    assert ended["cam3"][0] == 3.0 and "KeyError" in ended["cam3"][1]
+    assert ended["cam4"] == (9.0, None)
+    out = capsys.readouterr()
+    assert "[cam3] !! stopped at 0:03" in out.out and "boom" in out.err

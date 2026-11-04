@@ -969,14 +969,17 @@ class Lockstep:
             self.cv.notify_all()
 
 
-def run_file(camera, url, start_ts, every_s=60.0, lockstep=None):
+def run_file(camera, url, start_ts, every_s=60.0, lockstep=None, ended=None):
     """A recording on its own clock, as fast as it can go (with lockstep: as the slowest camera with it);
-    where it is, every every_s of recording."""
-    t0, said = time.time(), start_ts
+    where it is, every every_s of recording. ended (a dict): camera id -> (seconds of the recording played,
+    None or the error that stopped it) - an error stops this camera only, the others play on, so it is said
+    again at the end (herd.py trial: beside the score, which is then of a shorter recording)."""
+    t0, said, at = time.time(), start_ts, start_ts
     try:
         for ts, img in frames_from(url, start_ts):
             if lockstep is not None:
                 lockstep.wait(camera.id, ts)
+            at = ts
             camera.push(ts, img)
             camera.step(ts)
             if ts - said >= every_s:
@@ -984,9 +987,21 @@ def run_file(camera, url, start_ts, every_s=60.0, lockstep=None):
                 done = ts - start_ts
                 print(f"[{camera.id}] {int(done // 60)}:{int(done % 60):02d} of the recording "
                       f"({done / max(1e-6, time.time() - t0):.1f}x real time)", flush=True)
+    except Exception as e:
+        import traceback
+        done = at - start_ts
+        print(f"[{camera.id}] !! stopped at {int(done // 60)}:{int(done % 60):02d} of the recording by an error - "
+              f"the other cameras play on without it:", flush=True)
+        traceback.print_exc()
+        sys.stderr.flush()
+        if ended is not None:
+            ended[camera.id] = (done, f"{type(e).__name__}: {e}")
+        return
     finally:
         if lockstep is not None:
             lockstep.finish(camera.id)
+    if ended is not None:
+        ended[camera.id] = (at - start_ts, None)
     print(f"[{camera.id}] the recording is done", flush=True)
 
 
@@ -1083,10 +1098,12 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
     off = lambda c: float(c.get("time_offset_s") or 0.0)
     lock = Lockstep({c["id"]: c.get("start_ts", start_ts) + off(c) for c in cfg["cameras"]}) \
         if start is not None else None
+    ended = {}                                         # files: camera -> (seconds played, the error that stopped it)
     if lock is not None and cams and hasattr(getattr(cams[0], "glob", None), "files"):
         cams[0].glob.files(lock)                      # one second of all cameras met by the recordings' clock
     for cam, c in zip(cams, cfg["cameras"]):
-        target = (lambda cam=cam, c=c: run_file(cam, c["url"], c.get("start_ts", start_ts) + off(c), lockstep=lock)) \
+        target = (lambda cam=cam, c=c: run_file(cam, c["url"], c.get("start_ts", start_ts) + off(c), lockstep=lock,
+                                                ended=ended)) \
             if start is not None else \
                  (lambda cam=cam, c=c: run_live(cam, lambda: frames_from(c["url"], offset=off(c)), stop))
         th = threading.Thread(target=target, daemon=True)
@@ -1103,6 +1120,11 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
         stop.set()
         if status is not None:
             status["interrupted"] = True
+    for cid, (done, err) in sorted(ended.items()):
+        if err:
+            print(f"[run] !! {cid} stopped at {int(done // 60)}:{int(done % 60):02d} of its recording: {err}", flush=True)
+    if status is not None:
+        status["ended"] = dict(ended)
     linker = getattr(getattr(cams[0], "glob", None), "ft", None) if cams else None
     if hasattr(linker, "flush_evidence") and getattr(linker, "last_ts", None) is not None:
         linker.flush_evidence(linker.last_ts)             # the last minutes' evidence, before the night reads it

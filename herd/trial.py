@@ -43,7 +43,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import iou, load_config, recordings, sessions  # noqa: E402
 
 
-def play(cfg, groups, store_path, models):
+def play(cfg, groups, store_path, models, stopped=None):
+    """stopped (a list): (camera, seconds played, its recording's error) of every camera an error stopped."""
     import pipeline
     for k, g in enumerate(groups, 1):
         c = copy.deepcopy(cfg)
@@ -55,6 +56,9 @@ def play(cfg, groups, store_path, models):
         models = models or pipeline.Models(c)
         status = {}
         pipeline.run(c, start, models=models, status=status)
+        for cam, (done, err) in sorted((status.get("ended") or {}).items()):
+            if err and stopped is not None:
+                stopped.append((cam, done, err))
         if status.get("interrupted"):
             sys.exit("[trial] stopped (Ctrl+C)")
     return models
@@ -985,7 +989,8 @@ def main(argv=None):
     first["sampling"]["burst_every_s"] = args.burst_every
     print(f"[trial] 1/3 the first pass ({len(recs)} recordings, a burst every {args.burst_every:g} s): the gallery "
           f"collects the cows", flush=True)
-    models = play(first, groups, os.path.join(out, "pass1", "herd.sqlite"), None)
+    stopped = {"pass1": [], "pass2": []}
+    models = play(first, groups, os.path.join(out, "pass1", "herd.sqlite"), None, stopped["pass1"])
     # the night after it: the cows seen often enough get ids
     abstain = getattr(models, "id_abstain", None)
     folder = os.path.join(out, "pass1", "gallery")
@@ -1000,7 +1005,7 @@ def main(argv=None):
           + ")", flush=True)
     shutil.copytree(folder, os.path.join(out, "pass2", "gallery"))
     print("[trial] 2/3 the second pass, with those cows: who is who", flush=True)
-    play(cfg, groups, os.path.join(out, "pass2", "herd.sqlite"), models)
+    play(cfg, groups, os.path.join(out, "pass2", "herd.sqlite"), models, stopped["pass2"])
     store2 = os.path.join(out, "pass2", "herd.sqlite")
     # the second night: one cow named on two cameras by her two sides, made one by where she stood ([mct] llr)
     from pipeline import merge_by_place
@@ -1031,7 +1036,9 @@ def main(argv=None):
     per_cam, cows, odd, links = summary(store2, cfg, os.path.join(out, "pass2", "gallery"))
     report = {"cows_enrolled": res["enrolled"], "cows_in_gallery": cows, "cameras": per_cam, "impossible": odd,
               "joined_across_cameras": links,
-              "held_back_herd_full": res.get("held_back_herd_full", 0), "show": shown}
+              "held_back_herd_full": res.get("held_back_herd_full", 0), "show": shown,
+              "cameras_stopped": {k: [{"camera": c, "played_s": round(d, 1), "error": e} for c, d, e in v]
+                                  for k, v in stopped.items() if v}}
     with open(os.path.join(out, "trial.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
     print(f"\n[trial] {len(res['enrolled'])} cows made from the first pass")
@@ -1058,6 +1065,11 @@ def main(argv=None):
         with open(os.path.join(out, "score.json"), "w", encoding="utf-8") as fh:
             json.dump(sc, fh, indent=2)
         print_score(sc)
+    for k, v in stopped.items():
+        for cam, done, err in v:
+            print(f"[trial] !! {k}: {cam} stopped at {int(done // 60)}:{int(done % 60):02d} of its recording by an error "
+                  f"({err}) - the trial went on without it: its counts and the score are of less. The traceback is "
+                  f"above, under [{cam}] !! stopped", flush=True)
     print(f"-> {os.path.join(out, 'trial.json')}; the videos: " + ", ".join(shown.values()))
 
 
