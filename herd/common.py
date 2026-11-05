@@ -201,6 +201,21 @@ DEFAULTS = {
             # 56 -> 68%, a cow on both cameras in her one group 66 -> 68% / 51 -> 59%. The veto lost on 23 Oct
             # (cameras' floors farther apart there): off
             "link_cross_w": 0.2, "link_cross_confirm": 2.0, "link_cross_veto": 0.0, "link_cross_sigma": 0.0,
+            # walker_size (with [tracker] kalman): a track still for still_for_s, its box one size the last minute
+            # (within walker_stable), whose box this second is walker_size taller or shorter, while a track lost
+            # walker_s ago at most was walking (walker_speed box heights a second) and its speed puts it on that box
+            # better than the still cow's own place, at a size nearer its own: the box goes back to the walker, the
+            # still track waits at its cow's place (still_s, still_long_s). 23 Oct replayed: cow 13 on her own track
+            # 20 -> 39 of 42 moments, cow 23 6 -> 22 of 43; nothing else changed, 19 Oct unchanged. 0: off
+            "walker_size": 0.2, "walker_s": 5.0, "walker_speed": 0.15, "walker_stable": 0.05,
+            # count_holes (link): a cow outside her camera's mask that no camera counts where she is - two masks'
+            # edges, drawn on two pictures, that do not meet on the floor - is counted by the camera tracking her:
+            # joined to the other camera's track, by the one whose box of her is bigger when both are outside their
+            # masks; not joined, when the other camera has no box within count_dist of her in its mask (0: 2.5 x
+            # link_dist - her two points may lie 2-3 m apart where both cameras see far). Floor only her camera
+            # tracks, left out of its mask, stays uncounted. 23 Oct replayed with the barn's masks: your cows counted
+            # by exactly one camera 66 -> 78% (by none 286 -> 169 of 859 cow-moments, by both 2 -> 23)
+            "count_holes": True, "count_dist": 0.0, "count_cell": 100.0,
             "body_height_lying": 55.0, "body_height_standing": 90.0,
             # the cameras' clocks from cows walking on two of them (TrackletLinker.clocks; said at the end of a run):
             # the shift of one's floor path, within lag_max_s, that lays it best on the other's over lag_window_s.

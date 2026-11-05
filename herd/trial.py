@@ -162,6 +162,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     seen_as = collections.defaultdict(list)        # your id -> [(cam, ts, its cow)]: one cow on two cameras
     seen_track = collections.defaultdict(list)     # your id -> [(cam, ts, its joined track, its cow or None)]
     view = []                                      # every frame played: your boxes and its, for boxes.html
+    counted_by = collections.defaultdict(list)     # (your id, frame time) -> [counted on that camera's frame]
     for file, lab in labels.items():
         f = frames.get(file)
         if lab.get("status") != "done" or not f or f["cam"] not in cams:
@@ -170,7 +171,6 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         f = dict(f, ts=f["ts"] + shift + float(cams[cam].get("time_offset_s") or 0.0))   # the run's clock for it
         named = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
                  and str(b[4]).strip().lower() != "x"]
-        truth = [t for t in named if in_zone(t[0], cams[cam], f.get("w", 1920), f.get("h", 1080))]
         rows = store.query("SELECT track, ts, x1, y1, x2, y2 FROM seconds WHERE cam = ? AND ts BETWEEN ? AND ?",
                            (cam, f["ts"] - max_dt, f["ts"] + max_dt))
         if not rows:
@@ -179,6 +179,14 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         n[(cam, "frames")] += 1
         sec = min({r[1] for r in rows}, key=lambda t: abs(t - f["ts"]))
         pred = [(list(r[2:6]), tm.get(r[0]), roots.get(r[0], r[0])) for r in rows if r[1] == sec]
+        # scored here: your boxes in this camera's mask, and one outside it this camera counted (a cow in no
+        # camera's mask is counted by the one that tracks her - [mct] count_holes)
+        w_, h_ = f.get("w", 1920), f.get("h", 1080)
+        truth = [t for t in named if in_zone(t[0], cams[cam], w_, h_)
+                 or (in_zone(t[0], cams[cam], w_, h_, tracking=True) and any(iou(t[0], q[0]) >= max(min_iou, 0.5) for q in pred))]
+        for t in named:                            # who counts each of your cows: none of the cameras?
+            if in_zone(t[0], cams[cam], w_, h_, tracking=True):
+                counted_by[(t[1], f["ts"])].append(any(iou(t[0], q[0]) >= min_iou for q in pred))
         view.append({"cam": cam, "ts": f["ts"], "file": file, "w": f.get("w", 1920), "h": f.get("h", 1080),
                      "mine": [[*map(float, b), i, (b, i) in truth] for b, i in named],   # [.., scored: in its mask]
                      "its": [[*map(float, r[2:6]), tm.get(r[0]), r[0], roots.get(r[0], r[0])] for r in rows if r[1] == sec],
@@ -213,6 +221,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     out["merged"] = {p: dict(cnt.most_common()) for p, cnt in by_pred.items() if len(big(cnt)) > 1}
     out["split"] = {t: dict(cnt.most_common()) for t, cnt in by_true.items() if len(big(cnt)) > 1}
     out["your_cows"], out["its_cows"] = len(by_true), len(by_pred)
+    out["counted_by_none"] = counted_by_none(counted_by)
     out["cross_camera"] = cross_camera(seen_as)
     out["cross_camera_moments"] = cross_camera_moments(seen_track)
     out["clock_shift_s"] = shift
@@ -223,6 +232,27 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
                                        cfg["farm"].get("timezone_offset_hours", 0), unnamed(store, tm),
                                        joined_groups(store, roots))
     return out
+
+
+def counted_by_none(counted_by, at_once_s=1.5):
+    """Your cows at each moment (the cameras' frames within at_once_s of each other), each where a camera tracks her:
+    counted by one camera at least (its box there in the store), or by none - between two masks, or missed."""
+    by_cow = collections.defaultdict(list)
+    for (cow, ts), got in counted_by.items():
+        by_cow[cow].append((ts, any(got)))
+    total, none, cows = 0, 0, collections.Counter()
+    for cow, items in by_cow.items():
+        items.sort()
+        moment = []
+        for ts, got in items + [(float("inf"), None)]:
+            if moment and ts - moment[0][0] > at_once_s:
+                total += 1
+                if not any(g for _, g in moment):
+                    none += 1
+                    cows[cow] += 1
+                moment = []
+            moment.append((ts, got))
+    return {"moments": total, "none": none, "cows": dict(cows.most_common())}
 
 
 def unnamed(store, tm):
@@ -544,6 +574,11 @@ def print_score(sc):
             if r["same_cow"] < r["moments"]:
                 print(f"    your {t}: {r['moments']} times on two cameras at once - one id {r['same_cow']}, two cows "
                       f"{r['two_cows']}, no name {r['no_name']}, one track {r['one_track']}")
+    nc = sc.get("counted_by_none")
+    if nc and nc["moments"]:
+        print(f"  your cows counted by no camera: {nc['none']} of {nc['moments']} cow-moments ({nc['none'] / nc['moments']:.0%})"
+              + (" - " + ", ".join(f"your {c} {k}" for c, k in list(nc["cows"].items())[:8]) if nc["none"] else "")
+              + (" (between two masks, or not found)" if nc["none"] else ""))
     print(f"  its cows: {sc['its_cows']} for your {sc['your_cows']}; one of its cows on several of yours (merged): "
           f"{len(sc['merged'])}; one of yours under several of its (split): {len(sc['split'])}")
     if sc.get("boxes_page"):

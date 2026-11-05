@@ -399,6 +399,7 @@ class Camera:
         self.cam, self.cfg, self.models, self.gallery, self.store = cam, cfg, models, gallery, store
         self.id = cam["id"]
         self.mask = cam.get("mask", [])
+        self._hole = {}                          # second -> own tracks counted here outside the mask (count_holes)
         # [[cameras]] tiles = true: this camera's frames to the detector whole and in square tiles (far cows ~1.8x
         # wider: a row of them seen far off as one box, the barn's cam4), the others as [detector] tiles says
         self.tiles = {"tiles": bool(cam["tiles"])} if cam.get("tiles") is not None else {}
@@ -563,21 +564,34 @@ class Camera:
             # the store keeps the camera's own tracks (the joins are track_links); the gallery sees them joined
             own = self.glob.raw(self.id, ts) if hasattr(self.glob, "raw") else None
             own = own if own is not None and len(own) == len(gids) else gids
+            # which boxes this camera counts: its mask - and a cow in no camera's mask, counted by the one that
+            # tracks her ([mct] count_holes); the tracker's answer where it gives one, else the mask alone
+            counts = self.glob.counts(self.id, ts) if hasattr(self.glob, "counts") else None
+            counts = list(counts) if counts is not None and len(counts) == len(gids) else [None] * len(gids)
             # a box with no track (an unsure one that continued none: low_score, or inside_low - a box the
             # tracker itself found unsure) is no cow this second
             keep = [k for k, g in enumerate(gids) if g is not None]
             self.stats["low_boxes_kept"] += sum(k >= n_sure for k in keep)
             if len(keep) < len(gids):
                 gids, own, boxes = [gids[k] for k in keep], [own[k] for k in keep], [boxes[k] for k in keep]
+                counts = [counts[k] for k in keep]
                 pp, pa = pp[keep], pa[keep]
             if len(gids) > 1 and hasattr(self.gallery, "together"):
                 self.gallery.together(gids, ts, boxes)              # two cows, with evidence (mct.CoSeen)
-            counted = []
-            for gid, g_own, b, p, a in zip(gids, own, boxes, pp, pa):
-                if in_mask(b, self.mask):
+            counted, hole = [], set()
+            for gid, g_own, b, p, a, cnt in zip(gids, own, boxes, pp, pa, counts):
+                mine = in_mask(b, self.mask)
+                if mine or cnt:
                     rows.append((self.id, g_own, ts, *b, POSTURES[int(p.argmax())], ACTIVITIES[int(a.argmax())],
                                  float(p[POSTURES.index("lying")])))
-                    counted.append(gid)
+                if mine:
+                    counted.append(gid)          # the gallery's "counted by two cameras at once": the masks only
+                elif cnt:
+                    hole.add(g_own)              # counted here outside the mask: her bursts may come from here too
+                    self.stats["cow_seconds_in_a_hole"] += 1
+            self._hole[int(ts)] = hole
+            for old in [s_ for s_ in self._hole if s_ < ts - 30]:
+                del self._hole[old]
             owned_n = len(rows)
             if rows:
                 self.store.seconds(rows)
@@ -619,7 +633,9 @@ class Camera:
             times = sorted(ch)
             mid = times[len(times) // 2]
             if self.glob is not None and not in_mask(ch[mid], self.mask):
-                continue                                  # tracked here, counted by the camera that owns it
+                o = self._track_of(mid, ch[mid], own=True)
+                if not o or not any(o in self._hole.get(int(mid) + d, ()) for d in (-1, 0, 1)):
+                    continue                              # tracked here, counted by the camera that owns it
             tid = self._track_of(mid, ch[mid]) or f"{self.id}-burst-{int(t0)}-{times[0]:.0f}"
             own = self._track_of(mid, ch[mid], own=True) or tid      # the camera's own track: what the store keeps
             valid = np.array([times[0] - 0.5 <= ts <= times[-1] + 0.5 for ts, _ in frames])

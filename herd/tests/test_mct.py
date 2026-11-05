@@ -1861,3 +1861,160 @@ def test_a_camera_stopped_by_an_error_is_said_and_frees_the_others(monkeypatch, 
     assert ended["cam4"] == (9.0, None)
     out = capsys.readouterr()
     assert "[cam3] !! stopped at 0:03" in out.out and "boom" in out.err
+
+
+def _walker_scene(walker_size):
+    """23 Oct cam2 (its boxes): cow 23 stands still; cow 13 walks up, their boxes run into one, cow 13 stands in front
+    of her for 10 s and walks on. -> [(t, gids)], the still cow's gid, the walker's."""
+    import mct
+    cfg = _cfg()
+    cfg["mct"]["enabled"] = False
+    cfg["tracker"]["kalman"] = True
+    cfg["mct"]["walker_size"] = walker_size
+    gt = mct.GlobalTracker(cfg)
+    still = [0.739, 0.215, 0.792, 0.327]                                       # h 0.112
+    walker = lambda t: [0.436 + 0.03 * (t - 50), 0.209, 0.556 + 0.03 * (t - 50), 0.363]   # h 0.154, 0.2 h a second
+    front = [0.73, 0.211, 0.817, 0.347]                                       # the walker's box in front of her
+    log = []
+    for t in range(75):
+        if t < 50:
+            dets = [still]
+        elif t <= 57:
+            dets = [still, walker(t)]
+        elif t == 58:                                   # she reaches her: the still cow's box swells with the walker
+            dets = [walker(t), [0.735, 0.212, 0.812, 0.352]]
+        elif t <= 69:                                   # one box, the walker's size, hiding the still cow
+            dets = [front]
+        else:                                           # the walker goes on; the still cow shows again
+            dets = [[front[0] + 0.03 * (t - 69), front[1], front[2] + 0.03 * (t - 69), front[3]], still]
+        log.append((t, gt.update("c1", float(t), [{"box": b, "emb": None} for b in dets])))
+    return log, log[0][1][0], log[50][1][1]
+
+
+def test_walker_takes_her_box_back_from_a_still_cows_track():
+    """[mct] walker_size: the still cow's track (one size for minutes) must not take the walker's box when their
+    boxes run into one - the walker's track, lost a second, has it by its speed, and the still cow's track waits at
+    her place and takes her back when she shows again. Off, the still track keeps the walker and the two swap."""
+    log, still, walker = _walker_scene(0.2)
+    at = dict(log)
+    assert all(at[t] == [walker] for t in range(59, 70))
+    assert all(at[t] == [walker, still] for t in range(71, 75))
+    log, still, walker = _walker_scene(0.0)
+    at = dict(log)
+    assert at[60] == [still]                            # off: the still cow's track follows the walker
+    assert at[73] == [still, walker]                    # ... and the two cows end swapped
+
+
+def _holes_linker(**mct_over):
+    """Two cameras on one floor (the same mapping: a frame's x 0-1 is 0-1000 cm), a's mask x < 0.5, b's x > 0.6 - a hole
+    between them, 0.5-0.6; b tracks only x > 0.3. Tracks given."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    cfg = _cfg()
+    left, right = [[0, 0], [0.5, 0], [0.5, 1], [0, 1]], [[0.6, 0], [1, 0], [1, 1], [0.6, 1]]
+    cfg["cameras"] = [{"id": "a", "mask": left, "floor_points": pts},
+                      {"id": "b", "mask": right, "floor_points": pts, "tracking_mask": [[0.3, 0], [1, 0], [1, 1], [0.3, 1]]}]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, neighbours=[["a", "b"]], **mct_over)
+    return mct.TrackletLinker(cfg)
+
+
+def test_a_cow_between_two_masks_is_counted_by_one_camera():
+    """[mct] count_holes: a cow in the strip neither mask holds is counted by exactly one camera - joined, the one
+    whose box of her is bigger; not joined, hers when the other camera counts no cow near her; never two cameras
+    for one cow, and floor only her camera tracks, left out of its mask, stays uncounted."""
+    box = lambda x, w=0.04: [x - w / 2, 0.45, x + w / 2, 0.55]
+    lk = _holes_linker()
+    for k in range(30):                    # one cow in the hole, both cameras on her: joined, b's box the bigger
+        lk.update_all(float(k), {"a": [{"box": box(0.55), "track": "a1"}], "b": [{"box": box(0.55, 0.06), "track": "b1"}]})
+    assert lk.root("a1") == lk.root("b1")
+    assert lk.count_last == {"a": [False], "b": [True]}
+    # in a's mask: a counts her, b (outside its own) does not
+    lk.update_all(30.0, {"a": [{"box": box(0.45), "track": "a1"}], "b": [{"box": box(0.45, 0.06), "track": "b1"}]})
+    assert lk.count_last == {"a": [True], "b": [False]}
+    # a cow in the hole only a sees (b misses her) - a counts her; a cow b counts in its mask 4.3 m off (beyond
+    # count_dist, 2.5 x link_dist) is no reason not to
+    lk2 = _holes_linker()
+    lk2.update_all(0.0, {"a": [{"box": box(0.55), "track": "a9"}], "b": [{"box": box(0.98), "track": "b9"}]})
+    assert lk2.count_last == {"a": [True], "b": [True]}
+    # not joined (one second), b's box of her in b's mask near her: b counts her, a does not
+    lk2.update_all(1.0, {"a": [{"box": box(0.58), "track": "a8"}], "b": [{"box": box(0.62), "track": "b8"}]})
+    assert lk2.count_last == {"a": [False], "b": [True]}
+    # floor b does not track (x < 0.3, out of a's mask? no: a's mask holds it) - a cow at 0.2 is a's anyway;
+    # a cow outside a's mask where b tracks nothing either is left out
+    lk3 = _holes_linker()
+    lk3.cam_cfg["a"] = dict(lk3.cam_cfg["a"], mask=[[0, 0], [0.1, 0], [0.1, 1], [0, 1]])
+    lk3.masks["a"] = lk3.cam_cfg["a"]["mask"]
+    lk3.update_all(0.0, {"a": [{"box": box(0.15), "track": "a7"}], "b": []})
+    assert lk3.count_last["a"] == [False]                # 1.5 m: b tracks from 3 m on (a cell's margin: 2 m)
+    # off: the masks alone
+    lk4 = _holes_linker(count_holes=False)
+    lk4.update_all(0.0, {"a": [{"box": box(0.55), "track": "a9"}], "b": [{"box": box(0.98), "track": "b9"}]})
+    assert lk4.count_last == {"a": [False], "b": [True]}
+
+
+def test_camera_writes_the_cow_the_tracker_says_it_counts_in_a_hole():
+    """pipeline: a box outside the camera's mask is written when the tracker says this camera counts her (a cow in
+    no camera's mask, [mct] count_holes) - and kept out of the gallery's "counted by two cameras at once"."""
+    import pipeline
+    from store import Store
+    cfg = _mct_cfg([("cam1", {"mask": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]],
+                              "tracking_mask": [[0, 0], [1, 0], [1, 1], [0, 1]]})], enabled=True)
+    cfg["cameras"] = [dict(c, min_box_pct=0.0, min_box_side_px=0) for c in cfg["cameras"]]
+
+    class Glob:                      # the linker's answers: two tracks, the one outside the mask counted here
+        def update(self, cam, ts, dets):
+            return ["t-in", "t-hole"][:len(dets)]
+
+        def raw(self, cam, ts):
+            return ["t-in", "t-hole"]
+
+        def counts(self, cam, ts):
+            return [True, True]
+
+        def track_at(self, cam, ts, box):
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+        seen = []
+        shared.counted = lambda cam, ts, tracks: seen.append(list(tracks))
+        models = _FakeModels()
+        cam = pipeline.Camera(cfg["cameras"][0], 0, 1, cfg, models, shared, store, 0.0)
+        cam.glob = Glob()
+        models.boxes = [_box(0.3), _box(0.75)]
+        models.ids = {0.3: _unit(np.ones(8)), 0.75: _unit(np.arange(8.0) + 1)}
+        cam.second(0.0, np.zeros((64, 64, 3), np.uint8))
+        rows = store.query("SELECT track FROM seconds ORDER BY x1")
+        assert [r[0] for r in rows] == ["t-in", "t-hole"]
+        assert seen == [["t-in"]] and cam._hole[0] == {"t-hole"}
+
+
+def test_trial_scores_a_cow_counted_outside_the_mask_and_says_who_counted_none():
+    """A box of yours outside the camera's mask is scored there when the camera counted her (a cow between two
+    masks, [mct] count_holes); a cow of yours where the camera tracks that no camera counted is said."""
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        st = os.path.join(d, "s.sqlite")
+        s = Store(st)
+        s.seconds([("cam1", "t1", float(t), 0.1, 0.4, 0.3, 0.6, "lying", "none", 0.9) for t in range(100, 111)] +
+                  [("cam1", "t2", float(t), 0.85, 0.4, 0.95, 0.6, "lying", "none", 0.9) for t in range(100, 111)])
+        for tr, cow in (("t1", "P1"), ("t2", "P2")):
+            for k in range(3):
+                s.burst(("cam1", tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"cam1/{t}.jpg", "cam": "cam1", "ts": float(t), "w": 1920, "h": 1080} for t in (100, 105, 110)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        # 4 in the mask, 7 outside it and counted (t2), 9 outside it where the camera tracks - counted by none
+        lab = {"boxes": [[0.1, 0.4, 0.3, 0.6, "4"], [0.85, 0.4, 0.95, 0.6, "7"], [0.6, 0.7, 0.7, 0.9, "9"]], "status": "done"}
+        labels = os.path.join(d, "labels.json")
+        json.dump({"frames": {f["file"]: lab for f in frames}}, open(labels, "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1", "mask": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]],
+                           "tracking_mask": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
+        sc = trial.score(st, cfg, boxes, labels)
+        a = sc["all"]
+        assert a["your_boxes"] == 6 and a["found_with_a_cow"] == 6 and abs(a["idf1"] - 1.0) < 1e-9
+        assert sc["counted_by_none"] == {"moments": 9, "none": 3, "cows": {"9": 3}}

@@ -275,6 +275,7 @@ class GlobalTracker:
             out = [None] * len(sure)
             taken = set()
             self._same_camera(cam, ts, sure, out, taken)
+            self._walker_back(cam, ts, sure, out, taken)
             self._floor_handover(cam, ts, sure, out, taken)
             self._handover(cam, ts, sure, out, taken)
             self._portals(cam, ts, sure, out, taken)
@@ -389,6 +390,63 @@ class GlobalTracker:
             taken.add(mine[i].gid)
             if ts - mine[i].cams[cam]["last"] > self.max_age or iou(mine[i].cams[cam]["box"], dets[j]["box"]) < self.min_iou:
                 self.stats["reacquired"] += 1
+
+    def _walker_back(self, cam, ts, dets, out, taken):
+        """[mct] walker_size: a cow walking past one that stands still - the walker hides her, or their boxes run
+        into one - must not leave the still cow's track on the walker (23 Oct, cam2: cow 13 stopped in front of cow
+        23; cow 23's track, still for 270 s, took cow 13's box and followed her for the rest of the recording). A
+        track still for still_for_s whose box this second is walker_size taller or shorter than its own over the
+        last minute (a still cow's box hardly changes: cow 23's +-3%, cow 13's 23% taller), while a track of this
+        camera lost walker_s ago at most was walking (walker_speed box heights a second) and its speed puts it on
+        that box (IoU >= [tracker] iou) at a size nearer its own: the box goes back to the walker, and the still
+        track waits for its cow at her place (still_s, still_long_s)."""
+        m = self.m
+        jump = m.get("walker_size", 0.0)
+        if not jump or not self.kalman:
+            return
+        walk_s, speed = m.get("walker_s", 5.0), m.get("walker_speed", 0.15)
+        walkers = []
+        for t in self.tracks.values():
+            seen = t.cams.get(cam)
+            if seen is None or t.gid in taken or seen.get("kf") is None or not 0 < ts - seen["last"] <= walk_s:
+                continue
+            h = max(seen["box"][3] - seen["box"][1], 1e-6)
+            if np.hypot(*seen["kf"].x[4:6]) / h >= speed:
+                walkers.append(t)
+        if not walkers:
+            return
+        size = lambda b: max(b[3] - b[1], 1e-6)
+        for j, g in enumerate(out):
+            t = self.tracks.get(g) if g is not None else None
+            seen = t.cams.get(cam) if t is not None else None
+            if seen is None or ts - seen["last"] > self.max_age or ts - seen["still_since"] < m.get("still_for_s", 30.0):
+                continue
+            past = [b for tt, b in self.history[cam].get(g, ()) if tt >= ts - 60.0]
+            if len(past) < 10:
+                continue
+            hs = np.array([size(b) for b in past])
+            own, hd = float(np.median(hs)), size(dets[j]["box"])
+            # a still cow's box of its own: one size the whole last minute (not a crowd's boxes running together)
+            if np.median(np.abs(hs - own)) > m.get("walker_stable", 0.05) * own or abs(np.log(hd / own)) < np.log1p(jump):
+                continue
+            at = iou(np.median(np.array(past), 0).tolist(), dets[j]["box"])      # the box against her own place
+            best = None
+            for w in walkers:
+                ws = w.cams[cam]
+                v = iou(ws["kf"].predict(ts), dets[j]["box"])
+                if v >= self.min_iou and v > at and abs(np.log(hd / size(ws["box"]))) < abs(np.log(hd / own)) \
+                        and (best is None or v > best[0]):
+                    best = (v, w)
+            if best is None:
+                continue
+            w = best[1]
+            out[j] = w.gid
+            taken.discard(g)
+            taken.add(w.gid)
+            walkers.remove(w)
+            self.stats["walker_back"] += 1
+            if not walkers:
+                return
 
     def _cross(self, there, d):
         """A box against where another camera sees the track's cow now (TrackletLinker: her joined track there):
@@ -829,7 +887,7 @@ class FusedSeconds:
     def __init__(self, tracker, cams, wait_s=0.8, alive_s=10.0):
         self.ft, self.wait, self.alive_s = tracker, wait_s, alive_s
         self.alive = {c: None for c in cams}
-        self.pending, self.done, self.done_raw = {}, {}, {}
+        self.pending, self.done, self.done_raw, self.done_count = {}, {}, {}, {}
         self.cv = threading.Condition()
         self.lock, self.stuck_s = None, None
 
@@ -860,6 +918,7 @@ class FusedSeconds:
                     if per:
                         self.done.setdefault(ts, {}).update(self.ft.update_all(ts, per))
                         self.done_raw.setdefault(ts, {}).update(getattr(self.ft, "raw_last", None) or {})
+                        self.done_count.setdefault(ts, {}).update(getattr(self.ft, "count_last", None) or {})
                     self.cv.notify_all()
                     continue
                 # files: the others' places in their recordings move outside this lock - looked at again soon
@@ -869,6 +928,7 @@ class FusedSeconds:
             for t in [t for t in self.done if t < ts - 30]:
                 del self.done[t]
                 self.done_raw.pop(t, None)
+                self.done_count.pop(t, None)
         return out
 
     def raw(self, cam, ts):
@@ -876,6 +936,12 @@ class FusedSeconds:
         joins are track_links, so a join undone or played again (herd.py trial --relink) still holds."""
         with self.cv:
             return self.done_raw.get(ts, {}).get(cam)
+
+    def counts(self, cam, ts):
+        """Which of the camera's boxes at ts it counts (TrackletLinker._who_counts: its mask, and a cow in no camera's
+        mask counted by the one that tracks her) - None where the tracker does not say."""
+        with self.cv:
+            return self.done_count.get(ts, {}).get(cam)
 
     def track_at(self, cam, ts, box):
         return self.ft.track_at(cam, ts, box)
@@ -1018,6 +1084,14 @@ class TrackletLinker:
                   "to join them by place", flush=True)
         self.by_look = sorted({tuple(sorted(p)) for p in m.get("neighbours", [])
                                if self.floor.get(p[0]) is None or self.floor.get(p[1]) is None} | apart)
+        # [mct] count_holes: a box outside its camera's mask that no other camera counts - two masks' edges drawn on two
+        # pictures that do not meet on the floor - is counted by the camera that tracks her (_who_counts)
+        self.count_holes = bool(m.get("count_holes", True))
+        self.count_dist = m.get("count_dist") or 2.5 * self.dist
+        self.count_cell = m.get("count_cell", 100.0)
+        self.cam_cfg = cams
+        self._cover = {}
+        self.count_last = {}
         self.look = {}                                         # (visitor, owner) -> (sum of cos, seconds)
         self.look_min_s = m.get("look_min_s", 30)
         self.look_min_sim = m.get("look_min_sim", 0.6)
@@ -1235,6 +1309,71 @@ class TrackletLinker:
                     if t != keep:
                         self._unlink(t, ts)
                         self.stats["unlinked_seen_together"] += 1
+
+    def _coverage(self, cam):
+        """The floor cells (count_cell) this camera tracks in: its tracking zone sampled on a grid of its picture,
+        mapped to the floor, one cell around added for the mapping's error."""
+        if cam in self._cover:
+            return self._cover[cam]
+        f, c, cells = self.floor.get(cam), self.cam_cfg.get(cam) or {}, set()
+        if f is not None:
+            zone, excl = c.get("tracking_mask") or c.get("mask") or [], c.get("exclude") or []
+            for u in np.linspace(0.005, 0.995, 80):
+                for v in np.linspace(0.005, 0.995, 80):
+                    b = [u, v, u, v]
+                    if not in_mask(b, zone) or (excl and in_mask(b, excl)):
+                        continue
+                    x, y = f(b)
+                    cx, cy = int(np.floor(x / self.count_cell)), int(np.floor(y / self.count_cell))
+                    cells.update((cx + i, cy + j) for i in (-1, 0, 1) for j in (-1, 0, 1))
+        self._cover[cam] = cells
+        return cells
+
+    def _who_counts(self, ts, per_cam, ids, pts):
+        """Which boxes each camera counts this second -> {cam: [bool per box of per_cam]}. A box in its camera's mask
+        (no mask: the whole picture) as ever. With count_holes one outside it, where another camera also tracks, is
+        counted here when no camera counts her where she is: her joined track there outside its camera's mask too
+        (the bigger box of the two counts her - the same answer on both cameras), or, not joined, no box of the
+        other camera near her on the floor (count_dist) in that camera's mask - and of those near outside it, hers
+        the biggest. Floor only this camera tracks, left out of its mask, stays uncounted: the mask said so."""
+        inside = {cam: [(not self.masks.get(cam)) or in_mask(d["box"], self.masks[cam]) for d in ds]
+                  for cam, ds in per_cam.items()}
+        out = {cam: list(v) for cam, v in inside.items()}
+        if not self.count_holes or not any(not all(v) for v in inside.values()):
+            return out
+        area = lambda cam, j: (max(0.0, per_cam[cam][j]["box"][2] - per_cam[cam][j]["box"][0]) *
+                               max(0.0, per_cam[cam][j]["box"][3] - per_cam[cam][j]["box"][1]), cam)
+        by_root = collections.defaultdict(list)
+        for cam, gs in ids.items():
+            for k, g in enumerate(gs):
+                by_root[self.root(g)].append((cam, k))
+        look = {frozenset(p) for p in self.by_look}
+        for cam, ds in per_cam.items():
+            if not self.masks.get(cam) or pts.get(cam) is None:
+                continue
+            others = [c for c in per_cam if c != cam and pts.get(c) is not None and frozenset((cam, c)) not in self.disjoint
+                      and frozenset((cam, c)) not in look]
+            for k in range(len(ds)):
+                if inside[cam][k]:
+                    continue
+                mates = [(c, j) for c, j in by_root[self.root(ids[cam][k])] if c != cam]
+                if mates:
+                    if not any(inside[c][j] for c, j in mates):
+                        out[cam][k] = all(area(cam, k) > area(c, j) for c, j in mates)
+                    continue
+                p = np.asarray(self._at(pts[cam][k]), float)
+                cell = (int(np.floor(p[0] / self.count_cell)), int(np.floor(p[1] / self.count_cell)))
+                seen_by = [c for c in others if cell in self._coverage(c)]
+                if not seen_by:
+                    continue
+                near = [(c, j) for c in seen_by for j in range(len(per_cam[c]))
+                        if not any(cc == cam for cc, _ in by_root[self.root(ids[c][j])])     # not another cow of mine
+                        and np.hypot(*(np.asarray(self._at(pts[c][j])) - p)) <= self.count_dist]
+                if any(inside[c][j] for c, j in near):
+                    continue
+                out[cam][k] = all(area(cam, k) > area(c, j) for c, j in near)
+                self.stats["counted_in_a_hole"] += out[cam][k]
+        return out
 
     def _counted_twice(self, ts, per_cam, ids):
         """A joined cow counted by two cameras at once (each in its own mask) for unlink_s seconds: two cows."""
@@ -1613,6 +1752,11 @@ class TrackletLinker:
                 if apart:
                     self.apart([(a, b) for a, b in apart if a != b], ts)
             pts = {cam: self._points(cam, per_cam[cam]) for cam in per_cam}
+            counts = self._who_counts(ts, per_cam, ids, pts)
+            self.count_last = {}
+            for cam, gs in raw.items():
+                it = iter(counts.get(cam, ()))
+                self.count_last[cam] = [None if g is None else next(it, False) for g in gs]
             self._clocks(ts, ids, pts)
             cams = [c for c in per_cam if pts[c] is not None and pts[c]]
             for i, ca in enumerate(cams):

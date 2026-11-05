@@ -512,6 +512,21 @@ her own track cam2 88 -> 92% (changes 7 -> 3); on 23 Oct cam1 56 -> 68%, a cow o
 (no box at all farther than that many sigmas) helped 19 Oct but lost on 23 Oct, where the two floors lie
 farther apart: off. A wrong join can lead a track astray with it - the joins' own rules undo those.
 
+**A walker's box goes back to the walker (`walker_size` 0.2).** 23 Oct, cam2: cow 13 walked up to cow 23, who
+had stood still for 270 s, and stopped in front of her. For a second their boxes ran into one; cow 13's track lost
+hers, cow 23's track took it - cow 23's box had been one size all along (0.111 +- 0.003 of the frame), this one
+was 23% taller - and followed cow 13 for the rest of the recording (cam1 the same with cows 17 and 14). With the
+camera's Kalman tracker on, a track still for `still_for_s` whose box this second is `walker_size` taller or
+shorter than its own over the last minute (that minute one size, within `walker_stable` 5%), while a track lost
+`walker_s` (5 s) ago at most was walking (`walker_speed`, 0.15 box heights a second) and its speed puts it on that
+box better than the still cow's own place, at a size nearer its own: the box goes back to the walker, and the
+still track waits for its cow at her place (`still_s`, `still_long_s`). The three trials of 23 Oct replayed (both
+cameras' trackers and the linker over their boxes): it fires once or twice a recording; cow 13 on her own track 20
+-> 39 of 42 moments, cow 23 6 -> 22 of 43, a cow on both cameras in her group 54 -> 57% / 53 -> 55%, no other cow
+changed; 19 Oct and `mct_sim` unchanged (it never fires there). Looser (a crowd's boxes running together, a cow at
+the frame's edge, a "walker" only jittering) it fired a dozen times on cam1 and lost 5 points there - hence the
+one-size minute and the walking speed.
+
 **How wide (`link_dist`).** llr's sigma is `link_dist` / 2.5: at 230 (what `crosscam --depth` said with a margin
 for minutes it had not learnt from) a neighbour 1.3 m off still adds +2.6 a second against the cow's +3.5 - the
 barn's cows 25 and 35 of 19 Oct, joined crossed in the first two minutes (25 then hid 35 on cam2), stayed so. The
@@ -538,6 +553,22 @@ take a neighbour cam2 held, though cam2's track of hers was alive beside cam2's 
 claims now also ask the linker: two tracks whose joined groups hold two tracks of one camera alive at once are two
 cows (`TrackletLinker.two_cows`), so her bursts go to the next cow or a new one. Only a full `trial` shows it
 (`--relink` keeps the names; the fingerprints are not stored).
+
+**A cow between two masks is counted by one camera (`count_holes`, on).** Each camera counts only its mask, and
+the masks are drawn on two pictures: where the floor mapping is 1.5-2 m off their edges do not meet. 23 Oct, the
+barn's masks: 286 of 859 cow-moments of your cows were in neither mask - tracked by both cameras, counted by none,
+no burst, no name (cow 14 after 420 s). The camera's tracker never minded the mask (it tracks in `tracking_mask`;
+the linker joined as many tracks with the masks as without): what changed is who counts. Now the linker, which has
+every camera's boxes of the second, says it: a box in its camera's mask, as ever; one outside it, where another
+camera also tracks, is counted here when nobody counts her where she is - joined to the other camera's track there
+outside its mask too, by the camera whose box of her is the bigger (the same answer on both, never two); not
+joined, when the other camera has no box within `count_dist` of her in its mask (0: 2.5 x `link_dist` - her two
+points lie 2-3 m apart where both cameras see far; at 1.5 x, 51 cow-moments were counted twice), and of the boxes
+near outside theirs, hers the biggest. A cow so counted gets her rows and bursts there; the gallery's "counted by
+two cameras at once: two cows" (`counted_apart_s`) still reads the masks alone. Floor only one camera tracks, left
+out of its mask, stays uncounted. Replayed with the barn's masks: counted by exactly one camera 66 -> 78% (by none
+286 -> 169, by both 2 -> 23). `trial` scores such a box on the camera that counted it, and says how many of your
+cows no camera counted ("your cows counted by no camera", `counted_by_none`).
 
 **A camera of its own tiles (`[[cameras]] tiles = true`).** The barn's cam4 of 19 Oct missed 32% of the labelled
 cows; of those inside its tracking zone two thirds (131 of 197) lay in one box with a neighbour - a row of far cows

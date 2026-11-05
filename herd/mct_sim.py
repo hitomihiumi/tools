@@ -359,6 +359,8 @@ RULES = [
     ("llr+kalman", {"mode": "link", "link_rule": "llr", "_tracker": {"kalman": True}}),
     ("llr+low", {"mode": "link", "link_rule": "llr", "_tracker": {"low_score": 0.2}}),
     ("llr+kalman+low", {"mode": "link", "link_rule": "llr", "_tracker": {"kalman": True, "low_score": 0.2}}),
+    # a walker's box taken back from a still cow's track (walker_size)
+    ("llr+kalman+walker", {"mode": "link", "link_rule": "llr", "walker_size": 0.2, "_tracker": {"kalman": True}}),
 ]
 
 
