@@ -1142,7 +1142,8 @@ the only fair test of the barn's own cameras.
    valid frames whole hours of a camera). Step by step: `SETUP.md` section 12. A few hundred frames
    from different cameras and times of day are enough. The same page takes each cow's posture and activity:
    select a box, `1` standing / `2` lying, `3` feeding / `4` drinking / `5` neither / `6` ruminating (`0`
-   clears; `P` takes them from the frame before for boxes in the same place). They are the box's 7th field in
+   clears; `P` takes them from the frame before for boxes in the same place; `C` - or "... on all frames" - from
+   the same cow id's box on the other cameras' frames of the same moment, within 2 s, only what a box lacks). They are the box's 7th field in
    `labels.json` (`[x1, y1, x2, y2, id or "", 0, {"posture": ..., "activity": ...}]` - older files read as
    before), the COCO annotations' `attributes`, and `trial` scores them against what the cameras wrote at that
    second ("posture ... right N of M", per camera, what was taken for what). Rumination is a head of its own,
