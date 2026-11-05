@@ -11,8 +11,8 @@ and pens are its own. A few hundred frames of them, boxes corrected by hand, tea
              and the labelling page DATA/boxes.html
   2. label   (a person, in a browser) boxes.html: move, resize, delete, draw boxes; a frame marked
              done (Enter) is exported, one not marked is not. "Save labels.json" writes the result. A box
-             may carry its cow's id and what she does (keys 1-5: standing / lying, feeding / drinking /
-             neither): [x1, y1, x2, y2, id or "", 1 if the id was filled in, {"posture", "activity"}].
+             may carry its cow's id and what she does (keys 1-6: standing / lying, feeding / drinking /
+             neither / ruminating): [x1, y1, x2, y2, id or "", 1 if the id was filled in, {"posture", "activity"}].
   3. export  -> herd_det_barn_<date>.tgz: COCO train/ and valid/ (valid: whole hours of a camera, a
              fifth, never next to a training frame of the same minutes) as extra_det/barn - what
              run_pod.sh's detector step (DET_ARCH=rfdetr) takes in beside CBVD-5 and the public sets.
@@ -742,7 +742,7 @@ the ids of this camera's frame before for boxes in the same place; <kbd>F</kbd> 
 this camera's frames, forwards and backwards, as long as the cow's box clearly continues (blue ids: filled in - check them;
 a typed id is never overwritten, and fixing a blue one makes it typed). <b>What she does</b> (to check and teach posture and
 activity): select a box, <kbd>1</kbd> standing, <kbd>2</kbd> lying; <kbd>3</kbd> feeding, <kbd>4</kbd> drinking, <kbd>5</kbd>
-neither; <kbd>0</kbd> clears both - once a box has both the next box missing one is selected. <kbd>P</kbd> also takes posture
+neither, <kbd>6</kbd> ruminating (chewing the cud); <kbd>0</kbd> clears both - once a box has both the next box missing one is selected. <kbd>P</kbd> also takes posture
 and activity from the frame before for boxes in the same place (check them).</p>
 <div class="bar">
 <button id="prev">&larr;</button><span id="pos"></span><button id="next">&rarr;</button>
@@ -763,6 +763,7 @@ and activity from the frame before for boxes in the same place (check them).</p>
 <button class="att" data-k="activity" data-v="feeding" title="3">feeding <kbd>3</kbd></button>
 <button class="att" data-k="activity" data-v="drinking" title="4">drinking <kbd>4</kbd></button>
 <button class="att" data-k="activity" data-v="none" title="5">neither <kbd>5</kbd></button>
+<button class="att" data-k="activity" data-v="ruminating" title="6">ruminating <kbd>6</kbd></button>
 <button id="attclear" title="0">clear <kbd>0</kbd></button>
 <span class="mute">select a box first; pressed again, a choice is taken back</span></div>
 <datalist id="ids"></datalist>
@@ -882,7 +883,8 @@ function pack(xy, id, auto, att) {
 }
 const withId = (xy, b) => pack(xy, idOf(b), autoOf(b), attOf(b));
 const rnd = b => withId(b.slice(0, 4).map(v => Math.round(v * 1e4) / 1e4), b);
-const SHORT = {standing: "standing", lying: "lying", feeding: "feeding", drinking: "drinking", none: "neither"};
+const SHORT = {standing: "standing", lying: "lying", feeding: "feeding", drinking: "drinking", none: "neither",
+               ruminating: "ruminating"};
 function setAtt(k, v) {            // k: posture | activity; v: a value, or "" to take it back; both cleared by k = ""
   if (sel < 0) return;
   const was = attOf(boxes[sel]) || {}, a = Object.assign({}, was);
@@ -1079,9 +1081,9 @@ document.addEventListener("keydown", e => {
   else if ((e.key === "i" || e.key === "I") && sel >= 0) { $("cid").focus(); $("cid").select(); e.preventDefault(); }
   else if (e.key === "p" || e.key === "P") idsFromPrevious();
   else if (e.key === "f" || e.key === "F") fillIds();
-  else if (["1", "2", "3", "4", "5"].includes(e.key) && sel >= 0) {
+  else if (["1", "2", "3", "4", "5", "6"].includes(e.key) && sel >= 0) {
     const [k, v] = {"1": ["posture", "standing"], "2": ["posture", "lying"], "3": ["activity", "feeding"],
-                    "4": ["activity", "drinking"], "5": ["activity", "none"]}[e.key];
+                    "4": ["activity", "drinking"], "5": ["activity", "none"], "6": ["activity", "ruminating"]}[e.key];
     setAtt(k, v); e.preventDefault();
   }
   else if (e.key === "0" && sel >= 0) { setAtt("", ""); e.preventDefault(); }

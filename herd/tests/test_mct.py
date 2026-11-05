@@ -2034,8 +2034,10 @@ def test_trial_scores_the_posture_and_activity_you_gave_boxes():
         os.makedirs(boxes)
         frames = [{"file": f"cam1/{t}.jpg", "cam": "cam1", "ts": float(t), "w": 1920, "h": 1080} for t in (100, 105, 110)]
         json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        # rumination: once a burst - t2's burst at 103 ruminating, none of t1's
+        s.burst(("cam1", "t2", 103.0, "confirmed", "P2", 0.9, 0.2, 0.9, 0.8, "standing", "none", None, 0.5, 100, 1))
         lab = {"boxes": [[0.1, 0.4, 0.3, 0.6, "4", 0, {"posture": "lying", "activity": "feeding"}],
-                         [0.5, 0.4, 0.7, 0.6, "", 0, {"posture": "lying"}],            # no id: still scored
+                         [0.5, 0.4, 0.7, 0.6, "", 0, {"posture": "lying", "activity": "ruminating"}],   # no id: still scored
                          [0.8, 0.1, 0.9, 0.2, "", 0, {"activity": "drinking"}]], "status": "done"}   # not found
         labels = os.path.join(d, "labels.json")
         json.dump({"frames": {f["file"]: lab for f in frames}}, open(labels, "w"))
@@ -2045,5 +2047,9 @@ def test_trial_scores_the_posture_and_activity_you_gave_boxes():
         p, a = sc["posture"], sc["activity"]
         assert (p["boxes"], p["right"], p["not_found"]) == (6, 3, 0)
         assert p["confusion"] == {"lying": {"lying": 3, "standing": 3}} and p["cameras"]["cam1"]["share"] == 0.5
-        assert (a["boxes"], a["right"], a["not_found"]) == (3, 3, 3)
+        # ruminating is "neither" to the activity head ...
+        assert (a["boxes"], a["right"], a["not_found"]) == (6, 6, 3) and a["confusion"]["none"] == {"none": 3}
+        # ... and rumination scored against her track's burst nearest the moment (t1: none near)
+        r = sc["rumination"]
+        assert (r["boxes"], r["right"], r["not_found"]) == (3, 3, 3) and r["confusion"] == {"ruminating": {"ruminating": 3}}
         trial.print_score(sc)

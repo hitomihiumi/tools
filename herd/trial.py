@@ -163,7 +163,16 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     seen_track = collections.defaultdict(list)     # your id -> [(cam, ts, its joined track, its cow or None)]
     view = []                                      # every frame played: your boxes and its, for boxes.html
     counted_by = collections.defaultdict(list)     # (your id, frame time) -> [counted on that camera's frame]
-    does = {k: collections.defaultdict(collections.Counter) for k in ("posture", "activity")}   # cam -> (yours, its)
+    does = {k: collections.defaultdict(collections.Counter) for k in ("posture", "activity", "rumination")}
+    rum_thr = report.rumination_threshold(cfg)
+    bursts_of = collections.defaultdict(list)                 # own track -> [(ts, ruminating)]
+    for tr, bts, rum, rp, act in store.query("SELECT track, ts, ruminating, rumination_p, activity FROM bursts"):
+        bursts_of[tr].append((bts, bool(rum) if rum is not None else (rp is not None and rp >= rum_thr and act == "none")))
+
+    def ruminating_near(track, ts, within=45.0):
+        """Her track's burst nearest ts (within that many s - a cow chews for many minutes): ruminating or not."""
+        near = [(abs(bt - ts), r) for bt, r in bursts_of.get(track, ()) if abs(bt - ts) <= within]
+        return min(near)[1] if near else None
     for file, lab in labels.items():
         f = frames.get(file)
         if lab.get("status") != "done" or not f or f["cam"] not in cams:
@@ -184,10 +193,24 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         said = [(b[:4], box_attributes(b)) for b in lab.get("boxes", []) if box_attributes(b)]
         if said:
             got = dict(match([b for b, _ in said], [q[0] for q in pred], max(min_iou, 0.5)))
+            own = [r[0] for r in rows if r[1] == sec]                 # the camera's own track of each of its boxes
             for i, (_, att) in enumerate(said):
-                for k, at_ in (("posture", 3), ("activity", 4)):
-                    if att.get(k):
-                        does[k][cam][(att[k], pred[got[i]][at_] if i in got else None)] += 1
+                j = got.get(i)
+                if att.get("posture"):
+                    does["posture"][cam][(att["posture"], pred[j][3] if j is not None else None)] += 1
+                if att.get("activity"):
+                    # the activity head says feeding / drinking / neither: ruminating is neither to it ...
+                    mine = "none" if att["activity"] == "ruminating" else att["activity"]
+                    does["activity"][cam][(mine, pred[j][4] if j is not None else None)] += 1
+                    # ... and rumination its own head, once a burst: her track's burst nearest the moment
+                    if j is not None:
+                        b = ruminating_near(own[j], f["ts"])
+                        if b is not None:
+                            does["rumination"][cam][("ruminating" if att["activity"] == "ruminating" else "not",
+                                                     "ruminating" if b else "not")] += 1
+                        else:
+                            does["rumination"][cam][("ruminating" if att["activity"] == "ruminating" else "not",
+                                                     "no burst near")] += 1
         # scored here: your boxes in this camera's mask, and one outside it this camera counted (a cow in no
         # camera's mask is counted by the one that tracks her - [mct] count_holes)
         w_, h_ = f.get("w", 1920), f.get("h", 1080)
@@ -231,7 +254,8 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     out["split"] = {t: dict(cnt.most_common()) for t, cnt in by_true.items() if len(big(cnt)) > 1}
     out["your_cows"], out["its_cows"] = len(by_true), len(by_pred)
     out["counted_by_none"] = counted_by_none(counted_by)
-    out["posture"], out["activity"] = (said_against_its(does[k]) for k in ("posture", "activity"))
+    out["posture"], out["activity"], out["rumination"] = (said_against_its(does[k], missing=("no burst near",) if
+                                                          k == "rumination" else ()) for k in ("posture", "activity", "rumination"))
     out["cross_camera"] = cross_camera(seen_as)
     out["cross_camera_moments"] = cross_camera_moments(seen_track)
     out["clock_shift_s"] = shift
@@ -244,18 +268,19 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     return out
 
 
-def said_against_its(per_cam):
+def said_against_its(per_cam, missing=()):
     """{cam: Counter((yours, its or None))} -> how often its posture / activity was yours: over all and per camera, of
-    your boxes it found; the confusion (yours -> its -> boxes) and how many it did not find."""
+    your boxes it found; the confusion (yours -> its -> boxes) and how many it did not find (or, rumination, had no
+    burst of hers near the moment: missing)."""
     def one(cnt):
-        found = {k: v for k, v in cnt.items() if k[1] is not None}
+        found = {k: v for k, v in cnt.items() if k[1] is not None and k[1] not in missing}
         n = sum(found.values())
         conf = collections.defaultdict(dict)
         for (y, i), v in sorted(found.items()):
             conf[y][i] = v
         return {"boxes": n, "right": sum(v for (y, i), v in found.items() if y == i),
                 "share": sum(v for (y, i), v in found.items() if y == i) / n if n else None,
-                "not_found": sum(v for k, v in cnt.items() if k[1] is None), "confusion": dict(conf)}
+                "not_found": sum(v for k, v in cnt.items() if k[1] is None or k[1] in missing), "confusion": dict(conf)}
     allc = collections.Counter()
     for cnt in per_cam.values():
         allc.update(cnt)
@@ -604,14 +629,15 @@ def print_score(sc):
             if r["same_cow"] < r["moments"]:
                 print(f"    your {t}: {r['moments']} times on two cameras at once - one id {r['same_cow']}, two cows "
                       f"{r['two_cows']}, no name {r['no_name']}, one track {r['one_track']}")
-    for k in ("posture", "activity"):
+    for k in ("posture", "activity", "rumination"):
         r = sc.get(k)
         if r and r["boxes"]:
             wrong = sorted(((v, y, i) for y, row in r["confusion"].items() for i, v in row.items() if y != i), reverse=True)
             print(f"  {k} (your boxes with one that it found): right {r['right']} of {r['boxes']} ({r['share']:.0%})"
                   + "".join(f"; {c} {x['share']:.0%} of {x['boxes']}" for c, x in r["cameras"].items() if x["boxes"])
                   + (f" - yours {wrong[0][1]} taken for {wrong[0][2]} {wrong[0][0]} times" if wrong else "")
-                  + (f"; {r['not_found']} of your boxes with one not found" if r["not_found"] else ""))
+                  + (f"; {r['not_found']} of your boxes with one " + ("with no burst of hers within 45 s" if k == "rumination"
+                     else "not found") if r["not_found"] else ""))
     nc = sc.get("counted_by_none")
     if nc and nc["moments"]:
         print(f"  your cows counted by no camera: {nc['none']} of {nc['moments']} cow-moments ({nc['none'] / nc['moments']:.0%})"
