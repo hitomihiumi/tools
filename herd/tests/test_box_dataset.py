@@ -161,7 +161,9 @@ def test_frames_page_and_export_for_the_detector():
         box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--every", "10", "--detector", "none"])
         assert len(json.load(open(os.path.join(out, "frames.json")))["frames"]) == 18
         # labels: done frames are exported, one skipped is not; held out by whole hours of a camera
-        labels = {f["file"]: {"status": "done", "boxes": [[0.1, 0.4, 0.3, 0.8]]} for f in fr}
+        # (posture and activity, the page's 7th field: kept as the annotation's attributes)
+        labels = {f["file"]: {"status": "done", "boxes": [[0.1, 0.4, 0.3, 0.8, "", 0, {"posture": "lying", "activity": "feeding"}]]}
+                  for f in fr}
         labels[fr[1]["file"]] = {"status": "skip", "boxes": []}
         labels[fr[2]["file"]] = {"status": "", "boxes": [[0.1, 0.1, 0.2, 0.2]]}       # edited, not marked done
         lp = os.path.join(d, "labels.json")
@@ -180,6 +182,7 @@ def test_frames_page_and_export_for_the_detector():
         assert not hours(tr) & hours(va)                                              # whole hours held out
         a = tr["annotations"][0]
         assert a["bbox"] == [32.0, 72.0, 64.0, 72.0] and os.path.exists(os.path.join(root, "train", tr["images"][0]["file_name"]))
+        assert a["attributes"] == {"posture": "lying", "activity": "feeding"}
         import extra_det
         assert extra_det._sources("barn", os.path.join(work, "extra_det")) == ["barn"]   # eval takes it
 

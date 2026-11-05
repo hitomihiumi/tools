@@ -146,7 +146,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     box is its track's (report.track_map). A box of yours it did not find, or found without a cow, counts
     against IDR; a cow it gave where you labelled none counts against IDP."""
     import report
-    from box_dataset import read_labels
+    from box_dataset import box_attributes, read_labels
     from common import in_zone
     from store import Store
     store = Store(store_path)
@@ -163,6 +163,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     seen_track = collections.defaultdict(list)     # your id -> [(cam, ts, its joined track, its cow or None)]
     view = []                                      # every frame played: your boxes and its, for boxes.html
     counted_by = collections.defaultdict(list)     # (your id, frame time) -> [counted on that camera's frame]
+    does = {k: collections.defaultdict(collections.Counter) for k in ("posture", "activity")}   # cam -> (yours, its)
     for file, lab in labels.items():
         f = frames.get(file)
         if lab.get("status") != "done" or not f or f["cam"] not in cams:
@@ -171,14 +172,22 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         f = dict(f, ts=f["ts"] + shift + float(cams[cam].get("time_offset_s") or 0.0))   # the run's clock for it
         named = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
                  and str(b[4]).strip().lower() != "x"]
-        rows = store.query("SELECT track, ts, x1, y1, x2, y2 FROM seconds WHERE cam = ? AND ts BETWEEN ? AND ?",
-                           (cam, f["ts"] - max_dt, f["ts"] + max_dt))
+        rows = store.query("SELECT track, ts, x1, y1, x2, y2, posture, activity FROM seconds WHERE cam = ? AND ts "
+                           "BETWEEN ? AND ?", (cam, f["ts"] - max_dt, f["ts"] + max_dt))
         if not rows:
             n[(cam, "frames_not_played")] += 1
             continue
         n[(cam, "frames")] += 1
         sec = min({r[1] for r in rows}, key=lambda t: abs(t - f["ts"]))
-        pred = [(list(r[2:6]), tm.get(r[0]), roots.get(r[0], r[0])) for r in rows if r[1] == sec]
+        pred = [(list(r[2:6]), tm.get(r[0]), roots.get(r[0], r[0]), r[6], r[7]) for r in rows if r[1] == sec]
+        # what she does, where you said it (the box page's posture / activity): against what this camera wrote
+        said = [(b[:4], box_attributes(b)) for b in lab.get("boxes", []) if box_attributes(b)]
+        if said:
+            got = dict(match([b for b, _ in said], [q[0] for q in pred], max(min_iou, 0.5)))
+            for i, (_, att) in enumerate(said):
+                for k, at_ in (("posture", 3), ("activity", 4)):
+                    if att.get(k):
+                        does[k][cam][(att[k], pred[got[i]][at_] if i in got else None)] += 1
         # scored here: your boxes in this camera's mask, and one outside it this camera counted (a cow in no
         # camera's mask is counted by the one that tracks her - [mct] count_holes)
         w_, h_ = f.get("w", 1920), f.get("h", 1080)
@@ -222,6 +231,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     out["split"] = {t: dict(cnt.most_common()) for t, cnt in by_true.items() if len(big(cnt)) > 1}
     out["your_cows"], out["its_cows"] = len(by_true), len(by_pred)
     out["counted_by_none"] = counted_by_none(counted_by)
+    out["posture"], out["activity"] = (said_against_its(does[k]) for k in ("posture", "activity"))
     out["cross_camera"] = cross_camera(seen_as)
     out["cross_camera_moments"] = cross_camera_moments(seen_track)
     out["clock_shift_s"] = shift
@@ -231,6 +241,26 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         out["boxes_page"] = boxes_page(page_dir, boxes_dir, view, out["all"]["mapping"],
                                        cfg["farm"].get("timezone_offset_hours", 0), unnamed(store, tm),
                                        joined_groups(store, roots))
+    return out
+
+
+def said_against_its(per_cam):
+    """{cam: Counter((yours, its or None))} -> how often its posture / activity was yours: over all and per camera, of
+    your boxes it found; the confusion (yours -> its -> boxes) and how many it did not find."""
+    def one(cnt):
+        found = {k: v for k, v in cnt.items() if k[1] is not None}
+        n = sum(found.values())
+        conf = collections.defaultdict(dict)
+        for (y, i), v in sorted(found.items()):
+            conf[y][i] = v
+        return {"boxes": n, "right": sum(v for (y, i), v in found.items() if y == i),
+                "share": sum(v for (y, i), v in found.items() if y == i) / n if n else None,
+                "not_found": sum(v for k, v in cnt.items() if k[1] is None), "confusion": dict(conf)}
+    allc = collections.Counter()
+    for cnt in per_cam.values():
+        allc.update(cnt)
+    out = one(allc)
+    out["cameras"] = {c: one(cnt) for c, cnt in sorted(per_cam.items())}
     return out
 
 
@@ -574,6 +604,14 @@ def print_score(sc):
             if r["same_cow"] < r["moments"]:
                 print(f"    your {t}: {r['moments']} times on two cameras at once - one id {r['same_cow']}, two cows "
                       f"{r['two_cows']}, no name {r['no_name']}, one track {r['one_track']}")
+    for k in ("posture", "activity"):
+        r = sc.get(k)
+        if r and r["boxes"]:
+            wrong = sorted(((v, y, i) for y, row in r["confusion"].items() for i, v in row.items() if y != i), reverse=True)
+            print(f"  {k} (your boxes with one that it found): right {r['right']} of {r['boxes']} ({r['share']:.0%})"
+                  + "".join(f"; {c} {x['share']:.0%} of {x['boxes']}" for c, x in r["cameras"].items() if x["boxes"])
+                  + (f" - yours {wrong[0][1]} taken for {wrong[0][2]} {wrong[0][0]} times" if wrong else "")
+                  + (f"; {r['not_found']} of your boxes with one not found" if r["not_found"] else ""))
     nc = sc.get("counted_by_none")
     if nc and nc["moments"]:
         print(f"  your cows counted by no camera: {nc['none']} of {nc['moments']} cow-moments ({nc['none'] / nc['moments']:.0%})"

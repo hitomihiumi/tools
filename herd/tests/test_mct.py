@@ -2018,3 +2018,32 @@ def test_trial_scores_a_cow_counted_outside_the_mask_and_says_who_counted_none()
         a = sc["all"]
         assert a["your_boxes"] == 6 and a["found_with_a_cow"] == 6 and abs(a["idf1"] - 1.0) < 1e-9
         assert sc["counted_by_none"] == {"moments": 9, "none": 3, "cows": {"9": 3}}
+
+
+def test_trial_scores_the_posture_and_activity_you_gave_boxes():
+    """The box page's posture / activity (a box's 7th field, with or without a cow id) against what the camera wrote
+    at that second: right of found, the confusion, per camera; a box of yours it did not find is said apart."""
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        st = os.path.join(d, "s.sqlite")
+        s = Store(st)
+        s.seconds([("cam1", "t1", float(t), 0.1, 0.4, 0.3, 0.6, "lying", "feeding", 0.9) for t in range(100, 111)] +
+                  [("cam1", "t2", float(t), 0.5, 0.4, 0.7, 0.6, "standing", "none", 0.1) for t in range(100, 111)])
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"cam1/{t}.jpg", "cam": "cam1", "ts": float(t), "w": 1920, "h": 1080} for t in (100, 105, 110)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        lab = {"boxes": [[0.1, 0.4, 0.3, 0.6, "4", 0, {"posture": "lying", "activity": "feeding"}],
+                         [0.5, 0.4, 0.7, 0.6, "", 0, {"posture": "lying"}],            # no id: still scored
+                         [0.8, 0.1, 0.9, 0.2, "", 0, {"activity": "drinking"}]], "status": "done"}   # not found
+        labels = os.path.join(d, "labels.json")
+        json.dump({"frames": {f["file"]: lab for f in frames}}, open(labels, "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1"}]
+        sc = trial.score(st, cfg, boxes, labels)
+        p, a = sc["posture"], sc["activity"]
+        assert (p["boxes"], p["right"], p["not_found"]) == (6, 3, 0)
+        assert p["confusion"] == {"lying": {"lying": 3, "standing": 3}} and p["cameras"]["cam1"]["share"] == 0.5
+        assert (a["boxes"], a["right"], a["not_found"]) == (3, 3, 3)
+        trial.print_score(sc)

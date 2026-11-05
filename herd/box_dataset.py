@@ -10,7 +10,9 @@ and pens are its own. A few hundred frames of them, boxes corrected by hand, tea
              detector's boxes on each as a first guess -> DATA/frames/<cam>/*.jpg, DATA/frames.json
              and the labelling page DATA/boxes.html
   2. label   (a person, in a browser) boxes.html: move, resize, delete, draw boxes; a frame marked
-             done (Enter) is exported, one not marked is not. "Save labels.json" writes the result.
+             done (Enter) is exported, one not marked is not. "Save labels.json" writes the result. A box
+             may carry its cow's id and what she does (keys 1-5: standing / lying, feeding / drinking /
+             neither): [x1, y1, x2, y2, id or "", 1 if the id was filled in, {"posture", "activity"}].
   3. export  -> herd_det_barn_<date>.tgz: COCO train/ and valid/ (valid: whole hours of a camera, a
              fifth, never next to a training frame of the same minutes) as extra_det/barn - what
              run_pod.sh's detector step (DET_ARCH=rfdetr) takes in beside CBVD-5 and the public sets.
@@ -237,6 +239,12 @@ def in_grey(box, exclude):
     return any(in_polygon(cx, cy, p) for p in _polys(exclude))
 
 
+def box_attributes(b):
+    """A labelled box's {posture, activity} (the page's 7th field; either may be missing) or {}."""
+    a = b[6] if len(b) > 6 and isinstance(b[6], dict) else {}
+    return {k: a[k] for k in ("posture", "activity") if a.get(k)}
+
+
 def read_labels(path):
     """labels.json (the page's Save) -> {frame file: {"status": "done" | "skip", "boxes": [[x1, y1, x2, y2] 0-1]}}."""
     if not path:
@@ -292,8 +300,12 @@ def write_coco(folder, frames, src):
         images.append({"id": i, "file_name": name, "width": w, "height": h})
         for b in f["labelled"]:
             x, y, bw, bh = b[0] * w, b[1] * h, (b[2] - b[0]) * w, (b[3] - b[1]) * h
-            anns.append({"id": len(anns) + 1, "image_id": i, "category_id": 1,
-                         "bbox": [round(x, 1), round(y, 1), round(bw, 1), round(bh, 1)], "area": bw * bh, "iscrowd": 0})
+            ann = {"id": len(anns) + 1, "image_id": i, "category_id": 1,
+                   "bbox": [round(x, 1), round(y, 1), round(bw, 1), round(bh, 1)], "area": bw * bh, "iscrowd": 0}
+            att = box_attributes(b)
+            if att:
+                ann["attributes"] = att          # what she does, where you said (posture, activity)
+            anns.append(ann)
     with open(os.path.join(folder, "_annotations.coco.json"), "w", encoding="utf-8") as fh:
         json.dump({"images": images, "annotations": anns,
                    "categories": [{"id": 1, "name": "cow", "supercategory": "none"}]}, fh)
@@ -314,7 +326,7 @@ def cmd_export(args):
             if f.get("cut") and lab.get("cut") != f["cut"]:    # cut again (its zone changed) since it was labelled
                 stale += 1
                 continue
-            boxes = [b[:4] for b in lab.get("boxes", []) if b[2] - b[0] > 0.002 and b[3] - b[1] > 0.002]
+            boxes = [b for b in lab.get("boxes", []) if b[2] - b[0] > 0.002 and b[3] - b[1] > 0.002]
             keep = [b for b in boxes if not in_grey(b, f.get("exclude"))]
             grey += len(boxes) - len(keep)
             done.append(dict(f, labelled=keep))
@@ -715,6 +727,7 @@ button.main{background:var(--accent);color:var(--bg);border-color:var(--accent)}
 main{padding:8px 16px 30px}#wrap{position:relative;overflow:auto;max-height:82vh}canvas{display:block;max-width:100%;touch-action:none;cursor:crosshair;border-radius:6px;background:#000}
 #status.done{color:var(--done);font-weight:600}#status.skip,#status.stale{color:var(--skip);font-weight:600}
 kbd{border:1px solid var(--line);border-radius:4px;padding:0 4px;font-size:12px}
+button.att.on{background:var(--accent);color:var(--bg);border-color:var(--accent)}button:disabled{opacity:.45;cursor:default}
 </style></head><body>
 <header>
 <h1>Barn cow boxes</h1>
@@ -727,7 +740,10 @@ frame done and opens the next; only frames marked done are exported. <kbd>S</kbd
 model): select a box, <kbd>I</kbd>, her ear tag, <kbd>Enter</kbd> - the next box without an id is selected; <kbd>P</kbd> takes
 the ids of this camera's frame before for boxes in the same place; <kbd>F</kbd> carries every id typed by hand through all of
 this camera's frames, forwards and backwards, as long as the cow's box clearly continues (blue ids: filled in - check them;
-a typed id is never overwritten, and fixing a blue one makes it typed).</p>
+a typed id is never overwritten, and fixing a blue one makes it typed). <b>What she does</b> (to check and teach posture and
+activity): select a box, <kbd>1</kbd> standing, <kbd>2</kbd> lying; <kbd>3</kbd> feeding, <kbd>4</kbd> drinking, <kbd>5</kbd>
+neither; <kbd>0</kbd> clears both - once a box has both the next box missing one is selected. <kbd>P</kbd> also takes posture
+and activity from the frame before for boxes in the same place (check them).</p>
 <div class="bar">
 <button id="prev">&larr;</button><span id="pos"></span><button id="next">&rarr;</button>
 <select id="cam"></select><label><input type="checkbox" id="todo"> only not done</label>
@@ -740,6 +756,15 @@ a typed id is never overwritten, and fixing a blue one makes it typed).</p>
 <button id="fillid" title="the ids typed by hand carried through all of this camera's frames, by where the cows are (F)">fill ids through the recording (F)</button>
 <label title="fill only the frames you have opened and edited"><input type="checkbox" id="onlyedited"> only frames I edited</label>
 <span class="mute">select a box, <kbd>I</kbd> - type her tag - <kbd>Enter</kbd> (the next box without an id is selected)</span></div>
+<div class="bar" id="attbar"><span class="mute">posture</span>
+<button class="att" data-k="posture" data-v="standing" title="1">standing <kbd>1</kbd></button>
+<button class="att" data-k="posture" data-v="lying" title="2">lying <kbd>2</kbd></button>
+<span class="mute">activity</span>
+<button class="att" data-k="activity" data-v="feeding" title="3">feeding <kbd>3</kbd></button>
+<button class="att" data-k="activity" data-v="drinking" title="4">drinking <kbd>4</kbd></button>
+<button class="att" data-k="activity" data-v="none" title="5">neither <kbd>5</kbd></button>
+<button id="attclear" title="0">clear <kbd>0</kbd></button>
+<span class="mute">select a box first; pressed again, a choice is taken back</span></div>
 <datalist id="ids"></datalist>
 <div class="bar"><span id="info"></span><span id="status"></span><span class="mute" id="stat"></span></div>
 </header>
@@ -803,7 +828,9 @@ function status() {
   $("status").className = s;
   const all = DATA.frames.filter(isDone).map(f => labels[f.file]), d = all;
   const named = d.reduce((n, l) => n + l.boxes.filter(b => b[4]).length, 0), cows = Object.keys(knownIds()).length;
-  $("stat").textContent = `${d.length} of ${DATA.frames.length} frames done, ${d.reduce((n, l) => n + l.boxes.length, 0)} cows (${named} with an id; ${cows} ids), ${DATA.frames.filter(f => labels[f.file] && labels[f.file].status === "skip" && !stale(f)).length} skipped${DATA.frames.some(stale) ? `, ${DATA.frames.filter(stale).length} cut again - to check` : ""}`;
+  const posed = d.reduce((n, l) => n + l.boxes.filter(b => (attOf(b) || {}).posture).length, 0);
+  const doing = d.reduce((n, l) => n + l.boxes.filter(b => (attOf(b) || {}).activity).length, 0);
+  $("stat").textContent = `${d.length} of ${DATA.frames.length} frames done, ${d.reduce((n, l) => n + l.boxes.length, 0)} cows (${named} with an id; ${cows} ids; ${posed} with a posture, ${doing} an activity), ${DATA.frames.filter(f => labels[f.file] && labels[f.file].status === "skip" && !stale(f)).length} skipped${DATA.frames.some(stale) ? `, ${DATA.frames.filter(stale).length} cut again - to check` : ""}`;
 }
 function draw() {
   ctx.drawImage(img, 0, 0, cv.width, cv.height);
@@ -825,15 +852,53 @@ function draw() {
       ctx.fillRect(X(b[0]), Y(b[1]) - 19, w, 19);
       ctx.fillStyle = "#fff"; ctx.fillText(t, X(b[0]) + 4, Y(b[1]) - 5);
     }
+    const a = attOf(b);
+    if (a) {                                          // what she does, under the box
+      const t = [a.posture, a.activity].filter(Boolean).map(v => SHORT[v] || v).join(" · ");
+      ctx.font = "12px sans-serif";
+      const w = ctx.measureText(t).width + 8, yb = Math.min(cv.height - 17, Y(b[3]));
+      ctx.fillStyle = "rgba(20,20,20,0.75)"; ctx.fillRect(X(b[0]), yb, w, 17);
+      ctx.fillStyle = "#fff"; ctx.fillText(t, X(b[0]) + 4, yb + 13);
+    }
   });
   $("cid").disabled = sel < 0;
   $("cid").value = sel >= 0 ? (boxes[sel][4] || "") : "";
+  const cur = sel >= 0 ? (attOf(boxes[sel]) || {}) : {};
+  document.querySelectorAll("button.att").forEach(el => { el.disabled = sel < 0; el.classList.toggle("on", cur[el.dataset.k] === el.dataset.v); });
+  $("attclear").disabled = sel < 0;
 }
 const corners = b => [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]];
 // a box is [x1, y1, x2, y2] or [x1, y1, x2, y2, "cow id"]
 // [.., "cow id", 1]: an id filled in from a hand-set one on another frame (F), not typed
-const withId = (xy, b) => b && b[4] ? xy.concat(b.slice(4)) : xy;
+// [.., "cow id" or "", 1 or 0, {posture, activity}]: what she does (either may be missing)
+const idOf = b => (b && b[4]) || "", autoOf = b => !!(b && b[5]);
+const attOf = b => (b && b[6] && typeof b[6] === "object" && (b[6].posture || b[6].activity)) ? b[6] : null;
+function pack(xy, id, auto, att) {
+  const b = xy.slice(0, 4), a = att && (att.posture || att.activity) ? att : null;
+  if (id || auto || a) b.push(id || "");
+  if (auto || a) b.push(auto ? 1 : 0);
+  if (a) b.push(Object.assign({}, a.posture ? {posture: a.posture} : {}, a.activity ? {activity: a.activity} : {}));
+  return b;
+}
+const withId = (xy, b) => pack(xy, idOf(b), autoOf(b), attOf(b));
 const rnd = b => withId(b.slice(0, 4).map(v => Math.round(v * 1e4) / 1e4), b);
+const SHORT = {standing: "standing", lying: "lying", feeding: "feeding", drinking: "drinking", none: "neither"};
+function setAtt(k, v) {            // k: posture | activity; v: a value, or "" to take it back; both cleared by k = ""
+  if (sel < 0) return;
+  const was = attOf(boxes[sel]) || {}, a = Object.assign({}, was);
+  if (!k) { delete a.posture; delete a.activity; }
+  else if (!v || a[k] === v) delete a[k];
+  else a[k] = v;
+  push();
+  boxes[sel] = pack(boxes[sel], idOf(boxes[sel]), autoOf(boxes[sel]), a);
+  edited();
+  const now = attOf(boxes[sel]) || {};
+  if (k && now.posture && now.activity && !(was.posture && was.activity)) {   // this one done: the next missing one
+    const order_ = boxes.map((b, i) => [i, b]).sort((p, q) => p[1][0] - q[1][0]);
+    const nx = order_.find(([i, b]) => i !== sel && !((attOf(b) || {}).posture && (attOf(b) || {}).activity));
+    if (nx) { sel = nx[0]; draw(); }
+  }
+}
 function knownIds() {
   const n = {};
   Object.values(labels).forEach(l => (l.boxes || []).forEach(b => { if (b[4]) n[b[4]] = (n[b[4]] || 0) + 1; }));
@@ -844,7 +909,7 @@ function setId(v) {
   if (sel < 0) return;
   v = (v || "").trim().replace(/,/g, " ");
   push();
-  boxes[sel] = v ? boxes[sel].slice(0, 4).concat([v]) : boxes[sel].slice(0, 4);
+  boxes[sel] = pack(boxes[sel], v, false, attOf(boxes[sel]));
   if (v) lastId = v;
   edited(); idList();
 }
@@ -857,7 +922,7 @@ function fillIds() {              // the ids typed by hand carried along this ca
   const f = frame(); if (!f) return;  // the cow's box on the next frame is the one most like hers (and she its)
   const only = $("onlyedited").checked;
   const frs = DATA.frames.filter(g => g.cam === f.cam && (!only || labels[g.file])).sort((a, b) => a.ts - b.ts);
-  const B = frs.map(g => (labels[g.file] ? labels[g.file].boxes : detBoxes(g)[0]).map(b => b[5] ? b.slice(0, 4) : b.slice()));
+  const B = frs.map(g => (labels[g.file] ? labels[g.file].boxes : detBoxes(g)[0]).map(b => b[5] ? pack(b, "", false, attOf(b)) : b.slice()));
   const dist = B.map(bs => bs.map(b => b[4] ? 0 : Infinity));
   const best = (b, bs) => { let k = -1, v = 0; bs.forEach((q, j) => { const u = iou(b, q); if (u > v) { v = u; k = j; } }); return [k, v]; };
   B.forEach((bs, k0) => bs.forEach((b0, j0) => {
@@ -873,7 +938,7 @@ function fillIds() {              // the ids typed by hand carried along this ca
         if (t[4] && !t[5]) break;                                           // a hand-set id: hers to carry on
         if (B[k2].some((q, i) => i !== j2 && q[4] === b0[4] && !q[5])) break;  // she is elsewhere on that frame
         if (dist[k2][j2] <= d) break;                                       // a nearer hand-set id holds it
-        B[k2][j2] = t.slice(0, 4).concat([b0[4], 1]); dist[k2][j2] = d;
+        B[k2][j2] = pack(t, b0[4], true, attOf(t)); dist[k2][j2] = d;
         k = k2; j = j2;
       }
     }
@@ -890,20 +955,26 @@ function fillIds() {              // the ids typed by hand carried along this ca
 }
 function idsFromPrevious() {      // each box without an id takes the id of the box most like it on this camera's
   const f = frame(), i = DATA.frames.indexOf(f);   // frame before (a lying cow keeps her place)
-  const prev = DATA.frames.slice(0, i).reverse().find(g => g.cam === f.cam && labels[g.file] && (labels[g.file].boxes || []).some(b => b[4]));
-  if (!prev) { alert("no earlier frame of this camera with ids"); return; }
+  const some = b => b[4] || attOf(b);
+  const prev = DATA.frames.slice(0, i).reverse().find(g => g.cam === f.cam && labels[g.file] && (labels[g.file].boxes || []).some(some));
+  if (!prev) { alert("no earlier frame of this camera with ids or postures"); return; }
   push();
-  const pb = labels[prev.file].boxes.filter(b => b[4]), used = new Set(boxes.filter(b => b[4]).map(b => b[4]));
-  let n = 0;
+  const pb = labels[prev.file].boxes.filter(some), used = new Set(boxes.filter(b => b[4]).map(b => b[4]));
+  let n = 0, na = 0;
   boxes = boxes.map(b => {
-    if (b[4]) return b;
-    const best = pb.filter(q => !used.has(q[4])).map(q => [iou(b, q), q]).sort((x, y) => y[0] - x[0])[0];
+    const full = attOf(b) && attOf(b).posture && attOf(b).activity;
+    if (b[4] && full) return b;
+    const best = pb.filter(q => !q[4] || b[4] || !used.has(q[4])).map(q => [iou(b, q), q]).sort((x, y) => y[0] - x[0])[0];
     if (!best || best[0] < 0.3) return b;
-    used.add(best[1][4]); n++;
-    return b.slice(0, 4).concat([best[1][4]]);
+    const q = best[1];
+    let id = idOf(b), auto = autoOf(b);
+    if (!id && q[4] && !used.has(q[4])) { id = q[4]; auto = false; used.add(q[4]); n++; }
+    const a = Object.assign({}, attOf(q) || {}, attOf(b) || {});      // hers where set, else the frame before's
+    if (JSON.stringify(a) !== JSON.stringify(attOf(b) || {})) na++;
+    return pack(b, id, auto, a);
   });
   edited();
-  $("info").textContent = `${f.cam}  ${f.time}  - ${n} ids from ${prev.time}: check them`;
+  $("info").textContent = `${f.cam}  ${f.time}  - ${n} ids, ${na} postures / activities from ${prev.time}: check them`;
 }
 function edited() {
   const f = frame();
@@ -986,6 +1057,8 @@ $("cid").addEventListener("change", () => { if (sel >= 0 && $("cid").value.trim(
 $("lastid").onclick = () => { if (sel >= 0 && lastId) setId(lastId); };
 $("previd").onclick = () => idsFromPrevious();
 $("fillid").onclick = () => fillIds();
+document.querySelectorAll("button.att").forEach(el => el.onclick = () => setAtt(el.dataset.k, el.dataset.v));
+$("attclear").onclick = () => setAtt("", "");
 const ZOOMS = [1, 1.5, 2, 3, 4];
 function setZoom(d) { zoom = ZOOMS[Math.min(ZOOMS.length - 1, Math.max(0, ZOOMS.indexOf(zoom) + d))]; if (img.naturalWidth) { fit(); draw(); } }
 $("zin").onclick = () => setZoom(1); $("zout").onclick = () => setZoom(-1);
@@ -1006,6 +1079,12 @@ document.addEventListener("keydown", e => {
   else if ((e.key === "i" || e.key === "I") && sel >= 0) { $("cid").focus(); $("cid").select(); e.preventDefault(); }
   else if (e.key === "p" || e.key === "P") idsFromPrevious();
   else if (e.key === "f" || e.key === "F") fillIds();
+  else if (["1", "2", "3", "4", "5"].includes(e.key) && sel >= 0) {
+    const [k, v] = {"1": ["posture", "standing"], "2": ["posture", "lying"], "3": ["activity", "feeding"],
+                    "4": ["activity", "drinking"], "5": ["activity", "none"]}[e.key];
+    setAtt(k, v); e.preventDefault();
+  }
+  else if (e.key === "0" && sel >= 0) { setAtt("", ""); e.preventDefault(); }
   else if (e.key === "+" || e.key === "=") setZoom(1);
   else if (e.key === "-") setZoom(-1);
 });
