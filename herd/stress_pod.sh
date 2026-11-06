@@ -21,6 +21,7 @@
 #        a narrower frame is no heavier; ALL=1 tries every count at every width)
 #        DURATION=240 (s measured)  WARMUP=60  RESIZE=0  OUT=stress  CLIP_S=0 (seconds of each recording kept, 0: all)
 #        BURST_FPS= (frames a second a burst encodes, e.g. 12.5; default the config's)  BURST_EVERY= (s, e.g. 120)
+#        TRACK_FPS= (detector passes a second for the tracker, e.g. 1; default the config's [sampling] track_fps)
 
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -49,7 +50,7 @@ if [ -z "${HERD_STRESS_IN_TMUX:-}" ]; then
     fi
     mkdir -p "$OUTD"
     knobs=""
-    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY ALL; do
+    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY TRACK_FPS ALL; do
         [ -n "${!v+x}" ] && knobs+="$v=$(printf '%q' "${!v}") "
     done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
@@ -68,7 +69,7 @@ export PATH="$HOME/.local/bin:$PATH"
 CONFIG="$D/${CONFIG:-barn.toml}"
 VIDEOS="$D/${VIDEOS:-rec_first10}"
 WIDTHS="${WIDTHS:-1920 1600 1280 1024 960 800}"
-CAMERAS="${CAMERAS:-5 8 12 16 20 24}"
+CAMERAS="${CAMERAS:-2 3 4 5 6 8 10 12 16 20}"
 [ -f "$CONFIG" ] || { echo "!! no $CONFIG (docker/data/barn.toml)"; exit 1; }
 [ -n "$(find "$VIDEOS" -maxdepth 1 \( -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null | head -1)" ] \
     || { echo "!! no recordings (.mp4, .mkv) in $VIDEOS (VIDEOS=rec_...)"; exit 1; }
@@ -95,9 +96,9 @@ for w in $WIDTHS; do
         fi
     fi
     cfg="$OUTD/barn_$w.toml"
-    python3 - "$CONFIG" "$cfg" "$w" "${BURST_FPS:-}" "${BURST_EVERY:-}" <<'PYEOF'
+    python3 - "$CONFIG" "$cfg" "$w" "${BURST_FPS:-}" "${BURST_EVERY:-}" "${TRACK_FPS:-}" <<'PYEOF'
 import re, sys
-src, dst, w, bfps, bevery = sys.argv[1:]
+src, dst, w, bfps, bevery, tfps = sys.argv[1:]
 text = open(src, encoding="utf-8").read()
 text = re.sub(r'://[^/"@\s]+@', "://", text)                 # no camera passwords in the copy
 def put(text, key, value):
@@ -110,8 +111,11 @@ if bfps:
     text = put(text, "burst_fps", bfps)
 if bevery:
     text = put(text, "burst_every_s", bevery)
+if tfps:
+    text = put(text, "track_fps", tfps)
 open(dst, "w", encoding="utf-8").write(text)
-print(f"[sampling] frame_width = {w}" + (f", burst_fps = {bfps}" if bfps else "") + (f", burst_every_s = {bevery}" if bevery else ""))
+print(f"[sampling] frame_width = {w}" + (f", burst_fps = {bfps}" if bfps else "") + (f", burst_every_s = {bevery}" if bevery else "")
+      + (f", track_fps = {tfps}" if tfps else ""))
 PYEOF
     first=1
     kept=0
@@ -126,11 +130,9 @@ PYEOF
         else
             step "$w px, $n cameras live (${DURATION:-240} s measured after ${WARMUP:-60} s)"
             alone=0; [ "$first" = 1 ] && alone=3                   # the cost of a burst alone, once a width
-            set +e
+            rc=0                                               # exit 1: it did not keep up - an answer, not an error
             "$PY" "$HERE/herd.py" stress --config "$cfg" --videos "$clips" --cameras "$n" --duration "${DURATION:-240}" \
-                --warmup "${WARMUP:-60}" --alone "$alone" --out "$out"
-            rc=$?
-            set -e
+                --warmup "${WARMUP:-60}" --alone "$alone" --out "$out" || rc=$?
             ok="$([ $rc = 0 ] && echo True || echo False)"
         fi
         first=0
@@ -157,14 +159,15 @@ for p in sorted(glob.glob(os.path.join(out, "w*_*cam", "stress_herd_*cam.json"))
     lag = L.get("tick_lag_s", {})
     rows.append((w, L["cameras"], L["keeps_up"], L.get("gpu_busy_share"), lag.get("p99"), L.get("bursts_done"),
                  L.get("bursts_due"), (L.get("burst_late_s") or {}).get("p90"), L.get("cpu_cores_used"),
-                 L.get("torch_peak_mib"), L.get("cameras_max_estimate")))
+                 L.get("torch_peak_mib"), L.get("cameras_max_estimate"), L.get("gpu_busy_by_kind") or {}))
 rows.sort()
 lines = ["| width | cameras | keeps up | GPU busy | tick lag p99, s | bursts done | burst late p90, s | CPU cores used | "
-         "GPU memory, MiB | cameras by GPU (est.) |", "|---|---|---|---|---|---|---|---|---|---|"]
+         "GPU memory, MiB | cameras by GPU (est.) | GPU by part |", "|---|---|---|---|---|---|---|---|---|---|---|"]
 f = lambda x, d=2: "-" if x is None else (f"{x:.{d}f}" if isinstance(x, float) else str(x))
-for w, n, ok, busy, lag, bd, bdue, late, cpu, mem, est in rows:
+for w, n, ok, busy, lag, bd, bdue, late, cpu, mem, est, kinds in rows:
+    parts = ", ".join(f"{k} {v * 100:.0f}%" for k, v in sorted(kinds.items(), key=lambda kv: -kv[1]) if v >= 0.02)
     lines.append(f"| {w} | {n} | {'yes' if ok else 'NO'} | {f(busy and busy * 100, 0)}% | {f(lag)} | {bd}/{bdue} | {f(late, 1)} | "
-                 f"{f(cpu, 1)} | {f(mem, 0)} | {f(est)} |")
+                 f"{f(cpu, 1)} | {f(mem, 0)} | {f(est)} | {parts} |")
 text = "\n".join(lines)
 open(os.path.join(out, "stress.md"), "w").write(text + "\n")
 print(text)
