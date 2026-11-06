@@ -2112,3 +2112,14 @@ def test_resolution_scores_each_width_on_your_labelled_frames():
         c = resolution.capacity(dict(hi, width=1920), cfg, 2.0, 50.0, 8, 16.0, 16 / 9)
         assert c["cameras"] == min(c["cameras_by_gpu"], c["cameras_by_ram"]) and c["ring_buffer_mb"] > 1400
         assert "| 1920 |" in resolution.table([dict(hi, capacity=c)])
+
+
+def test_burst_takes_burst_fps_frames_a_second():
+    """[sampling] burst_fps: a burst keeps that many of the stream's frames a second, evenly; at the stream's rate
+    or more (or 0) all of them."""
+    import pipeline
+    frames = [(100.0 + k / 25.0, k) for k in range(175)]                     # 7 s at 25 fps
+    assert len(pipeline.thin_frames(frames, 25.0)) == 175 and len(pipeline.thin_frames(frames, 0)) == 175
+    half = pipeline.thin_frames(frames, 12.5)
+    assert len(half) == 88 and all(abs((b[0] - a[0]) - 0.08) < 1e-6 for a, b in zip(half, half[1:]))
+    assert len(pipeline.thin_frames(frames, 8.0)) == 56

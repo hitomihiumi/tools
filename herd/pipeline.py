@@ -380,6 +380,20 @@ def cpu_pool():
     return _CROP_POOL
 
 
+def thin_frames(frames, fps):
+    """[(ts, img)] -> at most fps of them a second, evenly ([sampling] burst_fps: a burst's frames - each a crop a
+    cow, encoded - fewer than the stream's 25; 0, or a stream slower than that: all)."""
+    if not fps or len(frames) < 2:
+        return frames
+    t0, out, last = frames[0][0], [], None
+    for f in frames:                                   # one frame in each 1/fps slot of time: the first in it
+        slot = int((f[0] - t0) * fps + 1e-6)
+        if slot != last:
+            out.append(f)
+            last = slot
+    return out
+
+
 def crops_of(pairs, size, margin):
     """[(frame, box)] -> crops, in threads: PIL's resize lets go of the GIL, and a
     burst is ~175 crops a cow - serial, the slowest part of it. Same pixels."""
@@ -405,6 +419,7 @@ class Camera:
         self.tiles = {"tiles": bool(cam["tiles"])} if cam.get("tiles") is not None else {}
         self.fps_out = s["fps"]
         self.burst_s, self.burst_every, self.burst_det_fps = s["burst_seconds"], s["burst_every_s"], s["burst_detect_fps"]
+        self.burst_fps = s.get("burst_fps") or 0.0             # frames a second a burst takes (the stream's: all)
         self.width = s["frame_width"]
         self.buffer = collections.deque()
         self.buffer_s = self.burst_s + 3
@@ -492,6 +507,7 @@ class Camera:
         t0 = self.next_burst
         self.next_burst += self.burst_every
         frames = [f for f in self.frames() if t0 <= f[0] < t0 + self.burst_s]
+        frames = thin_frames(frames, self.burst_fps)
         if len(frames) >= 10 and frames[-1][0] - frames[0][0] >= 0.8 * self.burst_s:
             self.burst(t0, frames)
         else:
