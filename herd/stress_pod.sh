@@ -16,7 +16,9 @@
 #   bash herd/stress_pod.sh log      follow it
 #   bash herd/stress_pod.sh stop
 #
-# Knobs: WORK=/workspace  CONFIG=barn.toml  VIDEOS=rec_first10  WIDTHS="1920 1280"  CAMERAS="5 8 12 16 20"
+# Knobs: WORK=/workspace  CONFIG=barn.toml  VIDEOS=rec_first10  WIDTHS="1920 1600 1280 1024 960 800"
+#        CAMERAS="5 8 12 16 20 24" (each width after the first starts at the most cameras the one before kept up with:
+#        a narrower frame is no heavier; ALL=1 tries every count at every width)
 #        DURATION=240 (s measured)  WARMUP=60  RESIZE=0  OUT=stress  CLIP_S=0 (seconds of each recording kept, 0: all)
 #        BURST_FPS= (frames a second a burst encodes, e.g. 12.5; default the config's)  BURST_EVERY= (s, e.g. 120)
 
@@ -47,7 +49,7 @@ if [ -z "${HERD_STRESS_IN_TMUX:-}" ]; then
     fi
     mkdir -p "$OUTD"
     knobs=""
-    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY; do
+    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY ALL; do
         [ -n "${!v+x}" ] && knobs+="$v=$(printf '%q' "${!v}") "
     done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
@@ -65,13 +67,14 @@ export PATH="$HOME/.local/bin:$PATH"
 
 CONFIG="$D/${CONFIG:-barn.toml}"
 VIDEOS="$D/${VIDEOS:-rec_first10}"
-WIDTHS="${WIDTHS:-1920 1280}"
-CAMERAS="${CAMERAS:-5 8 12 16 20}"
+WIDTHS="${WIDTHS:-1920 1600 1280 1024 960 800}"
+CAMERAS="${CAMERAS:-5 8 12 16 20 24}"
 [ -f "$CONFIG" ] || { echo "!! no $CONFIG (docker/data/barn.toml)"; exit 1; }
 ls "$VIDEOS"/*.mp4 "$VIDEOS"/*.mkv >/dev/null 2>&1 || { echo "!! no recordings in $VIDEOS (VIDEOS=rec_...)"; exit 1; }
 
 source "$HERE/pod_setup.sh"
 
+best=0                                                     # the most cameras the width before kept up with
 for w in $WIDTHS; do
     if [ "${RESIZE:-0}" = "1" ]; then
         clips="$VIDEOS"
@@ -110,7 +113,11 @@ open(dst, "w", encoding="utf-8").write(text)
 print(f"[sampling] frame_width = {w}" + (f", burst_fps = {bfps}" if bfps else "") + (f", burst_every_s = {bevery}" if bevery else ""))
 PYEOF
     first=1
+    kept=0
     for n in $CAMERAS; do
+        if [ "${ALL:-0}" != "1" ] && [ "$n" -lt "$best" ]; then
+            continue                                           # the wider frame kept up with more: so does this one
+        fi
         out="$OUTD/w${w}_${n}cam"
         if [ -f "$out/stress_herd_${n}cam.json" ]; then
             step "$w px, $n cameras: done already ($out)"
@@ -130,7 +137,10 @@ PYEOF
             echo "$w px: $n cameras do not keep up - no more cameras at this width"
             break
         fi
+        kept=$n
     done
+    echo "$w px: keeps up with $kept cameras (of those tried: $CAMERAS)"
+    [ "$kept" -gt "$best" ] && best=$kept
 done
 
 step "The table"
