@@ -19,7 +19,9 @@
 # Knobs: WORK=/workspace  CONFIG=barn.toml  VIDEOS=rec_first10  WIDTHS="1920 1600 1280 1024 960 800"
 #        CAMERAS="5 8 12 16 20 24" (each width after the first starts at the most cameras the one before kept up with:
 #        a narrower frame is no heavier; ALL=1 tries every count at every width)
-#        DURATION=240 (s measured)  WARMUP=60  RESIZE=0  OUT=stress  CLIP_S=0 (seconds of each recording kept, 0: all)
+#        DURATION=240 (s measured)  WARMUP=150 (s: every camera through two bursts - CUDA tunes for each new
+#        batch size on the first ones, and the lag then would count against it)  NO_MAX=2 (failed counts in a row
+#        that end a width: one may fail on a stray second)  RESIZE=0  OUT=stress  CLIP_S=0 (seconds of each recording kept, 0: all)
 #        BURST_FPS= (frames a second a burst encodes, e.g. 12.5; default the config's)  BURST_EVERY= (s, e.g. 120)
 #        TRACK_FPS= (detector passes a second for the tracker, e.g. 1; default the config's [sampling] track_fps)
 
@@ -56,7 +58,7 @@ if [ -z "${HERD_STRESS_IN_TMUX:-}" ]; then
     fi
     mkdir -p "$OUTD"
     knobs=""
-    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY TRACK_FPS ALL; do
+    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY TRACK_FPS ALL NO_MAX; do
         [ -n "${!v+x}" ] && knobs+="$v=$(printf '%q' "${!v}") "
     done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
@@ -126,6 +128,7 @@ print(f"[sampling] frame_width = {w}" + (f", burst_fps = {bfps}" if bfps else ""
 PYEOF
     first=1
     kept=0
+    fails=0
     for n in $CAMERAS; do
         if [ "${ALL:-0}" != "1" ] && [ "$n" -lt "$best" ]; then
             continue                                           # the wider frame kept up with more: so does this one
@@ -135,18 +138,24 @@ PYEOF
             step "$w px, $n cameras: done already ($out)"
             ok="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1])).get('live',{}).get('keeps_up'))" "$out/stress_herd_${n}cam.json")"
         else
-            step "$w px, $n cameras live (${DURATION:-240} s measured after ${WARMUP:-60} s)"
+            step "$w px, $n cameras live (${DURATION:-240} s measured after ${WARMUP:-150} s)"
             alone=0; [ "$first" = 1 ] && alone=3                   # the cost of a burst alone, once a width
             rc=0                                               # exit 1: it did not keep up - an answer, not an error
             "$PY" "$HERE/herd.py" stress --config "$cfg" --videos "$clips" --cameras "$n" --duration "${DURATION:-240}" \
-                --warmup "${WARMUP:-60}" --alone "$alone" --out "$out" || rc=$?
+                --warmup "${WARMUP:-150}" --alone "$alone" --out "$out" || rc=$?
             ok="$([ $rc = 0 ] && echo True || echo False)"
         fi
         first=0
         if [ "$ok" != "True" ]; then
-            echo "$w px: $n cameras do not keep up - no more cameras at this width"
-            break
+            fails=$((fails + 1))
+            if [ "$fails" -ge "${NO_MAX:-2}" ]; then
+                echo "$w px: $n cameras do not keep up either ($fails in a row) - no more cameras at this width"
+                break
+            fi
+            echo "$w px: $n cameras do not keep up - one more count to be sure"
+            continue
         fi
+        fails=0
         kept=$n
     done
     echo "$w px: keeps up with $kept cameras (of those tried: $CAMERAS)"
