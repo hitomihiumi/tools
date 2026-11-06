@@ -23,8 +23,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORK="${WORK:-/workspace}"
 M="$WORK/models"
 D="$WORK/data"
-OUT="$D/${OUT:-resolution}"
-LOG="$OUT/resolution_log.txt"
+OUTD="$D/${OUT:-resolution}"          # OUT stays the knob as given (passed on to the tmux run)
+LOG="$OUTD/resolution_log.txt"
 SESSION=herd-resolution
 
 case "${1:-}" in
@@ -43,7 +43,7 @@ if [ -z "${HERD_RES_IN_TMUX:-}" ]; then
             echo "already running: bash $0 log"; exit 1
         fi
     fi
-    mkdir -p "$OUT"
+    mkdir -p "$OUTD"
     knobs=""
     for v in WORK CONFIG BOXES LABELS VIDEO WIDTHS FRAMES OUT CORES; do
         [ -n "${!v+x}" ] && knobs+="$v=$(printf '%q' "${!v}") "
@@ -54,7 +54,7 @@ if [ -z "${HERD_RES_IN_TMUX:-}" ]; then
     exit 0
 fi
 
-mkdir -p "$OUT"
+mkdir -p "$OUTD"
 exec > >(tee -a "$LOG") 2>&1
 trap 'echo "!! $(basename "$0") stopped at line $LINENO: $BASH_COMMAND (exit $?)"' ERR   # never silently
 step() { echo; echo "=== $*   [$(date '+%F %T')]"; }
@@ -134,7 +134,7 @@ echo "CPU cores: $(nproc); RAM: $(free -g | awk '/Mem:/ {print $2 " GB, " $7 " G
 
 step "herd.py resolution: widths ${WIDTHS:-1920,1600,1280,1024,960,800}"
 args=(--config "$CONFIG" --boxes "$BOXES" --labels "$LABELS" --widths "${WIDTHS:-1920,1600,1280,1024,960,800}"
-      --frames "${FRAMES:-0}" --out "$OUT")
+      --frames "${FRAMES:-0}" --out "$OUTD")
 [ -n "$VIDEO" ] && args+=(--video "$VIDEO")
 [ -n "${CORES:-}" ] && args+=(--cores "$CORES")
 "$PY" "$HERE/herd.py" resolution "${args[@]}"
@@ -142,6 +142,6 @@ args=(--config "$CONFIG" --boxes "$BOXES" --labels "$LABELS" --widths "${WIDTHS:
 step "Export"
 mkdir -p "$WORK/export"
 EXP="$WORK/export/herd_resolution_$(date +%Y%m%d_%H%M).tgz"
-tar -czf "$EXP" -C "$D" "$(basename "$OUT")"
+tar -czf "$EXP" -C "$(dirname "$OUTD")" "$(basename "$OUTD")"
 echo "-> $EXP   (scp it back: resolution.md, resolution.json, the log)"
-cat "$OUT/resolution.md" 2>/dev/null || true
+cat "$OUTD/resolution.md" 2>/dev/null || true
