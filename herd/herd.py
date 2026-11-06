@@ -18,6 +18,7 @@ Training (on CBVD-5 today, on the barn's own footage later):
 Running:
     herd.py run --config barn.toml [--start ISO]   cameras (RTSP) or files -> herd.sqlite
     herd.py stress --model M --detector D          one GPU: a burst alone, then 5 cameras live
+    herd.py resolution --config barn.toml --boxes B --labels L [--video F]   frame width: quality against cameras
     herd.py show-ids --config barn.toml --cam cam1 --video F --start ISO   who is who, drawn on a recorded file
 
 Barn data for identity (once the barn runs with [training_cache] enabled):
@@ -124,6 +125,9 @@ def main():
     if cmd == "stress":
         import stress
         return stress.main(argv)
+    if cmd == "resolution":
+        import resolution
+        return resolution.main(argv)
     if cmd == "barn":
         import barn_dataset
         return barn_dataset.main(argv)

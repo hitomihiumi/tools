@@ -56,6 +56,7 @@ scaffold that switches on with the barn's footage (section 8).
 | Alerts: lame cows, lying and rumination deviations | `report.py alerts` (against the cow's own week) | works; which direction of lying is "worse" is a **setting** (section 8.4) |
 | Vet verdicts, false alarms | `report.py verdict`, `alert-stats` | works |
 | Is one GPU enough | `herd.py stress` | tested: 5 cameras, GPU busy 18% (section 6) |
+| Which frame width (`[sampling] frame_width`) | `herd.py resolution` | on your labelled frames: detector, posture / activity, identity and the cameras a machine keeps up with, at each width |
 
 ---
 

@@ -2053,3 +2053,62 @@ def test_trial_scores_the_posture_and_activity_you_gave_boxes():
         r = sc["rumination"]
         assert (r["boxes"], r["right"], r["not_found"]) == (3, 3, 3) and r["confusion"] == {"ruminating": {"ruminating": 3}}
         trial.print_score(sc)
+
+
+def test_resolution_scores_each_width_on_your_labelled_frames():
+    """herd.py resolution: at each width the detector's boxes against yours (by size), posture / activity of the
+    crops of your boxes, the nearest named box the same cow, the costs and the cameras they allow."""
+    import cv2
+    import resolution
+    import pipeline
+    from PIL import Image
+
+    class Models:                    # sees far cows only at Full HD; posture right when the crop is sharp
+        crop_size, margin = 16, 0.1
+
+        def detect_many(self, imgs, **kw):
+            out = []
+            for im in imgs:
+                far = [[0.70, 0.10, 0.74, 0.16]] if im.shape[1] >= 1600 else []
+                out.append([[0.1, 0.4, 0.3, 0.8]] + far)
+            return out
+
+        def encode(self, crops, **kw):
+            return np.stack([c.astype(np.float32).std() + np.zeros(4) for c in crops])
+
+        def frame_heads(self, feats, boxes, with_id=False, **kw):
+            n = len(boxes)
+            sharp = feats[:, 0] > 20
+            pp = np.where(sharp[:, None], [[0.1, 0.9]], [[0.9, 0.1]])
+            pa = np.tile([0.1, 0.1, 0.8], (n, 1))
+            ids = np.array([[1.0, 0, 0] if b[0] < 0.5 else [0, 1.0, 0] for b in boxes]) + 0.01
+            return pp, pa, ids
+
+        def burst(self, *a, **kw):
+            return {}
+
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "frames", "cam1"))
+        frames, labels = [], {}
+        rng = np.random.default_rng(1)
+        for k in range(4):
+            f = f"frames/cam1/{k}.jpg"
+            Image.fromarray(rng.integers(0, 255, (1080, 1920, 3), dtype=np.uint8)).save(os.path.join(d, f))
+            frames.append({"file": f, "cam": "cam1", "ts": 100.0 + 10 * k, "w": 1920, "h": 1080, "boxes": []})
+            labels[f] = {"status": "done", "boxes": [[0.1, 0.4, 0.3, 0.8, "7", 0, {"posture": "lying", "activity": "none"}],
+                                                     [0.70, 0.10, 0.74, 0.16, "9", 0, {"posture": "lying"}]]}
+        json.dump({"frames": frames}, open(os.path.join(d, "frames.json"), "w"))
+        json.dump({"frames": labels}, open(os.path.join(d, "labels.json"), "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1"}]
+        fr = resolution.labelled_frames(d, os.path.join(d, "labels.json"))
+        assert len(fr) == 4 and fr[0]["boxes"][0][1] == "7"
+        m = Models()
+        hi, lo = resolution.one_width(m, fr, 1920, {}), resolution.one_width(m, fr, 800, {})
+        assert hi["detector"]["recall"] == 1.0 and lo["detector"]["recall"] == 0.5
+        assert lo["detector"]["recall_by_size"] == {"far": 0.0, "near": 1.0}
+        assert hi["posture"]["boxes"] == 8 and hi["identity"]["all"] == 1.0 and hi["identity"]["questions"] == 8
+        assert set(hi["ms"]) >= {"detector_frame", "crop", "encode_crop", "heads_box", "resize_from_full_hd"}
+        c = resolution.capacity(dict(hi, width=1920), cfg, 2.0, 50.0, 8, 16.0, 16 / 9)
+        assert c["cameras"] == min(c["cameras_by_gpu"], c["cameras_by_ram"]) and c["ring_buffer_mb"] > 1400
+        assert "| 1920 |" in resolution.table([dict(hi, capacity=c)])
