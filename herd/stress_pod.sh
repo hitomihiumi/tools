@@ -33,7 +33,13 @@ LOG="$OUTD/stress_log.txt"
 SESSION=herd-stress
 
 case "${1:-}" in
-    log)  exec tail -n 100 -F "$LOG" ;;
+    log)                                                # the run started last, whatever its OUT
+        [ -z "${OUT+x}" ] && [ -f "$D/.stress_last_log" ] && LOG="$(cat "$D/.stress_last_log")"
+        if tmux has-session -t "=$SESSION" 2>/dev/null; then echo "(running in tmux '$SESSION'; log: $LOG)"; else echo "(not running now; log: $LOG)"; fi
+        if [ ! -f "$LOG" ]; then
+            echo "no log yet - the tmux screen:"; tmux capture-pane -p -t "=$SESSION:" -S -60 2>/dev/null || echo "  (no tmux session)"; exit 0
+        fi
+        exec tail -n 100 -F "$LOG" ;;
     stop) tmux kill-session -t "=$SESSION" 2>/dev/null && echo "stopped $SESSION" || echo "$SESSION not running"; exit 0 ;;
     "")   ;;
     *)    echo "usage: $0 [log|stop]"; exit 2 ;;
@@ -55,6 +61,7 @@ if [ -z "${HERD_STRESS_IN_TMUX:-}" ]; then
     done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
         "env HERD_STRESS_IN_TMUX=1 $knobs bash $(printf '%q' "$HERE/stress_pod.sh"); echo; echo '[stress finished]'; exec bash"
+    echo "$LOG" > "$D/.stress_last_log"
     echo "Started in tmux session '$SESSION'.  log: bash $0 log   ($LOG)"
     exit 0
 fi
