@@ -166,15 +166,21 @@ class GpuLock:
         self.cv = threading.Condition()
         self.busy, self.urgent_waiting = False, 0
         self.held = collections.Counter()           # kind -> seconds held
+        self.waited = collections.Counter()         # kind -> seconds spent waiting for it (herd.py stress)
+        self.wait_max = collections.Counter()       # kind -> the longest wait
 
     @contextlib.contextmanager
     def __call__(self, urgent=False, kind="other"):
+        t0 = time.perf_counter()
         with self.cv:
             self.urgent_waiting += urgent
             while self.busy or (not urgent and self.urgent_waiting):
                 self.cv.wait()
             self.urgent_waiting -= urgent
             self.busy = True
+            w = time.perf_counter() - t0
+            self.waited[kind] += w
+            self.wait_max[kind] = max(self.wait_max[kind], w)
         t = time.perf_counter()
         try:
             yield

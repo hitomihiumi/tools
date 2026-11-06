@@ -177,15 +177,18 @@ for p in sorted(glob.glob(os.path.join(out, "w*_*cam", "stress_herd_*cam.json"))
     lag = L.get("tick_lag_s", {})
     rows.append((w, L["cameras"], L["keeps_up"], L.get("gpu_busy_share"), lag.get("p99"), L.get("bursts_done"),
                  L.get("bursts_due"), (L.get("burst_late_s") or {}).get("p90"), L.get("cpu_cores_used"),
-                 L.get("torch_peak_mib"), L.get("cameras_max_estimate"), L.get("gpu_busy_by_kind") or {}))
+                 L.get("torch_peak_mib"), L.get("cameras_max_estimate"), L.get("gpu_busy_by_kind") or {},
+                 max([v for k, v in (L.get("gpu_wait_max_s_by_kind") or {}).items()
+                      if k in ("second_detect", "second_encode", "heads", "track_detect")] or [None]) if L.get("gpu_wait_max_s_by_kind") else None))
 rows.sort()
 lines = ["| width | cameras | keeps up | GPU busy | tick lag p99, s | bursts done | burst late p90, s | CPU cores used | "
-         "GPU memory, MiB | cameras by GPU (est.) | GPU by part |", "|---|---|---|---|---|---|---|---|---|---|---|"]
+         "GPU memory, MiB | cameras by GPU (est.) | a tick's longest wait for the GPU, s | GPU by part |",
+         "|---|---|---|---|---|---|---|---|---|---|---|---|"]
 f = lambda x, d=2: "-" if x is None else (f"{x:.{d}f}" if isinstance(x, float) else str(x))
-for w, n, ok, busy, lag, bd, bdue, late, cpu, mem, est, kinds in rows:
+for w, n, ok, busy, lag, bd, bdue, late, cpu, mem, est, kinds, wait in rows:
     parts = ", ".join(f"{k} {v * 100:.0f}%" for k, v in sorted(kinds.items(), key=lambda kv: -kv[1]) if v >= 0.02)
     lines.append(f"| {w} | {n} | {'yes' if ok else 'NO'} | {f(busy and busy * 100, 0)}% | {f(lag)} | {bd}/{bdue} | {f(late, 1)} | "
-                 f"{f(cpu, 1)} | {f(mem, 0)} | {f(est)} | {parts} |")
+                 f"{f(cpu, 1)} | {f(mem, 0)} | {f(est)} | {f(wait)} | {parts} |")
 text = "\n".join(lines)
 open(os.path.join(out, "stress.md"), "w").write(text + "\n")
 print(text)
