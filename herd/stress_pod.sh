@@ -70,7 +70,8 @@ VIDEOS="$D/${VIDEOS:-rec_first10}"
 WIDTHS="${WIDTHS:-1920 1600 1280 1024 960 800}"
 CAMERAS="${CAMERAS:-5 8 12 16 20 24}"
 [ -f "$CONFIG" ] || { echo "!! no $CONFIG (docker/data/barn.toml)"; exit 1; }
-ls "$VIDEOS"/*.mp4 "$VIDEOS"/*.mkv >/dev/null 2>&1 || { echo "!! no recordings in $VIDEOS (VIDEOS=rec_...)"; exit 1; }
+[ -n "$(find "$VIDEOS" -maxdepth 1 \( -name '*.mp4' -o -name '*.mkv' \) 2>/dev/null | head -1)" ] \
+    || { echo "!! no recordings (.mp4, .mkv) in $VIDEOS (VIDEOS=rec_...)"; exit 1; }
 
 source "$HERE/pod_setup.sh"
 
