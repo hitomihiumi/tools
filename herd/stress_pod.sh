@@ -23,6 +23,8 @@
 #        batch size on the first ones, and the lag then would count against it)  NO_MAX=2 (failed counts in a row
 #        that end a width: one may fail on a stray second)  RESIZE=0  OUT=stress  CLIP_S=0 (seconds of each recording kept, 0: all)
 #        BURST_FPS= (frames a second a burst encodes, e.g. 12.5; default the config's)  BURST_EVERY= (s, e.g. 120)
+#        MAX_LAG=2 (s: a second's rows written at most this late, p99, to keep up; the store and the counts can
+#        take more - the 10 s ring buffer is the hard limit - but live cameras meet a second late, past ~1 s, apart)
 #        TRACK_FPS= (detector passes a second for the tracker, e.g. 1; default the config's [sampling] track_fps)
 
 set -euo pipefail
@@ -58,7 +60,7 @@ if [ -z "${HERD_STRESS_IN_TMUX:-}" ]; then
     fi
     mkdir -p "$OUTD"
     knobs=""
-    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY TRACK_FPS ALL NO_MAX; do
+    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY TRACK_FPS ALL NO_MAX MAX_LAG; do
         [ -n "${!v+x}" ] && knobs+="$v=$(printf '%q' "${!v}") "
     done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
@@ -142,7 +144,7 @@ PYEOF
             alone=0; [ "$first" = 1 ] && alone=3                   # the cost of a burst alone, once a width
             rc=0                                               # exit 1: it did not keep up - an answer, not an error
             "$PY" "$HERE/herd.py" stress --config "$cfg" --videos "$clips" --cameras "$n" --duration "${DURATION:-240}" \
-                --warmup "${WARMUP:-150}" --alone "$alone" --out "$out" || rc=$?
+                --warmup "${WARMUP:-150}" --alone "$alone" --max-lag "${MAX_LAG:-2}" --out "$out" || rc=$?
             ok="$([ $rc = 0 ] && echo True || echo False)"
         fi
         first=0
