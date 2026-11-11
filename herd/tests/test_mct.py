@@ -2112,6 +2112,16 @@ def test_resolution_scores_each_width_on_your_labelled_frames():
         c = resolution.capacity(dict(hi, width=1920), cfg, 2.0, 50.0, 8, 16.0, 16 / 9)
         assert c["cameras"] == min(c["cameras_by_gpu"], c["cameras_by_ram"]) and c["ring_buffer_mb"] > 1400
         assert "| 1920 |" in resolution.table([dict(hi, capacity=c)])
+        # crop-size policies: a fixed side for every cow, or the box's own pixels
+        imgs = [resolution.at_width(resolution.cv2_rgb(f["path"]), 1920) for f in fr]
+        cp = resolution.crop_policies(m, fr, imgs, ["16", "8", "native"])
+        assert set(cp) == {"16", "8", "native"} and cp["16"]["patches_vs_full"] == 1.0
+        assert cp["8"]["patches_vs_full"] == 0.25 and cp["8"]["sides"] == {8: 8}
+        assert cp["16"]["identity"]["all"] == 1.0 and "| 1920 | 8 |" in resolution.crop_table({1920: cp})
+        big = np.zeros((1080, 1920, 3), np.uint8)
+        assert resolution.crop_side("native", big, [0.70, 0.10, 0.74, 0.16], 0.1) == 112      # 78 px: up to 112
+        assert resolution.crop_side("native", big, [0.10, 0.40, 0.20, 0.60], 0.1) == 224      # 259 px: down to 224
+        assert resolution.crop_side("native", big, [0.10, 0.40, 0.18, 0.55], 0.1) == 196      # 194 px: its own
 
 
 def test_burst_takes_burst_fps_frames_a_second():

@@ -16,6 +16,8 @@
 # Knobs: WORK=/workspace  CONFIG=barn.toml  BOXES=boxes_first10  LABELS=labels_first10.json  (all in WORK/data)
 #        VIDEO=rec_first10/cam1_....mp4 (in WORK/data; default: the first .mp4 / .mkv under WORK/data/rec*)
 #        WIDTHS=1920,1600,1280,1024,960,800  FRAMES=0 (at most this many labelled frames; 0: all)  OUT=resolution
+#        CROPS=224,native,168,112 (crop sizes compared: a side for every cow, or native - the box's own pixels)
+#        CROP_WIDTHS=1920,1280 (the frame widths they are compared at; "" to skip)  ONLY_CROPS=1 (WIDTHS=1920 only)
 #        CORES= (the barn machine's CPU cores for the estimate; default: this pod's)
 
 set -euo pipefail
@@ -51,7 +53,7 @@ if [ -z "${HERD_RES_IN_TMUX:-}" ]; then
     fi
     mkdir -p "$OUTD"
     knobs=""
-    for v in WORK CONFIG BOXES LABELS VIDEO WIDTHS FRAMES OUT CORES; do
+    for v in WORK CONFIG BOXES LABELS VIDEO WIDTHS FRAMES OUT CORES CROPS CROP_WIDTHS ONLY_CROPS; do
         [ -n "${!v+x}" ] && knobs+="$v=$(printf '%q' "${!v}") "
     done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
@@ -87,10 +89,12 @@ missing=""
 source "$HERE/pod_setup.sh"
 
 step "herd.py resolution: widths ${WIDTHS:-1920,1600,1280,1024,960,800}"
+[ "${ONLY_CROPS:-0}" = "1" ] && WIDTHS="${WIDTHS:-1920}"
 args=(--config "$CONFIG" --boxes "$BOXES" --labels "$LABELS" --widths "${WIDTHS:-1920,1600,1280,1024,960,800}"
       --frames "${FRAMES:-0}" --out "$OUTD")
 [ -n "$VIDEO" ] && args+=(--video "$VIDEO")
 [ -n "${CORES:-}" ] && args+=(--cores "$CORES")
+args+=(--crops "${CROPS-224,native,168,112}" --crop-widths "${CROP_WIDTHS-1920,1280}")
 "$PY" "$HERE/herd.py" resolution "${args[@]}"
 
 step "Export"

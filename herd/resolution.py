@@ -163,6 +163,70 @@ def one_width(models, frames, width, cams, batch=8):
     return out
 
 
+def crop_side(policy, img, box, margin, full=224, low=112, step=14):
+    """A crop's side in pixels for the encoder: policy "224" / "168" / ... that size for every cow; "native" the box's
+    own pixels (its square crop at this frame width) rounded to the encoder's patch (14), within low..full - a far
+    cow is not blown up to 224, a near one is shrunk to it as ever."""
+    if policy != "native":
+        return int(policy)
+    from common import square_crop_box
+    h, w = img.shape[:2]
+    x1, y1, x2, y2 = square_crop_box(box, w, h, margin)
+    return int(min(full, max(low, round((x2 - x1) / step) * step)))
+
+
+def crop_policies(models, frames, imgs, policies):
+    """Your boxes' crops at each crop-size policy: posture, activity, the fingerprint's same-cow nearest, and the
+    encoder's ms a crop (crops of one size encoded together, as a batch of the pipeline would be)."""
+    from common import crop
+    out = {}
+    for pol in policies:
+        post, act, fps_, sides = collections.Counter(), collections.Counter(), [], []
+        enc_ms, n_crops = 0.0, 0
+        for k, f in enumerate(frames):
+            if not f["boxes"]:
+                continue
+            boxes = [b for b, _, _ in f["boxes"]]
+            size = [crop_side(pol, imgs[k], b, models.margin, models.crop_size) for b in boxes]
+            sides += size
+            feats = [None] * len(boxes)
+            for sz in sorted(set(size)):
+                idx = [i for i, z in enumerate(size) if z == sz]
+                cs = [crop(imgs[k], boxes[i], sz, models.margin) for i in idx]
+                fe, t = timed(models.encode, cs, urgent=True, kind="resolution")
+                enc_ms += t
+                n_crops += len(idx)
+                for i, v in zip(idx, fe):
+                    feats[i] = v
+            try:
+                import torch
+                F = torch.stack(feats)
+            except (ImportError, TypeError):
+                F = np.stack([np.asarray(v) for v in feats])
+            pp, pa, ids = models.frame_heads(F, boxes, with_id=True)
+            for (b, cow, att), p, a, e in zip(f["boxes"], pp, pa, ids):
+                if att.get("posture"):
+                    post[(att["posture"], POSTURES[int(np.argmax(p))])] += 1
+                if att.get("activity"):
+                    mine = "none" if att["activity"] == "ruminating" else att["activity"]
+                    act[(mine, ACTIVITIES[int(np.argmax(a))])] += 1
+                if cow:
+                    e = np.asarray(e, np.float32)
+                    fps_.append((cow, f["cam"], k, e / (np.linalg.norm(e) + 1e-12), size_of(b)))
+        share = lambda c, keep=lambda y: True: (sum(v for (y, i), v in c.items() if y == i and keep(y)) /
+                                                max(1, sum(v for (y, i), v in c.items() if keep(y))))
+        side = np.array(sides, float) if sides else np.zeros(1)
+        out[pol] = {"posture_right": share(post), "lying_found": share(post, lambda y: y == "lying"),
+                    "activity_right": share(act), "feeding_found": share(act, lambda y: y == "feeding"),
+                    "identity": identity_top1(fps_), "encode_ms_a_crop": enc_ms / max(1, n_crops),
+                    "patches_a_crop": float(np.mean((side / 14) ** 2)), "side_median": float(np.median(side)),
+                    "sides": {int(z): int(c) for z, c in zip(*np.unique(side, return_counts=True))}}
+    full = out.get(str(models.crop_size)) or next(iter(out.values()))
+    for r in out.values():
+        r["patches_vs_full"] = r["patches_a_crop"] / max(1e-9, full["patches_a_crop"])
+    return out
+
+
 def identity_top1(items):
     """Each named box against every named box of another frame: is the nearest one the same cow (all cameras /
     other cameras only), over all and by how far she is."""
@@ -266,6 +330,23 @@ def ram_gb():
         return None
 
 
+def cv2_rgb(path):
+    import cv2
+    return cv2.cvtColor(cv2.imread(path), cv2.COLOR_BGR2RGB)
+
+
+def crop_table(crop_res):
+    rows = ["| frame width | crop size | posture right (lying found) | activity right | the same cow nearest (far cows) | "
+            "encoder work (patches vs 224) | ms a crop | crop sides |", "|---|---|---|---|---|---|---|---|"]
+    for w, pols in crop_res.items():
+        for p, r in pols.items():
+            i = r["identity"]
+            rows.append(f"| {w} | {p} | {r['posture_right']:.0%} ({r['lying_found']:.0%}) | {r['activity_right']:.0%} | "
+                        f"{i.get('all', 0):.1%} ({i.get('all_far', 0):.1%}) | {r['patches_vs_full']:.0%} | "
+                        f"{r['encode_ms_a_crop']:.2f} | " + ", ".join(f"{z}: {c}" for z, c in r["sides"].items()) + " |")
+    return "\n".join(rows)
+
+
 def table(res):
     rows = ["| width | detector: found / right (far, mid, near found) | posture right (lying found) | activity right "
             "(feeding found) | the same cow nearest (other camera) | cameras (GPU / CPU / RAM) |",
@@ -291,6 +372,10 @@ def main(argv=None):
     p.add_argument("--widths", default="1920,1600,1280,1024,960,800")
     p.add_argument("--video", default=None, help="a recording of a camera: its decode timed at each width (ffmpeg)")
     p.add_argument("--frames", type=int, default=0, help="at most this many labelled frames (0: all)")
+    p.add_argument("--crops", default="224,native,168,112",
+                   help="crop-size policies to compare: a side in px for every cow, or native (the box's own pixels, "
+                        "112-224)")
+    p.add_argument("--crop-widths", default="1920,1280", help="the frame widths the crop policies are compared at")
     p.add_argument("--cores", type=int, default=os.cpu_count() or 1, help="CPU cores for the cameras")
     p.add_argument("--out", default=None, help="where resolution.json / .md go (default: next to --boxes)")
     args = p.parse_args(argv)
@@ -325,13 +410,26 @@ def main(argv=None):
         print(f"[resolution] {w} px ({time.time() - t:.0f} s): detector found {d['recall']:.1%}, right {d['precision']:.1%}; "
               f"posture {r['posture']['right']:.1%} of {r['posture']['boxes']}; the same cow nearest {i.get('all', 0):.1%} "
               f"(other camera {i.get('other_camera', 0):.1%}); about {r['capacity']['cameras']} cameras", flush=True)
+    crop_res = {}
+    pols = [x.strip() for x in args.crops.split(",") if x.strip()]
+    for w in sorted({int(x) for x in args.crop_widths.split(",") if x.strip()}, reverse=True):
+        if not pols:
+            break
+        imgs = [at_width(cv2_rgb(f["path"]), w) for f in frames]
+        t = time.time()
+        crop_res[w] = crop_policies(models, frames, imgs, pols)
+        print(f"[resolution] crops at {w} px ({time.time() - t:.0f} s): " + "; ".join(
+            f"{p}: posture {r['posture_right']:.1%} (lying {r['lying_found']:.0%}), same cow {r['identity'].get('all', 0):.1%}, "
+            f"{r['patches_vs_full']:.0%} of the patches, {r['encode_ms_a_crop']:.2f} ms a crop" for p, r in crop_res[w].items()),
+            flush=True)
     out_dir = args.out or os.path.dirname(os.path.abspath(os.path.join(args.boxes, "frames.json")))
     os.makedirs(out_dir, exist_ok=True)
     report = {"frames": len(frames), "your_boxes": sum(len(f["boxes"]) for f in frames), "burst_cow_ms": b_ms,
-              "decode_full_hd_ms": full_dec, "cores": args.cores, "ram_available_gb": gb, "widths": res}
+              "decode_full_hd_ms": full_dec, "cores": args.cores, "ram_available_gb": gb, "widths": res,
+              "crops": {str(w): r for w, r in crop_res.items()}}
     with open(os.path.join(out_dir, "resolution.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2, default=float)
-    md = table(res)
+    md = table(res) + ("\n\n" + crop_table(crop_res) if crop_res else "")
     with open(os.path.join(out_dir, "resolution.md"), "w", encoding="utf-8") as fh:
         fh.write(md + "\n")
     print("\n" + md)
