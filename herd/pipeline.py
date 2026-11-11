@@ -645,7 +645,9 @@ class Camera:
         part["detect"] += time.perf_counter() - t
         chains = link_chains([(ts, self.zone(found, img)) for (ts, img), found in zip(sampled, detections)],
                              self.cfg["tracker"]["iou"])
-        size = self.models.crop_size
+        # [model] burst_crop: a burst's crops this many px (a multiple of 14) - the encoder's work goes with its
+        # patches (168: 56% of 224's) and the identity holds at it; the 1 fps crops (posture) stay at the model's
+        size = self.cfg["model"].get("burst_crop") or self.models.crop_size
         cows = crops_n = rum_yes = 0
         rum_p = []
         done = []                                   # the burst's cows, decided together below

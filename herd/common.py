@@ -37,8 +37,10 @@ DEFAULTS = {
     # her track); what is written stays once a second
     "sampling": {"fps": 1.0, "track_fps": 1.0, "burst_every_s": 60, "burst_seconds": 7.0, "burst_fps": 25.0,
                  "burst_detect_fps": 5.0, "frame_width": 1920},   # Full HD: far cows keep their pixels
+    # burst_crop: a burst's crops this many px (0: crop, as the model was taught). The barn's labelled frames
+    # (herd.py resolution): the same-cow nearest 92.2% at 168 as at 224, posture 77 -> 72% (the 1 fps crops stay)
     "model": {"checkpoint": "", "encoder": "facebook/dinov2-small", "crop": 224, "grid": 2, "rumination": "",
-              "identity": ""},
+              "identity": "", "burst_crop": 0},
     "detector": {"weights": "", "threshold": None, "tiles": None},   # None: as the detector was trained
     # still_*: a cow lost is waited for still_s at the same place, still_long_s when she had not moved for
     # still_for_s before (as [mct])

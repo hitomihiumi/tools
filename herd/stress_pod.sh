@@ -25,6 +25,7 @@
 #        BURST_FPS= (frames a second a burst encodes, e.g. 12.5; default the config's)  BURST_EVERY= (s, e.g. 120)
 #        MAX_LAG=2 (s: a second's rows written at most this late, p99, to keep up; the store and the counts can
 #        take more - the 10 s ring buffer is the hard limit - but live cameras meet a second late, past ~1 s, apart)
+#        BURST_CROP= (px of a burst's crops, a multiple of 14, e.g. 168; default the config's [model] burst_crop)
 #        TRACK_FPS= (detector passes a second for the tracker, e.g. 1; default the config's [sampling] track_fps)
 
 set -euo pipefail
@@ -60,7 +61,7 @@ if [ -z "${HERD_STRESS_IN_TMUX:-}" ]; then
     fi
     mkdir -p "$OUTD"
     knobs=""
-    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY TRACK_FPS ALL NO_MAX MAX_LAG; do
+    for v in WORK CONFIG VIDEOS WIDTHS CAMERAS DURATION WARMUP RESIZE OUT CLIP_S BURST_FPS BURST_EVERY TRACK_FPS BURST_CROP ALL NO_MAX MAX_LAG; do
         [ -n "${!v+x}" ] && knobs+="$v=$(printf '%q' "${!v}") "
     done
     env -u TMUX tmux new-session -d -s "$SESSION" -x 200 -y 50 \
@@ -107,16 +108,19 @@ for w in $WIDTHS; do
         fi
     fi
     cfg="$OUTD/barn_$w.toml"
-    python3 - "$CONFIG" "$cfg" "$w" "${BURST_FPS:-}" "${BURST_EVERY:-}" "${TRACK_FPS:-}" <<'PYEOF'
+    python3 - "$CONFIG" "$cfg" "$w" "${BURST_FPS:-}" "${BURST_EVERY:-}" "${TRACK_FPS:-}" "${BURST_CROP:-}" <<'PYEOF'
 import re, sys
-src, dst, w, bfps, bevery, tfps = sys.argv[1:]
+src, dst, w, bfps, bevery, tfps, bcrop = sys.argv[1:]
 text = open(src, encoding="utf-8").read()
 text = re.sub(r'://[^/"@\s]+@', "://", text)                 # no camera passwords in the copy
-def put(text, key, value):
+def put(text, key, value, section="sampling"):
     pat = rf'^{key}\s*=\s*[^#\n]*'
     if re.search(pat, text, flags=re.M):
         return re.sub(pat, f"{key} = {value}    ", text, count=1, flags=re.M)
-    return re.sub(r'^\[sampling\][^\n]*\n', lambda m: m.group(0) + f"{key} = {value}\n", text, count=1, flags=re.M)
+    head = rf'^\[{section}\][^\n]*\n'
+    if not re.search(head, text, flags=re.M):
+        return text + f"\n[{section}]\n{key} = {value}\n"
+    return re.sub(head, lambda m: m.group(0) + f"{key} = {value}\n", text, count=1, flags=re.M)
 text = put(text, "frame_width", w)
 if bfps:
     text = put(text, "burst_fps", bfps)
@@ -124,9 +128,11 @@ if bevery:
     text = put(text, "burst_every_s", bevery)
 if tfps:
     text = put(text, "track_fps", tfps)
+if bcrop:
+    text = put(text, "burst_crop", bcrop, "model")
 open(dst, "w", encoding="utf-8").write(text)
 print(f"[sampling] frame_width = {w}" + (f", burst_fps = {bfps}" if bfps else "") + (f", burst_every_s = {bevery}" if bevery else "")
-      + (f", track_fps = {tfps}" if tfps else ""))
+      + (f", track_fps = {tfps}" if tfps else "") + (f"; [model] burst_crop = {bcrop}" if bcrop else ""))
 PYEOF
     first=1
     kept=0
