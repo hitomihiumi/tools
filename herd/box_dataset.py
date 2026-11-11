@@ -743,7 +743,8 @@ this camera's frames, forwards and backwards, as long as the cow's box clearly c
 a typed id is never overwritten, and fixing a blue one makes it typed). <b>What she does</b> (to check and teach posture and
 activity): select a box, <kbd>1</kbd> standing, <kbd>2</kbd> lying; <kbd>3</kbd> feeding, <kbd>4</kbd> drinking, <kbd>5</kbd>
 neither, <kbd>6</kbd> ruminating (chewing the cud); <kbd>0</kbd> clears both; <kbd>C</kbd> takes them, for each box with a
-cow id, from her box on the other cameras' frames of the same moment (within 2 s; only what is missing, never over yours);
+cow id, from her box on the other cameras' frames of the same moment (within 2 s) - over what the box has with "over what is
+here", else only what it lacks; "from cam1" takes them from that camera only (on all frames, over what is there: needed);
 what you set on a box with a cow id is set on her other cameras' boxes of that moment too, over what they had ("set on her
 other cameras too") - once a box has both the next box missing one is selected. <kbd>P</kbd> also takes posture
 and activity from the frame before for boxes in the same place (check them).</p>
@@ -770,6 +771,8 @@ and activity from the frame before for boxes in the same place (check them).</p>
 <button id="attclear" title="0">clear <kbd>0</kbd></button>
 <button id="attcams" title="for boxes with a cow id: her posture / activity from the other cameras' frames of the same moment (C)">from other cameras (C)</button>
 <button id="attcamsall" title="the same on every frame">... on all frames</button>
+<label title="from other cameras: over what this box already has (else only what it lacks)"><input type="checkbox" id="attover" checked> over what is here</label>
+<select id="attsrc" title="the camera whose posture / activity the others take (on all frames with 'over what is here': needed)"><option value="">from any other camera</option></select>
 <label title="a posture / activity you set goes to this cow (same id) on the other cameras' frames of the same moment (within 2 s), over what they had"><input type="checkbox" id="attsync" checked> set on her other cameras too</label>
 <span class="mute">select a box first; pressed again, a choice is taken back</span></div>
 <datalist id="ids"></datalist>
@@ -793,6 +796,7 @@ function detBoxes(f) {
 }
 const cams = [...new Set(DATA.frames.map(f => f.cam))];
 $("cam").innerHTML = '<option value="">all cameras</option>' + cams.map(c => `<option>${c}</option>`).join("");
+$("attsrc").innerHTML = '<option value="">from any other camera</option>' + cams.map(c => `<option value="${c}">from ${c}</option>`).join("");
 function filter(keep) {
   const c = $("cam").value, todo = $("todo").checked;
   order = DATA.frames.map((f, i) => i).filter(i => (!c || DATA.frames[i].cam === c) &&
@@ -1004,8 +1008,9 @@ function idsFromPrevious() {      // each box without an id takes the id of the 
   edited();
   $("info").textContent = `${f.cam}  ${f.time}  - ${n} ids, ${na} postures / activities from ${prev.time}: check them`;
 }
-function fromOtherCams(f) {      // posture / activity a box lacks, from her box (same cow id) on the other cameras'
-  const near = DATA.frames.filter(g => g.cam !== f.cam && Math.abs(g.ts - f.ts) <= 2 && labels[g.file]);   // frames
+function fromOtherCams(f, over, src) {   // posture / activity from her box (same cow id) on the other cameras' frames
+  // (or one camera's: src) of the same moment - what this box lacks, or (over) over what it has
+  const near = DATA.frames.filter(g => g.cam !== f.cam && (!src || g.cam === src) && Math.abs(g.ts - f.ts) <= 2 && labels[g.file]);
   const theirs = {};                                                            // of the same moment
   near.forEach(g => (labels[g.file].boxes || []).forEach(b => {
     const a = attOf(b); if (!b[4] || !a) return;
@@ -1017,7 +1022,7 @@ function fromOtherCams(f) {      // posture / activity a box lacks, from her box
   const out = bs.map(b => {
     const t = b[4] && theirs[b[4]]; if (!t) return b;
     const a = Object.assign({}, attOf(b) || {}), was = JSON.stringify(a);
-    ["posture", "activity"].forEach(k => { if (!a[k] && t[k]) a[k] = t[k]; });
+    ["posture", "activity"].forEach(k => { if (t[k] && (over || !a[k])) a[k] = t[k]; });
     if (JSON.stringify(a) === was) return b;
     n++; return pack(b, idOf(b), autoOf(b), a);
   });
@@ -1025,23 +1030,27 @@ function fromOtherCams(f) {      // posture / activity a box lacks, from her box
 }
 function attFromCams(all) {
   const cur = frame(); if (!cur) return;
+  const over = $("attover").checked, src = $("attsrc").value;
+  if (all && over && !src) { alert("over what is there on all frames: choose the camera to take them from (its values go to the other cameras)"); return; }
+  if (!all && src && src === cur.cam) { alert(`this is ${src}, the camera chosen to take them from: open another camera's frame`); return; }
   let n = 0, fr = 0;
   if (!all) {
-    const [out, k] = fromOtherCams(cur);
+    const [out, k] = fromOtherCams(cur, over, src);
     if (k) { push(); boxes = out; edited(); }
     n = k; fr = k ? 1 : 0;
   } else {
-    for (let pass = 0; pass < 2; pass++)            // twice: a frame filled may fill another of its moment
+    for (let pass = 0; pass < (src ? 1 : 2); pass++)   // twice: a frame filled may fill another of its moment
       DATA.frames.forEach(g => {
-        if (!labels[g.file]) return;
-        const [out, k] = fromOtherCams(g);
+        if (!labels[g.file] || (src && g.cam === src)) return;
+        const [out, k] = fromOtherCams(g, over, src);
         if (!k) return;
         labels[g.file] = Object.assign({}, labels[g.file], {boxes: out.map(rnd)});
         n += k; fr++;
       });
     store(); open();
   }
-  $("info").textContent = `${cur.cam}  ${cur.time}  - posture / activity for ${n} boxes from the other cameras` +
+  $("info").textContent = `${cur.cam}  ${cur.time}  - posture / activity for ${n} boxes from ${src || "the other cameras"}` +
+    (over ? " (over what they had)" : "") +
     (all ? ` (${fr} frame passes)` : "") + ": check them";
 }
 function edited() {
