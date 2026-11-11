@@ -41,8 +41,8 @@ import time
 
 import numpy as np
 
-from common import (ACTIVITIES, DEFAULTS, POSTURES, blank_excluded, crop, device, in_mask, in_zone, interpolate_box,
-                    iou, load_config, same_place)
+from common import (ACTIVITIES, DEFAULTS, POSTURES, BoxKalman, blank_excluded, crop, device, in_mask, in_zone,
+                    interpolate_box, iou, load_config, same_place)
 from motion import motion_features
 
 
@@ -56,8 +56,9 @@ class Tracker:
     that walked is not waited for that long (another cow may lie down where she was)."""
 
     def __init__(self, cam, min_iou=0.3, max_age_s=5, still_s=0.0, still_iou=0.5, still_contain=0.8,
-                 still_for_s=30.0, still_moved=0.3, still_long_s=0.0):
+                 still_for_s=30.0, still_moved=0.3, still_long_s=0.0, kalman=False, low_iou=0.5):
         self.cam, self.min_iou, self.max_age = cam, min_iou, max_age_s
+        self.kalman, self.low_iou = kalman, low_iou
         self.still_s, self.still_iou, self.still_contain = still_s, still_iou, still_contain
         self.still_long = still_long_s
         self.still_for, self.still_moved = still_for_s, still_moved
@@ -76,11 +77,25 @@ class Tracker:
         if prev is not None and math.hypot(prev["anchor"][0] - anchor[0], prev["anchor"][1] - anchor[1]) \
                 <= self.still_moved * max(box[3] - box[1], 1e-6):
             anchor, since = prev["anchor"], prev["since"]
-        self.tracks[tid] = {"box": box, "last": ts, "anchor": anchor, "since": since}
+        kf = None
+        if self.kalman:
+            kf = prev.get("kf") if prev is not None and ts - prev["last"] <= self.max_age else None
+            if kf is None:
+                kf = BoxKalman(box, ts)
+            else:
+                kf.update(ts, box)
+        self.tracks[tid] = {"box": box, "last": ts, "anchor": anchor, "since": since, "kf": kf}
 
-    def update(self, ts, boxes):
+    def _expected(self, t, ts):
+        return t["kf"].predict(ts) if t.get("kf") is not None else t["box"]
+
+    def update(self, ts, boxes, low=()):
+        """boxes -> [(track, box)]; low: boxes under the detector's threshold, each only continuing a track no sure
+        box took (seen a moment ago where it is expected, IoU low_iou, or lying still at her place) - ByteTrack's
+        second round; a low box matching none is dropped."""
         live = lambda t: self.prev is None or self.prev - t["last"] <= self.max_age   # alive at the last second
-        pairs = sorted(((iou(t["box"], b), tid, j) for tid, t in self.tracks.items()
+        near = lambda t, b: max(iou(self._expected(t, ts), b), iou(t["box"], b))   # a cow may stop short of the guess
+        pairs = sorted(((near(t, b), tid, j) for tid, t in self.tracks.items()
                         if live(t) for j, b in enumerate(boxes)), reverse=True)
         used_t, used_b, out = set(), set(), []
         for v, tid, j in pairs:
@@ -106,6 +121,21 @@ class Tracker:
                 tid = f"{self.cam}-{int(ts)}-{self.n}"
                 self._seen(tid, ts, b)
                 out.append((tid, b))
+        if low:
+            cand = sorted(((near(t, b) if live(t) else 0.0, tid, j)
+                           for tid, t in self.tracks.items() if tid not in used_t and (live(t) or self._held(t, ts))
+                           for j, b in enumerate(low)), reverse=True)
+            used_l = set()
+            for v, tid, j in cand:
+                if tid in used_t or j in used_l:
+                    continue
+                t = self.tracks[tid]
+                if v < self.low_iou and not (not live(t) and self._held(t, ts)
+                                             and same_place(t["box"], low[j], self.still_iou, self.still_contain)):
+                    continue
+                used_t.add(tid), used_l.add(j)
+                self._seen(tid, ts, low[j])
+                out.append((tid, low[j]))
         self.tracks = {k: v for k, v in self.tracks.items()
                        if ts - v["last"] <= self.max_age or self._held(v, ts)}
         for tid, b in out:
@@ -136,15 +166,21 @@ class GpuLock:
         self.cv = threading.Condition()
         self.busy, self.urgent_waiting = False, 0
         self.held = collections.Counter()           # kind -> seconds held
+        self.waited = collections.Counter()         # kind -> seconds spent waiting for it (herd.py stress)
+        self.wait_max = collections.Counter()       # kind -> the longest wait
 
     @contextlib.contextmanager
     def __call__(self, urgent=False, kind="other"):
+        t0 = time.perf_counter()
         with self.cv:
             self.urgent_waiting += urgent
             while self.busy or (not urgent and self.urgent_waiting):
                 self.cv.wait()
             self.urgent_waiting -= urgent
             self.busy = True
+            w = time.perf_counter() - t0
+            self.waited[kind] += w
+            self.wait_max[kind] = max(self.wait_max[kind], w)
         t = time.perf_counter()
         try:
             yield
@@ -188,6 +224,13 @@ class Models:
             import detector as det_mod
             self.detector = det_mod.Live(cfg["detector"]["weights"], cfg["detector"]["threshold"],
                                          tiles=cfg["detector"].get("tiles"))
+        # [tracker] low_score: the detector keeps boxes down to it; those under its own threshold go to the tracker
+        # apart (ByteTrack's second round), never to the bursts
+        self.det_high = 0.0
+        low = cfg["tracker"].get("low_score") or 0.0
+        thr = getattr(self.detector, "threshold", None)
+        if low and thr is not None and low < thr:
+            self.det_high, self.detector.threshold = thr, low
         self.lameness = cfg["lameness"]["enabled"]
         self.motion_dim = self.model.motion_dim
         # rumination.py's model, when the config names one: it reads the same frame vectors
@@ -227,10 +270,15 @@ class Models:
         if self.dev.type == "cuda":
             self.torch.cuda.synchronize()
 
-    def detect(self, img, urgent=False, kind="detect"):
-        return self.detect_many([img], urgent=urgent, kind=kind)[0]
+    def detect(self, img, urgent=False, kind="detect", tiles=None):
+        return self.detect_many([img], urgent=urgent, kind=kind, tiles=tiles)[0]
 
-    def detect_many(self, imgs, batch=8, urgent=False, kind="detect"):
+    def detect_split(self, img, urgent=False, kind="detect", tiles=None):
+        """(sure boxes, low boxes): low ones under the detector's threshold, down to [tracker] low_score."""
+        return self.detect_many([img], urgent=urgent, kind=kind, split=True, tiles=tiles)[0]
+
+    def detect_many(self, imgs, batch=8, urgent=False, kind="detect", split=False, tiles=None):
+        """tiles: a camera's own ([[cameras]] tiles: far cows the detector merged), else [detector] tiles."""
         from PIL import Image
         out = []
         many = getattr(self.detector, "many", None)
@@ -238,8 +286,11 @@ class Models:
         for i in range(0, len(imgs), step):
             pils = [Image.fromarray(x) for x in imgs[i:i + step]]
             with self.gpu(urgent, kind):
-                res = many(pils) if many else [self.detector(pils[0])]
-            out += [[c["bbox"] for c in r] for r in res]
+                res = ((many(pils, tiles=tiles) if tiles is not None else many(pils)) if many
+                       else [self.detector(pils[0])])
+            for r in res:
+                sure = [c["bbox"] for c in r if c.get("det_score", 1.0) >= self.det_high]
+                out.append((sure, [c["bbox"] for c in r if c.get("det_score", 1.0) < self.det_high]) if split else sure)
         return out
 
     def encode(self, crops, batch=256, urgent=False, kind="encode"):
@@ -335,6 +386,20 @@ def cpu_pool():
     return _CROP_POOL
 
 
+def thin_frames(frames, fps):
+    """[(ts, img)] -> at most fps of them a second, evenly ([sampling] burst_fps: a burst's frames - each a crop a
+    cow, encoded - fewer than the stream's 25; 0, or a stream slower than that: all)."""
+    if not fps or len(frames) < 2:
+        return frames
+    t0, out, last = frames[0][0], [], None
+    for f in frames:                                   # one frame in each 1/fps slot of time: the first in it
+        slot = int((f[0] - t0) * fps + 1e-6)
+        if slot != last:
+            out.append(f)
+            last = slot
+    return out
+
+
 def crops_of(pairs, size, margin):
     """[(frame, box)] -> crops, in threads: PIL's resize lets go of the GIL, and a
     burst is ~175 crops a cow - serial, the slowest part of it. Same pixels."""
@@ -354,8 +419,13 @@ class Camera:
         self.cam, self.cfg, self.models, self.gallery, self.store = cam, cfg, models, gallery, store
         self.id = cam["id"]
         self.mask = cam.get("mask", [])
+        self._hole = {}                          # second -> own tracks counted here outside the mask (count_holes)
+        # [[cameras]] tiles = true: this camera's frames to the detector whole and in square tiles (far cows ~1.8x
+        # wider: a row of them seen far off as one box, the barn's cam4), the others as [detector] tiles says
+        self.tiles = {"tiles": bool(cam["tiles"])} if cam.get("tiles") is not None else {}
         self.fps_out = s["fps"]
         self.burst_s, self.burst_every, self.burst_det_fps = s["burst_seconds"], s["burst_every_s"], s["burst_detect_fps"]
+        self.burst_fps = s.get("burst_fps") or 0.0             # frames a second a burst takes (the stream's: all)
         self.width = s["frame_width"]
         self.buffer = collections.deque()
         self.buffer_s = self.burst_s + 3
@@ -363,8 +433,14 @@ class Camera:
         tk = cfg["tracker"]
         self.tracker = Tracker(self.id, tk["iou"], tk["max_age_s"], tk.get("still_s", 0.0), tk.get("still_iou", 0.5),
                                tk.get("still_contain", 0.8), tk.get("still_for_s", 30.0), tk.get("still_moved", 0.3),
-                               tk.get("still_long_s", 0.0))
+                               tk.get("still_long_s", 0.0), tk.get("kalman", False), tk.get("low_iou", 0.5))
         self.next_second = start_ts
+        # track_fps above fps: the detector and the tracker also on frames between the seconds (a cow that
+        # walks moves more than her box in a second at 1 fps, and her track breaks); only the seconds
+        # are written, posture and identity once a second as before
+        tf = s.get("track_fps") or self.fps_out
+        self.track_dt = 1.0 / tf if tf > self.fps_out else None
+        self.next_track = start_ts + (self.track_dt or 0.0)
         # Cameras burst in turn, not all at once: one GPU, an even load.
         self.next_burst = start_ts + self.burst_every * index / max(1, n_cams)
         self.stats = collections.Counter()
@@ -408,9 +484,22 @@ class Camera:
         self.step_burst(now)
 
     def step_seconds(self, now):
-        while now >= self.next_second:
+        while True:
+            if self.track_dt and self.next_track < self.next_second - 1e-6:    # a frame between the seconds
+                if now < self.next_track:
+                    return
+                t = self.next_track
+                self.next_track += self.track_dt
+                frame = min(self.frames(), key=lambda x: abs(x[0] - t), default=None)
+                if frame and abs(frame[0] - t) <= self.track_dt / 2:
+                    self.track_only(t, frame[1])
+                continue
+            if now < self.next_second:
+                return
             t = self.next_second
             self.next_second += 1.0 / self.fps_out
+            if self.track_dt and abs(self.next_track - t) < 1e-6:             # the second does this step
+                self.next_track += self.track_dt
             frame = min(self.frames(), key=lambda x: abs(x[0] - t), default=None)
             if frame and abs(frame[0] - t) <= 0.5:
                 self.second(t, frame[1])
@@ -424,20 +513,46 @@ class Camera:
         t0 = self.next_burst
         self.next_burst += self.burst_every
         frames = [f for f in self.frames() if t0 <= f[0] < t0 + self.burst_s]
+        frames = thin_frames(frames, self.burst_fps)
         if len(frames) >= 10 and frames[-1][0] - frames[0][0] >= 0.8 * self.burst_s:
             self.burst(t0, frames)
         else:
             self.stats["bursts_missed"] += 1
             self._time("burst", t0, missed=True, frames=len(frames))
 
+    def _detect(self, img, kind):
+        """(sure boxes, low boxes) in the working zone; low ones only with [tracker] low_score, and not for the
+        one-canvas floor tracker ([mct] mode fused), which has no second round."""
+        low_on = (self.cfg["tracker"].get("low_score") or 0) > 0 and hasattr(self.models, "detect_split") and \
+            not (self.glob is not None and self.cfg["mct"].get("mode") == "fused")
+        if not low_on:
+            return self.zone(self.models.detect(self.blank(img), urgent=True, kind=kind, **self.tiles), img), []
+        sure, low = self.models.detect_split(self.blank(img), urgent=True, kind=kind, **self.tiles)
+        return self.zone(sure, img), self.zone(low, img)
+
+    def track_only(self, ts, img):
+        """A frame between the seconds: boxes for the tracker, nothing written."""
+        start = time.time()
+        boxes, low = self._detect(img, "track_detect")
+        if self.glob is not None:
+            if hasattr(self.glob, "track_only"):
+                self.glob.track_only(self.id, ts, [{"box": b, "emb": None} for b in boxes] +
+                                     [{"box": b, "emb": None, "low": True} for b in low])
+        else:
+            with self.trk_lock:
+                self.tracker.update(ts, boxes, low)
+        self.stats["track_frames"] += 1
+        self._time("track", ts, start=start, end=time.time(), cows=len(boxes))
+
     # one frame a second
     def second(self, ts, img):
         start = time.time()
-        boxes = self.zone(self.models.detect(self.blank(img), urgent=True, kind="second_detect"), img)
+        boxes, low = self._detect(img, "second_detect")
         if self.glob is not None:
-            return self._second_global(ts, img, boxes, start)
+            return self._second_global(ts, img, boxes, start, low)
         with self.trk_lock:
-            tracked = self.tracker.update(ts, boxes)
+            tracked = self.tracker.update(ts, boxes, low)
+        self.stats["low_boxes_kept"] += len(tracked) - len(boxes)
         if len(tracked) > 1 and hasattr(self.gallery, "together"):
             self.gallery.together([tid for tid, _ in tracked], ts, [b for _, b in tracked])   # two cows, with evidence
         if tracked and hasattr(self.gallery, "counted"):
@@ -454,36 +569,66 @@ class Camera:
         self.stats["cow_seconds"] += len(tracked)
         self._time("second", ts, start=start, end=time.time(), cows=len(tracked))
 
-    def _second_global(self, ts, img, boxes, start):
+    def _second_global(self, ts, img, boxes, start, low=()):
         """The second with mct.py: every box in the tracking zone is encoded first, its frame id
         carries the cow from camera to camera; only the boxes this camera owns (its mask) are
-        counted, so a cow in an overlap is one row, under one track, whichever camera sees her."""
+        counted, so a cow in an overlap is one row, under one track, whichever camera sees her.
+        Low boxes ([tracker] low_score) count only where they continued a track."""
         rows, owned_n = [], 0
+        n_sure, boxes = len(boxes), list(boxes) + list(low)
         if boxes:
             feats = self.models.encode(crops_of([(img, b) for b in boxes], self.models.crop_size, self.models.margin),
                                        urgent=True, kind="second_encode")
             pp, pa, ids = self.models.frame_heads(feats, boxes, with_id=True)
             lying = POSTURES.index("lying")
-            gids = self.glob.update(self.id, ts, [{"box": b, "emb": e, "p_lying": float(p[lying])}
-                                                  for b, e, p in zip(boxes, ids, pp)])
+            gids = self.glob.update(self.id, ts, [{"box": b, "emb": e, "p_lying": float(p[lying]), "low": k >= n_sure}
+                                                  for k, (b, e, p) in enumerate(zip(boxes, ids, pp))])
+            # the store keeps the camera's own tracks (the joins are track_links); the gallery sees them joined
+            own = self.glob.raw(self.id, ts) if hasattr(self.glob, "raw") else None
+            own = own if own is not None and len(own) == len(gids) else gids
+            # which boxes this camera counts: its mask - and a cow in no camera's mask, counted by the one that
+            # tracks her ([mct] count_holes); the tracker's answer where it gives one, else the mask alone
+            counts = self.glob.counts(self.id, ts) if hasattr(self.glob, "counts") else None
+            counts = list(counts) if counts is not None and len(counts) == len(gids) else [None] * len(gids)
+            # a box with no track (an unsure one that continued none: low_score, or inside_low - a box the
+            # tracker itself found unsure) is no cow this second
+            keep = [k for k, g in enumerate(gids) if g is not None]
+            self.stats["low_boxes_kept"] += sum(k >= n_sure for k in keep)
+            if len(keep) < len(gids):
+                gids, own, boxes = [gids[k] for k in keep], [own[k] for k in keep], [boxes[k] for k in keep]
+                counts = [counts[k] for k in keep]
+                pp, pa = pp[keep], pa[keep]
             if len(gids) > 1 and hasattr(self.gallery, "together"):
                 self.gallery.together(gids, ts, boxes)              # two cows, with evidence (mct.CoSeen)
-            for gid, b, p, a in zip(gids, boxes, pp, pa):
-                if in_mask(b, self.mask):
-                    rows.append((self.id, gid, ts, *b, POSTURES[int(p.argmax())], ACTIVITIES[int(a.argmax())],
+            counted, hole = [], set()
+            for gid, g_own, b, p, a, cnt in zip(gids, own, boxes, pp, pa, counts):
+                mine = in_mask(b, self.mask)
+                if mine or cnt:
+                    rows.append((self.id, g_own, ts, *b, POSTURES[int(p.argmax())], ACTIVITIES[int(a.argmax())],
                                  float(p[POSTURES.index("lying")])))
+                if mine:
+                    counted.append(gid)          # the gallery's "counted by two cameras at once": the masks only
+                elif cnt:
+                    hole.add(g_own)              # counted here outside the mask: her bursts may come from here too
+                    self.stats["cow_seconds_in_a_hole"] += 1
+            self._hole[int(ts)] = hole
+            for old in [s_ for s_ in self._hole if s_ < ts - 30]:
+                del self._hole[old]
             owned_n = len(rows)
             if rows:
                 self.store.seconds(rows)
                 if hasattr(self.gallery, "counted"):
-                    self.gallery.counted(self.id, ts, [r[1] for r in rows])
+                    self.gallery.counted(self.id, ts, counted)
         self.stats["seconds"] += 1
         self.stats["cow_seconds"] += owned_n
         self.stats["cow_seconds_tracked_not_owned"] += len(boxes) - owned_n
         self._time("second", ts, start=start, end=time.time(), cows=owned_n)
 
-    def _track_of(self, ts, box):
+    def _track_of(self, ts, box, own=False):
+        """The track there: joined across cameras (the gallery's), or with own the camera's own (the store's)."""
         if self.glob is not None:
+            if own and hasattr(self.glob, "track_at_raw"):
+                return self.glob.track_at_raw(self.id, ts, box)
             return self.glob.track_at(self.id, ts, box)
         with self.trk_lock:
             return self.tracker.track_at(ts, box)
@@ -495,7 +640,8 @@ class Camera:
         step = max(1, int(round(len(frames) / (self.burst_s * self.burst_det_fps))))
         sampled = frames[::step]
         t = time.perf_counter()
-        detections = self.models.detect_many([self.blank(img) for _, img in sampled], kind="burst_detect")
+        detections = self.models.detect_many([self.blank(img) for _, img in sampled], kind="burst_detect",
+                                             **self.tiles)
         part["detect"] += time.perf_counter() - t
         chains = link_chains([(ts, self.zone(found, img)) for (ts, img), found in zip(sampled, detections)],
                              self.cfg["tracker"]["iou"])
@@ -509,8 +655,11 @@ class Camera:
             times = sorted(ch)
             mid = times[len(times) // 2]
             if self.glob is not None and not in_mask(ch[mid], self.mask):
-                continue                                  # tracked here, counted by the camera that owns it
+                o = self._track_of(mid, ch[mid], own=True)
+                if not o or not any(o in self._hole.get(int(mid) + d, ()) for d in (-1, 0, 1)):
+                    continue                              # tracked here, counted by the camera that owns it
             tid = self._track_of(mid, ch[mid]) or f"{self.id}-burst-{int(t0)}-{times[0]:.0f}"
+            own = self._track_of(mid, ch[mid], own=True) or tid      # the camera's own track: what the store keeps
             valid = np.array([times[0] - 0.5 <= ts <= times[-1] + 0.5 for ts, _ in frames])
             boxes = [interpolate_box(ch, ts) for ts, _ in frames]
             t = time.perf_counter()
@@ -535,7 +684,7 @@ class Camera:
             area = float(np.mean([(b[2] - b[0]) * (b[3] - b[1]) for b in ch.values()]))
             # kept until the burst's decision: only what the training cache needs, not every crop
             keep_feats = feats.float().cpu().numpy() if self.cache is not None else None
-            done.append((tid, out, area, keep_feats, rel, valid, motion, boxes, crops[len(crops) // 2]))
+            done.append((tid, out, area, keep_feats, rel, valid, motion, boxes, crops[len(crops) // 2], own))
             cows += 1
             crops_n += len(crops)
             rum_p.append(round(out["rumination"], 3))
@@ -549,17 +698,19 @@ class Camera:
         decisions = (self.gallery.decide_batch([(d[1], d[2], d[0]) for d in done], t0)
                      if hasattr(self.gallery, "decide_batch") else
                      [self.gallery.decide(d[1], d[2], t0, d[0]) for d in done])
-        for (tid, out, area, feats, rel, valid, motion, boxes, mid_crop), decision in zip(done, decisions):
-            self.store.burst((self.id, tid, t0, decision["state"], decision["cow"], decision["sim"],
+        for (tid, out, area, feats, rel, valid, motion, boxes, mid_crop, own), decision in zip(done, decisions):
+            self.store.burst((self.id, own, t0, decision["state"], decision["cow"], decision["sim"],
                               decision["margin"], decision["p"], out["rumination"], out["posture"],
                               out["activity"], out["lameness"], out["quality_max"], int(valid.sum()),
                               int(out["ruminating"])))
             if self.cache is not None:
                 from model import box_pos
-                self.cache.add(self.id, tid, t0, feats, rel, valid, motion,
+                self.cache.add(self.id, own, t0, feats, rel, valid, motion,
                                np.mean([box_pos(b) for b in boxes], 0), mid_crop,
                                {"state": decision["state"], "cow": decision["cow"], "sim": decision["sim"],
                                 "p": decision["p"], "area": area})
+            if decision["state"] == "confirmed" and hasattr(self.gallery, "face"):
+                self.gallery.face(decision["cow"], self.id, t0, mid_crop)
             self.stats[f"id_{decision['state']}"] += 1
         part["gallery"] += time.perf_counter() - t
         self.stats["bursts"] += 1
@@ -567,6 +718,58 @@ class Camera:
                    detected=len(sampled), chains=len(chains), cows=cows, crops=crops_n,
                    ruminating=rum_yes, rumination_p=rum_p,
                    parts={k: round(v, 4) for k, v in part.items()})
+
+
+def merge_by_place(gallery, store, cfg, now):
+    """One cow under two names (each camera's gallery naming her by the side it sees) made one by where she stood:
+    [mct] link_rule "llr" keeps every two cameras' tracks' evidence of being one cow (store.track_evidence); summed
+    per pair of names over history_days (mct.cow_merges) - three zones:
+      sure     cow_merge_llr, cow_merge_margin ahead of every rival, never two names seen at the same time: the
+               gallery merges them, the store aliases them (the reports follow)
+      unsure   cow_review_llr, cow_review_margin: merge_reviews, pending - a person looks at both names' faces
+               (herd.py merges page) and says same or different (herd.py merges apply)
+      the rest nothing
+    A person's "same" is aliased at once and merged in the gallery here; "different" is never proposed again.
+    -> [(old, into)] merged this night; nothing unless [mct] is on in mode link with that rule."""
+    m = cfg["mct"]
+    if not (m.get("enabled") and m.get("mode") == "link" and m.get("link_rule") == "llr"
+            and m.get("cow_merge_llr", 0) > 0 and hasattr(store, "evidence")):
+        return []
+    from mct import cow_merges
+    from report import track_map
+    done = []
+    reviewed = store.reviews() if hasattr(store, "reviews") else []
+    for r in reviewed:                                       # a person said "same": the gallery follows tonight
+        if r["state"] == "same":
+            if gallery.merge(r["old"], r["into"]):
+                done.append((r["old"], r["into"]))
+            store.decide_review(r["old"], r["into"], "applied", now)
+    since = now - cfg["identity"]["history_days"] * 86400
+    evidence = store.evidence(since)
+    if not evidence:
+        return done
+    # each track by its own bursts (aliases followed, joins not): a joined pair whose tracks two cameras named
+    # differently is the strongest evidence of one cow under two names
+    tm = track_map(store, joins=False)
+    aliases = store.aliases()
+    canon = lambda c: aliases.get(c, c)
+    apart = {(tm[a], tm[b]) for a, b in store.cannot_link_pairs(since)
+             if a in tm and b in tm and tm[a] != tm[b]}
+    apart |= {(canon(r["old"]), canon(r["into"])) for r in reviewed if r["state"] == "different"}
+    size = collections.Counter(tm.values())
+    unsure = []
+    for old, into in cow_merges(evidence, tm, apart, m["cow_merge_llr"], m.get("cow_merge_margin", 100.0), size,
+                                reviews=unsure, review_llr=m.get("cow_review_llr", 60.0),
+                                review_margin=m.get("cow_review_margin", 30.0)):
+        if gallery.merge(old, into):
+            store.alias_cow(old, into, now)
+            done.append((old, into))
+    unsure = [u for u in unsure if u[0] in gallery.cows and u[1] in gallery.cows]
+    if unsure and hasattr(store, "put_reviews"):
+        store.put_reviews(unsure, now)
+    if done or unsure:
+        store.event(now, "merged-by-place", json.dumps({"merged": done, "to_review": [u[:2] for u in unsure]}))
+    return done
 
 
 class SharedGallery:
@@ -588,7 +791,10 @@ class SharedGallery:
         from mct import CoSeen
         self.co_seen = CoSeen(cfg["identity"].get("cannot_link_min_s", 5), cfg["identity"].get("cannot_link_max_iou", 0.3))
         self.claims = {}                         # cow -> (track, ts, p or sim)
+        self.groups = None                       # [mct] link: (a, b) -> two cows by the joined groups (TrackletLinker)
         self._counted, self._counted_n, self._counted_pruned = {}, {}, start_ts   # counted(): second -> cam -> tracks
+        self._masked = {c["id"] for c in cfg.get("cameras", []) if c.get("mask")}
+        self._faces = {}                         # (cow, cam) -> ts of the last face kept
 
     def _next_hour(self, ts, hour):
         tz = dt.timezone(dt.timedelta(hours=self.cfg["farm"]["timezone_offset_hours"]))
@@ -621,8 +827,8 @@ class SharedGallery:
         same second for counted_apart_s seconds are two cows (cannot_link), the night never makes one of them.
         (Seconds, not one: a cow on the line between two masks may be counted by both a moment.)"""
         need = self.cfg["identity"].get("counted_apart_s", 10)
-        if not need or not tracks:
-            return
+        if not need or not tracks or cam not in self._masked:   # no mask: it counts the whole picture,
+            return                                              # floor it shares with whoever sees it
         sec = int(ts)
         with self.lock:
             at = self._counted.setdefault(sec, {})
@@ -659,13 +865,23 @@ class SharedGallery:
                     self._pending_links.append(k)
 
     def apart(self, a, b):
-        return a != b and (min(a, b), max(a, b)) in self.cannot_link
+        """Two cows: seen at once on one camera (cannot_link) - or, with [mct] link, in two joined groups holding
+        tracks of one camera alive at the same time (a cow on cam1 and her neighbour's group, joined across cameras:
+        the barn's cow 10 of 23 Oct took her neighbour 12's name while 12 was confirmed on cam2)."""
+        if a == b:
+            return False
+        if (min(a, b), max(a, b)) in self.cannot_link:
+            return True
+        return bool(self.groups is not None and self.groups(a, b))
 
     def _maintain(self, ts):
         if self.g.migration_due(ts):
             self.store.event(ts, "change-over", "weekly cow change-over started")
         if ts >= self.next_nightly:
+            merged = merge_by_place(self.g, self.store, self.cfg, ts)
             res = self.g.nightly(ts, self.cannot_link)
+            if merged:
+                res["merged_by_place"] = merged
             self.store.event(ts, "nightly", json.dumps(res))
             self.next_nightly = self._next_hour(ts, self.cfg["farm"]["nightly_hour"])
         hold = self.cfg["identity"].get("claim_s", 120.0)
@@ -703,6 +919,28 @@ class SharedGallery:
     def decide(self, out, area, ts, track):
         return self.decide_batch([(out, area, track)], ts)[0]
 
+    def face(self, cow, cam, ts, crop_rgb):
+        """A confirmed burst's middle crop kept as the cow's face on this camera (gallery folder faces/<cow>/), at
+        most one each [identity] face_every_s, the last face_keep: what a person compares when asked whether two
+        names are one cow (herd.py merges page)."""
+        every, keep = self.cfg["identity"].get("face_every_s", 600.0), self.cfg["identity"].get("face_keep", 6)
+        folder = getattr(self.g, "folder", None)
+        if not keep or folder is None or crop_rgb is None:
+            return
+        with self.lock:
+            last = self._faces.get((cow, cam))
+            if last is not None and ts - last < every:
+                return
+            self._faces[(cow, cam)] = ts
+        from PIL import Image
+        d = os.path.join(folder, "faces", cow)
+        os.makedirs(d, exist_ok=True)
+        Image.fromarray(np.asarray(crop_rgb, np.uint8)).resize((160, 160)).save(
+            os.path.join(d, f"{cam}_{int(ts)}.jpg"), quality=85)
+        mine = sorted(f for f in os.listdir(d) if f.startswith(f"{cam}_") and f.endswith(".jpg"))
+        for f in mine[:-keep]:
+            os.remove(os.path.join(d, f))
+
     def save(self):
         with self.lock:
             if self._pending_links:                      # the last minute's two-cows, before the night reads them
@@ -713,8 +951,9 @@ class SharedGallery:
 
 # -------------------------------------------------------------------- input
 
-def frames_from(url, start_ts=None):
-    """(ts, rgb) from a file (its own clock, from start_ts) or RTSP (wall clock)."""
+def frames_from(url, start_ts=None, offset=0.0):
+    """(ts, rgb) from a file (its own clock, from start_ts) or RTSP (wall clock when the frame is read, + offset: the
+    camera's time_offset_s - its frames arrive that much late, so a negative one)."""
     import cv2
     cap = cv2.VideoCapture(url)
     if not cap.isOpened():
@@ -738,7 +977,7 @@ def frames_from(url, start_ts=None):
             # the file's own clock (its frames' time stamps) - right when the rate it states is not
             ms = cap.get(cv2.CAP_PROP_POS_MSEC)
             t = ms / 1000.0 if ms / 1000.0 > t else t + 1.0 / fps
-        yield (time.time() if live else start_ts + t), cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
+        yield (time.time() + offset if live else start_ts + t), cv2.cvtColor(f, cv2.COLOR_BGR2RGB)
         i += 1
     cap.release()
 
@@ -768,14 +1007,17 @@ class Lockstep:
             self.cv.notify_all()
 
 
-def run_file(camera, url, start_ts, every_s=60.0, lockstep=None):
+def run_file(camera, url, start_ts, every_s=60.0, lockstep=None, ended=None):
     """A recording on its own clock, as fast as it can go (with lockstep: as the slowest camera with it);
-    where it is, every every_s of recording."""
-    t0, said = time.time(), start_ts
+    where it is, every every_s of recording. ended (a dict): camera id -> (seconds of the recording played,
+    None or the error that stopped it) - an error stops this camera only, the others play on, so it is said
+    again at the end (herd.py trial: beside the score, which is then of a shorter recording)."""
+    t0, said, at = time.time(), start_ts, start_ts
     try:
         for ts, img in frames_from(url, start_ts):
             if lockstep is not None:
                 lockstep.wait(camera.id, ts)
+            at = ts
             camera.push(ts, img)
             camera.step(ts)
             if ts - said >= every_s:
@@ -783,9 +1025,21 @@ def run_file(camera, url, start_ts, every_s=60.0, lockstep=None):
                 done = ts - start_ts
                 print(f"[{camera.id}] {int(done // 60)}:{int(done % 60):02d} of the recording "
                       f"({done / max(1e-6, time.time() - t0):.1f}x real time)", flush=True)
+    except Exception as e:
+        import traceback
+        done = at - start_ts
+        print(f"[{camera.id}] !! stopped at {int(done // 60)}:{int(done % 60):02d} of the recording by an error - "
+              f"the other cameras play on without it:", flush=True)
+        traceback.print_exc()
+        sys.stderr.flush()
+        if ended is not None:
+            ended[camera.id] = (done, f"{type(e).__name__}: {e}")
+        return
     finally:
         if lockstep is not None:
             lockstep.finish(camera.id)
+    if ended is not None:
+        ended[camera.id] = (at - start_ts, None)
     print(f"[{camera.id}] the recording is done", flush=True)
 
 
@@ -850,6 +1104,15 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
     if cfg["mct"]["enabled"]:
         from mct import FloorTracker, FusedSeconds, GlobalTracker, TrackletLinker
         mode = cfg["mct"].get("mode")
+        if mode != "link" and cfg["mct"].get("link_rule", "near") != "near":
+            print(f"[run] [mct] !! link_rule = \"{cfg['mct']['link_rule']}\" but mode = \"{mode}\": the link_* settings "
+                  "and the night's merge by place work only with mode = \"link\"", flush=True)
+        by_id = {c["id"]: c for c in cfg["cameras"]}
+        for a, b in cfg["mct"].get("neighbours", []):
+            if a in by_id and b in by_id and not any(by_id[x].get("tracking_mask") for x in (a, b)):
+                print(f"[run] [mct] {a}-{b}: neither tracks beyond its mask (tracking_mask) - the masks share no "
+                      "floor, so no cow is seen by both at once and their tracks are never joined; give one of "
+                      "them a tracking_mask reaching into the other's floor (herd.py zones page)", flush=True)
         if mode in ("fused", "link"):               # all cameras at once, a second at a time
             t = (FloorTracker if mode == "fused" else TrackletLinker)(cfg, store, shared.separate)
             glob = FusedSeconds(t, [c["id"] for c in cfg["cameras"]])
@@ -857,6 +1120,8 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
             glob = GlobalTracker(cfg, store, shared.separate)
         for cam in cams:
             cam.glob = glob
+        if hasattr(glob, "two_cows"):
+            shared.groups = glob.two_cows               # the claims ask the joins which tracks are two cows
     if cfg["training_cache"]["enabled"]:
         from barn_dataset import TrainingCache
         meta = dict(models.features_meta, dim=models.features_meta.get("dim") or models.encoder.out_dim)
@@ -866,12 +1131,19 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
         print(f"[run] keeping every {cache.every_n}th burst for training in {cache.folder}", flush=True)
     stop = threading.Event()
     threads = []
-    # files: each from its own start (start_ts, when its recording began later than the others'), together
-    lock = Lockstep({c["id"]: c.get("start_ts", start_ts) for c in cfg["cameras"]}) if start is not None else None
+    # files: each from its own start (start_ts, when its recording began later than the others'), together;
+    # a camera's time_offset_s moves its frames onto the barn's one clock (its stream's delay, its clock's error)
+    off = lambda c: float(c.get("time_offset_s") or 0.0)
+    lock = Lockstep({c["id"]: c.get("start_ts", start_ts) + off(c) for c in cfg["cameras"]}) \
+        if start is not None else None
+    ended = {}                                         # files: camera -> (seconds played, the error that stopped it)
+    if lock is not None and cams and hasattr(getattr(cams[0], "glob", None), "files"):
+        cams[0].glob.files(lock)                      # one second of all cameras met by the recordings' clock
     for cam, c in zip(cams, cfg["cameras"]):
-        target = (lambda cam=cam, c=c: run_file(cam, c["url"], c.get("start_ts", start_ts), lockstep=lock)) \
+        target = (lambda cam=cam, c=c: run_file(cam, c["url"], c.get("start_ts", start_ts) + off(c), lockstep=lock,
+                                                ended=ended)) \
             if start is not None else \
-                 (lambda cam=cam, c=c: run_live(cam, lambda: frames_from(c["url"]), stop))
+                 (lambda cam=cam, c=c: run_live(cam, lambda: frames_from(c["url"], offset=off(c)), stop))
         th = threading.Thread(target=target, daemon=True)
         th.start()
         threads.append(th)
@@ -886,7 +1158,40 @@ def run(cfg, start=None, models=None, max_wall_s=None, status=None):
         stop.set()
         if status is not None:
             status["interrupted"] = True
+    for cid, (done, err) in sorted(ended.items()):
+        if err:
+            print(f"[run] !! {cid} stopped at {int(done // 60)}:{int(done % 60):02d} of its recording: {err}", flush=True)
+    if status is not None:
+        status["ended"] = dict(ended)
+    linker = getattr(getattr(cams[0], "glob", None), "ft", None) if cams else None
+    if hasattr(linker, "flush_evidence") and getattr(linker, "last_ts", None) is not None:
+        linker.flush_evidence(linker.last_ts)             # the last minutes' evidence, before the night reads it
+        if linker.clocks():                               # kept for later: herd.py trial, a person reading events
+            store.event(linker.last_ts, "clocks", json.dumps({f"{a}-{b}": v for (a, b), v in linker.clocks().items()}))
     shared.save()
+    st = dict(getattr(cams[0].glob, "stats", None) or {}) if cams and getattr(cams[0], "glob", None) else {}
+    if cfg["mct"].get("enabled") and cfg["mct"].get("mode") == "link":
+        near = list(getattr(getattr(cams[0].glob, "ft", None), "nearest", []) or []) if cams else []
+        if near:
+            q = np.percentile(near, [10, 50, 90])
+            print(f"[run] [mct] two cameras' cows each other's nearest on the floor {len(near)} times: "
+                  f"{q[0]:.0f} / {q[1]:.0f} / {q[2]:.0f} apart (10th / 50th / 90th percentile), "
+                  f"{np.mean(np.asarray(near) <= cfg['mct'].get('link_dist', 120)):.0%} within link_dist "
+                  f"{cfg['mct'].get('link_dist', 120):g}", flush=True)
+        elif cams:
+            print("[run] [mct] two cameras' cows never seen at one second on one floor: no camera pair to join "
+                  "(floor_points on both, [mct] disjoint, tracking_mask)", flush=True)
+        by_id = {c["id"]: c for c in cfg["cameras"]}
+        for (ca, cb), (lag, n, sharp) in sorted((linker.clocks() if hasattr(linker, "clocks") else {}).items()):
+            now = float(by_id.get(cb, {}).get("time_offset_s") or 0.0)
+            say = (f"time_offset_s = {now - lag:+.1f} on {cb} in barn.toml (now {now:+.1f})" if abs(lag) >= 0.5
+                   else "in step")
+            print(f"[run] [mct] clocks: {cb}'s frames come {lag:+.1f} s late against {ca}'s ({n} times a cow walked "
+                  f"on both; there her paths lie {sharp:.0f} cm nearer than a second either side): {say}", flush=True)
+        print(f"[run] [mct] tracks joined across cameras {st.get('linked', 0)}, taken apart again "
+              f"{st.get('unlinked', 0)} (a joined cow counted by both cameras at once for unlink_s: masks that "
+              f"overlap?), joins refused {st.get('link_refused', 0)}; seconds two cows were each other's nearest "
+              f"but another cow within link_margin {st.get('near_but_next_cow_close', 0)}", flush=True)
     return {c.id: dict(c.stats) for c in cams}
 
 

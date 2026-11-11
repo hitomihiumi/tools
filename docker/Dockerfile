@@ -10,8 +10,9 @@ FROM ${BASE} AS deps
 
 # cu126: NVIDIA cards up to the RTX 40 series; cu128: RTX 50; cpu: no NVIDIA card (Mac, laptops)
 ARG TORCH_BACKEND=cu126
+# NVIDIA_DRIVER_CAPABILITIES: the driver's video part too (NVENC / NVDEC: herd.py record --gpu), not only CUDA
 ENV PYTHONUNBUFFERED=1 PIP_NO_CACHE_DIR=1 PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    HF_HOME=/models/hf-cache TZ=Europe/Kyiv
+    HF_HOME=/models/hf-cache TZ=Europe/Kyiv NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
 
 RUN apt-get update && apt-get install -y --no-install-recommends ffmpeg libglib2.0-0 libgomp1 tzdata \
     && rm -rf /var/lib/apt/lists/*

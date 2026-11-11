@@ -21,6 +21,7 @@ IDR beside it; per camera too, and which of its cows took two of yours (merged) 
 
     python herd/herd.py trial ... --boxes /srv/herd/boxes --labels /srv/herd/labels.json
     python herd/herd.py trial --score-only --config barn.toml --out /srv/herd/trial --boxes ... --labels ...
+    python herd/herd.py trial --relink --config barn.toml --out /srv/herd/trial --boxes ... --labels ...   # joins anew
 """
 
 from __future__ import annotations
@@ -42,7 +43,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import iou, load_config, recordings, sessions  # noqa: E402
 
 
-def play(cfg, groups, store_path, models):
+def play(cfg, groups, store_path, models, stopped=None):
+    """stopped (a list): (camera, seconds played, its recording's error) of every camera an error stopped."""
     import pipeline
     for k, g in enumerate(groups, 1):
         c = copy.deepcopy(cfg)
@@ -54,6 +56,9 @@ def play(cfg, groups, store_path, models):
         models = models or pipeline.Models(c)
         status = {}
         pipeline.run(c, start, models=models, status=status)
+        for cam, (done, err) in sorted((status.get("ended") or {}).items()):
+            if err and stopped is not None:
+                stopped.append((cam, done, err))
         if status.get("interrupted"):
             sys.exit("[trial] stopped (Ctrl+C)")
     return models
@@ -75,7 +80,20 @@ def summary(store_path, cfg, gallery_folder):
                     "activity": dict(collections.Counter(a for _, _, a in rows)), "bursts": states}
     meta = os.path.join(gallery_folder, "gallery.json")
     cows = len(json.load(open(meta)).get("cows", {})) if os.path.exists(meta) else 0
-    return out, cows, impossible(store, tm, cfg)
+    return out, cows, impossible(store, tm, cfg), joined(store)
+
+
+def joined(store):
+    """Tracks of one camera joined to another camera's ([mct]: by the floor, or by look in a strip they
+    share) -> {"cam1-cam2": tracks joined}."""
+    roots = store.track_roots() if hasattr(store, "track_roots") else {}
+    cam_of = dict(store.query("SELECT track, MIN(cam) FROM seconds GROUP BY track"))
+    out = collections.Counter()
+    for track, root in roots.items():
+        a, b = cam_of.get(track), cam_of.get(root)
+        if a and b and a != b:
+            out["-".join(sorted((a, b)))] += 1
+    return dict(out)
 
 
 def impossible(store, tm, cfg):
@@ -128,12 +146,12 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     box is its track's (report.track_map). A box of yours it did not find, or found without a cow, counts
     against IDR; a cow it gave where you labelled none counts against IDP."""
     import report
-    from box_dataset import read_labels
+    from box_dataset import box_attributes, read_labels
     from common import in_zone
-    from scipy.optimize import linear_sum_assignment
     from store import Store
     store = Store(store_path)
     tm = report.track_map(store)
+    roots = store.track_roots() if hasattr(store, "track_roots") else {}   # tracks joined across cameras
     frames = {f["file"]: f for f in json.load(open(os.path.join(boxes_dir, "frames.json"), encoding="utf-8"))["frames"]}
     cams = {c["id"]: c for c in cfg["cameras"] if not cameras or c["id"] in cameras}
     labels = read_labels(labels_path)
@@ -141,37 +159,81 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
                                 and frames[k]["cam"] in cams])
     co, cam_co = collections.Counter(), collections.defaultdict(collections.Counter)
     n = collections.Counter()                      # (cam, what) -> boxes
+    seen_as = collections.defaultdict(list)        # your id -> [(cam, ts, its cow)]: one cow on two cameras
+    seen_track = collections.defaultdict(list)     # your id -> [(cam, ts, its joined track, its cow or None)]
+    view = []                                      # every frame played: your boxes and its, for boxes.html
+    counted_by = collections.defaultdict(list)     # (your id, frame time) -> [counted on that camera's frame]
+    does = {k: collections.defaultdict(collections.Counter) for k in ("posture", "activity", "rumination")}
+    rum_thr = report.rumination_threshold(cfg)
+    bursts_of = collections.defaultdict(list)                 # own track -> [(ts, ruminating)]
+    for tr, bts, rum, rp, act in store.query("SELECT track, ts, ruminating, rumination_p, activity FROM bursts"):
+        bursts_of[tr].append((bts, bool(rum) if rum is not None else (rp is not None and rp >= rum_thr and act == "none")))
+
+    def ruminating_near(track, ts, within=45.0):
+        """Her track's burst nearest ts (within that many s - a cow chews for many minutes): ruminating or not."""
+        near = [(abs(bt - ts), r) for bt, r in bursts_of.get(track, ()) if abs(bt - ts) <= within]
+        return min(near)[1] if near else None
     for file, lab in labels.items():
         f = frames.get(file)
         if lab.get("status") != "done" or not f or f["cam"] not in cams:
             continue
-        f = dict(f, ts=f["ts"] + shift)
         cam = f["cam"]
-        truth = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
+        f = dict(f, ts=f["ts"] + shift + float(cams[cam].get("time_offset_s") or 0.0))   # the run's clock for it
+        named = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
                  and str(b[4]).strip().lower() != "x"]
-        truth = [t for t in truth if in_zone(t[0], cams[cam], f.get("w", 1920), f.get("h", 1080))]
-        rows = store.query("SELECT track, ts, x1, y1, x2, y2 FROM seconds WHERE cam = ? AND ts BETWEEN ? AND ?",
-                           (cam, f["ts"] - max_dt, f["ts"] + max_dt))
+        rows = store.query("SELECT track, ts, x1, y1, x2, y2, posture, activity FROM seconds WHERE cam = ? AND ts "
+                           "BETWEEN ? AND ?", (cam, f["ts"] - max_dt, f["ts"] + max_dt))
         if not rows:
             n[(cam, "frames_not_played")] += 1
             continue
         n[(cam, "frames")] += 1
         sec = min({r[1] for r in rows}, key=lambda t: abs(t - f["ts"]))
-        pred = [(list(r[2:6]), tm.get(r[0])) for r in rows if r[1] == sec]
+        pred = [(list(r[2:6]), tm.get(r[0]), roots.get(r[0], r[0]), r[6], r[7]) for r in rows if r[1] == sec]
+        # what she does, where you said it (the box page's posture / activity): against what this camera wrote
+        said = [(b[:4], box_attributes(b)) for b in lab.get("boxes", []) if box_attributes(b)]
+        if said:
+            got = dict(match([b for b, _ in said], [q[0] for q in pred], max(min_iou, 0.5)))
+            own = [r[0] for r in rows if r[1] == sec]                 # the camera's own track of each of its boxes
+            for i, (_, att) in enumerate(said):
+                j = got.get(i)
+                if att.get("posture"):
+                    does["posture"][cam][(att["posture"], pred[j][3] if j is not None else None)] += 1
+                if att.get("activity"):
+                    # the activity head says feeding / drinking / neither: ruminating is neither to it ...
+                    mine = "none" if att["activity"] == "ruminating" else att["activity"]
+                    does["activity"][cam][(mine, pred[j][4] if j is not None else None)] += 1
+                    # ... and rumination its own head, once a burst: her track's burst nearest the moment
+                    if j is not None:
+                        b = ruminating_near(own[j], f["ts"])
+                        if b is not None:
+                            does["rumination"][cam][("ruminating" if att["activity"] == "ruminating" else "not",
+                                                     "ruminating" if b else "not")] += 1
+                        else:
+                            does["rumination"][cam][("ruminating" if att["activity"] == "ruminating" else "not",
+                                                     "no burst near")] += 1
+        # scored here: your boxes in this camera's mask, and one outside it this camera counted (a cow in no
+        # camera's mask is counted by the one that tracks her - [mct] count_holes)
+        w_, h_ = f.get("w", 1920), f.get("h", 1080)
+        truth = [t for t in named if in_zone(t[0], cams[cam], w_, h_)
+                 or (in_zone(t[0], cams[cam], w_, h_, tracking=True) and any(iou(t[0], q[0]) >= max(min_iou, 0.5) for q in pred))]
+        for t in named:                            # who counts each of your cows: none of the cameras?
+            if in_zone(t[0], cams[cam], w_, h_, tracking=True):
+                counted_by[(t[1], f["ts"])].append(any(iou(t[0], q[0]) >= min_iou for q in pred))
+        view.append({"cam": cam, "ts": f["ts"], "file": file, "w": f.get("w", 1920), "h": f.get("h", 1080),
+                     "mine": [[*map(float, b), i, (b, i) in truth] for b, i in named],   # [.., scored: in its mask]
+                     "its": [[*map(float, r[2:6]), tm.get(r[0]), r[0], roots.get(r[0], r[0])] for r in rows if r[1] == sec],
+                     "hit": match([b for b, _ in named], [p[0] for p in pred], min_iou)})
         n[(cam, "your_boxes")] += len(truth)
-        n[(cam, "its_named_boxes")] += sum(1 for _, cow in pred if cow)
-        if truth and pred:
-            M = np.array([[iou(t[0], q[0]) for q in pred] for t in truth])
-            r, c = linear_sum_assignment(-M)
-            hit = [(i, j) for i, j in zip(r, c) if M[i, j] >= min_iou]
-        else:
-            hit = []
+        n[(cam, "its_named_boxes")] += sum(1 for p in pred if p[1])
+        hit = match([b for b, _ in truth], [p[0] for p in pred], min_iou)
         n[(cam, "found")] += len(hit)
         n[(cam, "found_with_a_cow")] += sum(1 for _, j in hit if pred[j][1])
         for i, j in hit:
+            seen_track[truth[i][1]].append((cam, f["ts"], pred[j][2], pred[j][1]))
             if pred[j][1]:
                 co[(truth[i][1], pred[j][1])] += 1
                 cam_co[cam][(truth[i][1], pred[j][1])] += 1
+                seen_as[truth[i][1]].append((cam, f["ts"], pred[j][1]))
     allc = sorted({c for c, _ in n})
     tot = lambda what: sum(n[(c, what)] for c in allc)
     out = {"all": idf1(co, tot("your_boxes"), tot("its_named_boxes")), "cameras": {}}
@@ -191,10 +253,175 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     out["merged"] = {p: dict(cnt.most_common()) for p, cnt in by_pred.items() if len(big(cnt)) > 1}
     out["split"] = {t: dict(cnt.most_common()) for t, cnt in by_true.items() if len(big(cnt)) > 1}
     out["your_cows"], out["its_cows"] = len(by_true), len(by_pred)
+    out["counted_by_none"] = counted_by_none(counted_by)
+    out["posture"], out["activity"], out["rumination"] = (said_against_its(does[k], missing=("no burst near",) if
+                                                          k == "rumination" else ()) for k in ("posture", "activity", "rumination"))
+    out["cross_camera"] = cross_camera(seen_as)
+    out["cross_camera_moments"] = cross_camera_moments(seen_track)
     out["clock_shift_s"] = shift
     if page_dir and out["merged"]:
         out["same_cow_page"] = same_cow_page(page_dir, boxes_dir, labels, frames, out["merged"])
+    if page_dir and view:
+        out["boxes_page"] = boxes_page(page_dir, boxes_dir, view, out["all"]["mapping"],
+                                       cfg["farm"].get("timezone_offset_hours", 0), unnamed(store, tm),
+                                       joined_groups(store, roots))
     return out
+
+
+def said_against_its(per_cam, missing=()):
+    """{cam: Counter((yours, its or None))} -> how often its posture / activity was yours: over all and per camera, of
+    your boxes it found; the confusion (yours -> its -> boxes) and how many it did not find (or, rumination, had no
+    burst of hers near the moment: missing)."""
+    def one(cnt):
+        found = {k: v for k, v in cnt.items() if k[1] is not None and k[1] not in missing}
+        n = sum(found.values())
+        conf = collections.defaultdict(dict)
+        for (y, i), v in sorted(found.items()):
+            conf[y][i] = v
+        return {"boxes": n, "right": sum(v for (y, i), v in found.items() if y == i),
+                "share": sum(v for (y, i), v in found.items() if y == i) / n if n else None,
+                "not_found": sum(v for k, v in cnt.items() if k[1] is None or k[1] in missing), "confusion": dict(conf)}
+    allc = collections.Counter()
+    for cnt in per_cam.values():
+        allc.update(cnt)
+    out = one(allc)
+    out["cameras"] = {c: one(cnt) for c, cnt in sorted(per_cam.items())}
+    return out
+
+
+def counted_by_none(counted_by, at_once_s=1.5):
+    """Your cows at each moment (the cameras' frames within at_once_s of each other), each where a camera tracks her:
+    counted by one camera at least (its box there in the store), or by none - between two masks, or missed."""
+    by_cow = collections.defaultdict(list)
+    for (cow, ts), got in counted_by.items():
+        by_cow[cow].append((ts, any(got)))
+    total, none, cows = 0, 0, collections.Counter()
+    for cow, items in by_cow.items():
+        items.sort()
+        moment = []
+        for ts, got in items + [(float("inf"), None)]:
+            if moment and ts - moment[0][0] > at_once_s:
+                total += 1
+                if not any(g for _, g in moment):
+                    none += 1
+                    cows[cow] += 1
+                moment = []
+            moment.append((ts, got))
+    return {"moments": total, "none": none, "cows": dict(cows.most_common())}
+
+
+def unnamed(store, tm):
+    """Why a track has no cow: {track: words} for every track report.track_map left without one."""
+    secs = dict(store.query("SELECT track, COUNT(*) FROM seconds GROUP BY track"))
+    states, cows = collections.defaultdict(collections.Counter), collections.defaultdict(collections.Counter)
+    for t, st, cow in store.query("SELECT track, state, cow FROM bursts"):
+        states[t][st] += 1
+        if st == "confirmed":
+            cows[t][cow] += 1
+    out = {}
+    for t, n in secs.items():
+        if t in tm:
+            continue
+        if cows[t]:
+            out[t] = (f"its sure bursts split between cows ({', '.join(f'{c} {k}' for c, k in cows[t].most_common(3))}) - "
+                      "none has two thirds")
+        elif states[t]:
+            out[t] = (f"{sum(states[t].values())} bursts, none sure enough to name her "
+                      f"({', '.join(f'{k} {v}' for k, v in states[t].items())})")
+        else:
+            out[t] = (f"no burst on this track ({n} s long): a burst comes once a minute, while she is in this "
+                      "camera's mask")
+    return out
+
+
+def match(mine, its, min_iou):
+    """Your boxes against its at one moment, one to one by overlap -> [(your index, its index)]."""
+    from scipy.optimize import linear_sum_assignment
+    if not mine or not its:
+        return []
+    M = np.array([[iou(a, b) for b in its] for a in mine])
+    r, c = linear_sum_assignment(-M)
+    return [(int(i), int(j)) for i, j in zip(r, c) if M[i, j] >= min_iou]
+
+
+def joined_groups(store, roots):
+    """{track the joined ones go under: its number} for every group of tracks joined across two cameras or more,
+    numbered by when it begins (#1, #2, ...): the same number on two cameras is one cow to the system."""
+    cam_of, first = {}, {}
+    for track, cam, ts in store.query("SELECT track, MIN(cam), MIN(ts) FROM seconds GROUP BY track"):
+        cam_of[track], first[track] = cam, ts
+    cams = collections.defaultdict(set)
+    for track, cam in cam_of.items():
+        cams[roots.get(track, track)].add(cam)
+    groups = sorted((g for g, cs in cams.items() if len(cs) > 1),
+                    key=lambda g: min(first[t] for t in cam_of if roots.get(t, t) == g))
+    return {g: k + 1 for k, g in enumerate(groups)}
+
+
+def boxes_page(out, boxes_dir, view, mapping, tz_hours=0, why=None, joined=None):
+    """OUT/boxes.html: every labelled moment with all its cameras side by side - your boxes with your ids and
+    the cow the system gave each (right / another cow / not found / no name given) - and any box, or any cow of
+    yours, as crops from every camera and moment. The frames are read where they are (boxes/frames/...)."""
+    rel = lambda file: os.path.relpath(os.path.join(boxes_dir, file), out).replace(os.sep, "/")
+    frames = [dict(v, src=rel(v["file"])) for v in sorted(view, key=lambda v: (v["ts"], v["cam"]))]
+    tracks = {b[5] for v in view for b in v["its"] if not b[4]}
+    data = {"frames": frames, "mapping": mapping, "tz": tz_hours, "why": {t: w for t, w in (why or {}).items() if t in tracks},
+            "joined": joined or {}}
+    path = os.path.join(out, "boxes.html")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(BOXES_PAGE.replace("__DATA__", json.dumps(data).replace("</", "<\\/")))
+    return path
+
+
+def cross_camera(seen_as, min_boxes=3, at_once_s=1.0):
+    """Your cows scored on two cameras or more: did the system give each the same cow on all of them? By cow (its
+    cow most often on each camera, from min_boxes of that camera's boxes) and by moment (your cow in two
+    cameras' frames within at_once_s: the same cow of its on both)."""
+    cows, same = {}, 0
+    for t, items in sorted(seen_as.items()):
+        per = collections.defaultdict(collections.Counter)
+        for cam, _, p in items:
+            per[cam][p] += 1
+        top = {cam: cnt.most_common(1)[0] + (sum(cnt.values()),) for cam, cnt in per.items()
+               if sum(cnt.values()) >= min_boxes}
+        if len(top) < 2:
+            continue
+        one = len({p for p, _, _ in top.values()}) == 1
+        same += one
+        cows[t] = {"same": one, "cameras": {cam: {"its": p, "boxes": k, "of": m} for cam, (p, k, m) in sorted(top.items())}}
+    pairs = agree = 0
+    for t, items in seen_as.items():
+        for (ca, ta, pa), (cb, tb, pb) in itertools.combinations(items, 2):
+            if ca != cb and abs(ta - tb) <= at_once_s:
+                pairs += 1
+                agree += pa == pb
+    return {"cows_on_two_cameras": len(cows), "same_cow_on_all": same, "cows": cows,
+            "moments": pairs, "moments_same_cow": agree}
+
+
+def cross_camera_moments(seen_track, at_once_s=1.0):
+    """Your cow in two cameras' frames at one moment (within at_once_s), found by both: did it find her as one cow?
+    On one joined track (the linker's join: what makes one id of her at once), given the same cow (its names,
+    joins and the night's merges followed), two different cows, or no name on one camera or both (no burst
+    sure enough there yet) - over all and per cow of yours, the cameras of each pair named."""
+    keys = ("moments", "one_track", "same_cow", "two_cows", "no_name")
+    tot, per = collections.Counter(), collections.defaultdict(collections.Counter)
+    pairs = collections.Counter()
+    for t, items in seen_track.items():
+        for (ca, ta, ra, pa), (cb, tb, rb, pb) in itertools.combinations(sorted(items, key=lambda x: x[:2]), 2):
+            if ca == cb or abs(ta - tb) > at_once_s:
+                continue
+            what = ["moments"] + (["one_track"] if ra == rb else []) + \
+                (["no_name"] if not pa or not pb else ["same_cow"] if pa == pb else ["two_cows"])
+            for k in what:
+                tot[k] += 1
+                per[t][k] += 1
+                pairs[("-".join(sorted((ca, cb))), k)] += 1
+    by_pair = collections.defaultdict(dict)
+    for (pair, k), n in pairs.items():
+        by_pair[pair][k] = n
+    return {**{k: tot[k] for k in keys}, "cows": {t: {k: c[k] for k in keys} for t, c in sorted(per.items())},
+            "camera_pairs": {p: {k: v.get(k, 0) for k in keys} for p, v in sorted(by_pair.items())}}
 
 
 def same_cow_page(out, boxes_dir, labels, frames, merged, per_cam=2):
@@ -220,6 +447,8 @@ def same_cow_page(out, boxes_dir, labels, frames, merged, per_cam=2):
             mine = sorted((x for x in items if x[0] == cam), key=lambda x: x[3])
             for k in sorted({int(round(i)) for i in np.linspace(0, len(mine) - 1, min(per_cam, len(mine)))}):
                 _, file, b, _ = mine[k]
+                if not os.path.exists(os.path.join(boxes_dir, file)):   # frames.json alone (no frames/): no crop
+                    continue
                 with Image.open(os.path.join(boxes_dir, file)) as im:
                     w, h = im.size
                     pad = 0.08
@@ -375,11 +604,417 @@ def print_score(sc):
           f"{a['idr']:.1%}: of your boxes, the right cow)")
     for c, r in sorted(sc["cameras"].items()):
         print(f"  {c}: IDF1 {r['idf1']:.1%} (IDP {r['idp']:.1%}, IDR {r['idr']:.1%}) on {r['your_boxes']} boxes")
+    x = sc.get("cross_camera")
+    if x and x["cows_on_two_cameras"]:
+        print(f"  your cows scored on two cameras or more: {x['cows_on_two_cameras']}; the same cow of its on all of "
+              f"them: {x['same_cow_on_all']}" + (f"; at one moment on two cameras: the same cow {x['moments_same_cow']} "
+                                                f"of {x['moments']} times" if x["moments"] else ""))
+        for t, r in x["cows"].items():
+            if not r["same"]:
+                print(f"    your {t}: " + ", ".join(f"{c} {v['its']} ({v['boxes']}/{v['of']})" for c, v in r["cameras"].items()))
+    elif x is not None:
+        print("  none of your cows scored on two cameras (each camera counts its own floor: --overlap lets the "
+              "masks share it)")
+    m = sc.get("cross_camera_moments")
+    if m and m["moments"]:
+        share = lambda k, r=m: f"{r[k]} ({r[k] / max(1, r['moments']):.0%})"
+        print(f"  one cow on two cameras at one moment, found by both: {m['moments']} times - one joined track "
+              f"{share('one_track')}; one id (the same cow) {share('same_cow')}, two different cows "
+              f"{share('two_cows')}, no name on one or both {share('no_name')}")
+        for pair, r in m["camera_pairs"].items():
+            print(f"    {pair}: {r['moments']} times, one track {share('one_track', r)}, one id {share('same_cow', r)}, "
+                  f"two cows {share('two_cows', r)}, no name {share('no_name', r)}")
+        worst = sorted(((r["same_cow"] / max(1, r["moments"]), t, r) for t, r in m["cows"].items() if r["moments"]))
+        for _, t, r in worst[:8]:
+            if r["same_cow"] < r["moments"]:
+                print(f"    your {t}: {r['moments']} times on two cameras at once - one id {r['same_cow']}, two cows "
+                      f"{r['two_cows']}, no name {r['no_name']}, one track {r['one_track']}")
+    for k in ("posture", "activity", "rumination"):
+        r = sc.get(k)
+        if r and r["boxes"]:
+            wrong = sorted(((v, y, i) for y, row in r["confusion"].items() for i, v in row.items() if y != i), reverse=True)
+            print(f"  {k} (your boxes with one that it found): right {r['right']} of {r['boxes']} ({r['share']:.0%})"
+                  + "".join(f"; {c} {x['share']:.0%} of {x['boxes']}" for c, x in r["cameras"].items() if x["boxes"])
+                  + (f" - yours {wrong[0][1]} taken for {wrong[0][2]} {wrong[0][0]} times" if wrong else "")
+                  + (f"; {r['not_found']} of your boxes with one " + ("with no burst of hers within 45 s" if k == "rumination"
+                     else "not found") if r["not_found"] else ""))
+    nc = sc.get("counted_by_none")
+    if nc and nc["moments"]:
+        print(f"  your cows counted by no camera: {nc['none']} of {nc['moments']} cow-moments ({nc['none'] / nc['moments']:.0%})"
+              + (" - " + ", ".join(f"your {c} {k}" for c, k in list(nc["cows"].items())[:8]) if nc["none"] else "")
+              + (" (between two masks, or not found)" if nc["none"] else ""))
     print(f"  its cows: {sc['its_cows']} for your {sc['your_cows']}; one of its cows on several of yours (merged): "
           f"{len(sc['merged'])}; one of yours under several of its (split): {len(sc['split'])}")
+    if sc.get("boxes_page"):
+        print(f"  every moment, all cameras, box by box: {sc['boxes_page']}")
     if sc.get("same_cow_page"):
         print(f"  one cow two names? {sc['same_cow_page']} - your names side by side: say which are one cow, save "
               "labels.json, score again with it")
+
+
+BOXES_PAGE = r"""<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Boxes, every camera</title>
+<style>
+:root { --bg: #f6f6f4; --fg: #1d1d1b; --muted: #6b6b66; --line: #d9d9d4; --card: #fff; --accent: #c2410c;
+  --right: #15803d; --wrong: #dc2626; --missed: #d97706; --nocow: #7c3aed; --extra: #64748b; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ecece8; --muted: #9a9a94; --line: #34342f;
+  --card: #1f1f1d; --accent: #fb923c; --right: #4ade80; --wrong: #f87171; --missed: #fbbf24; --nocow: #a78bfa;
+  --extra: #94a3b8; } }
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; background: var(--bg); border-bottom: 1px solid var(--line);
+  padding: 8px 16px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+h1 { font-size: 16px; margin: 0 6px 0 0; }
+button, select { font: inherit; padding: 4px 10px; border: 1px solid var(--line); border-radius: 6px;
+  background: var(--card); color: var(--fg); cursor: pointer; }
+button.on { background: var(--accent); border-color: var(--accent); color: #fff; }
+label { display: inline-flex; gap: 4px; align-items: center; cursor: pointer; }
+#when { min-width: 150px; text-align: center; font-variant-numeric: tabular-nums; }
+.legend { display: flex; gap: 10px; flex-wrap: wrap; color: var(--muted); font-size: 12px; padding: 6px 16px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 4px; vertical-align: -1px; }
+#grid { display: grid; gap: 10px; padding: 10px 16px; grid-template-columns: repeat(var(--cols, 2), minmax(0, 1fr)); }
+@media (max-width: 760px) { #grid { grid-template-columns: minmax(0, 1fr); } }
+.panel { background: var(--card); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+.ph { padding: 4px 8px; display: flex; justify-content: space-between; color: var(--muted); font-size: 12px; }
+.ph b { color: var(--fg); }
+.frame { position: relative; background: var(--line); }
+.frame img { display: block; width: 100%; height: 100%; object-fit: fill; }
+.none { padding: 40px 10px; text-align: center; color: var(--muted); }
+.box { position: absolute; border: 2px solid var(--c); border-radius: 2px; cursor: pointer; }
+.box.out { border-style: dashed; opacity: .55; }
+.box.dim { opacity: .18; }
+.box.sel { box-shadow: 0 0 0 3px var(--fg); z-index: 3; }
+.box span { position: absolute; left: -2px; top: -18px; white-space: nowrap; background: var(--c); color: var(--bg);
+  font-size: 11px; line-height: 16px; padding: 0 4px; border-radius: 3px; }
+.box.extra span { top: auto; bottom: -18px; }
+.right { --c: var(--right); } .wrong { --c: var(--wrong); } .missed { --c: var(--missed); }
+.nocow { --c: var(--nocow); } .extra { --c: var(--extra); } .box.extra { border-width: 1px; border-style: dotted; }
+#insp { margin: 0 16px 24px; background: var(--card); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px; }
+#insp:empty { display: none; }
+.top { display: flex; gap: 14px; align-items: flex-start; flex-wrap: wrap; }
+.facts { line-height: 1.7; }
+.facts b { font-size: 16px; }
+.facts .note { color: var(--muted); }
+h3 { font-size: 13px; color: var(--muted); font-weight: normal; margin: 12px 0 4px; }
+.strip { display: flex; gap: 6px; overflow-x: auto; padding-bottom: 6px; }
+.strip figure { margin: 0; flex: none; text-align: center; font-size: 11px; color: var(--muted); cursor: pointer; }
+.crop { border: 3px solid var(--c, var(--line)); border-radius: 4px; background-color: var(--line);
+  background-repeat: no-repeat; }
+.shot { position: relative; background: var(--line); border-radius: 4px; overflow: hidden; flex: none; }
+.shot img { display: block; width: 100%; height: 100%; object-fit: fill; }
+.shot .mark { position: absolute; border: 3px solid var(--c, var(--accent)); border-radius: 2px;
+  box-shadow: 0 0 0 9999px rgba(0, 0, 0, .38); }
+.strip figure.here .crop, .strip figure.here .shot { outline: 3px solid var(--fg); outline-offset: 1px; }
+.cam { font-weight: 600; color: var(--fg); font-size: 12px; margin-top: 4px; }
+.box.j { box-shadow: 0 0 0 3px var(--g), 0 0 0 5px #000; }
+.box .jn { position: absolute; right: -2px; bottom: -2px; background: var(--g); color: #000; font-weight: 700;
+  font-size: 12px; line-height: 16px; padding: 0 5px; border-radius: 3px; }
+#cross { padding: 6px 16px 0; display: flex; gap: 6px; flex-wrap: wrap; align-items: center; font-size: 12px; }
+#cross:empty { display: none; }
+#cross .chip { border-radius: 12px; padding: 2px 9px; border: 1px solid var(--line); background: var(--card); cursor: pointer; }
+#cross .chip.track { background: var(--right); color: #fff; border-color: var(--right); }
+#cross .chip.oneid { border: 2px solid var(--right); }
+#cross .chip.two { background: var(--wrong); color: #fff; border-color: var(--wrong); }
+#cross .chip.noname { border: 2px dashed var(--nocow); }
+</style></head><body>
+<header><h1>Boxes</h1>
+  <button id="prev" title="Left arrow">&#9664;</button><span id="when"></span><button id="next" title="Right arrow">&#9654;</button>
+  <span id="cams"></span>
+  <select id="cow"><option value="">all your cows</option></select>
+  <label><input type="checkbox" id="errs"> moments with a mistake (E)</label>
+  <label><input type="checkbox" id="extra" checked> its boxes you did not name</label>
+  <label><input type="checkbox" id="zoom"> close-ups (Z)</label>
+  <label><input type="checkbox" id="both"> your cow on two cameras (B)</label>
+</header>
+<div class="legend">
+  <span><i style="background:var(--right)"></i>the right cow</span><span><i style="background:var(--wrong)"></i>another cow</span>
+  <span><i style="background:var(--missed)"></i>not found</span><span><i style="background:var(--nocow)"></i>found, no name given (a cow all the same)</span>
+  <span><i style="background:var(--extra)"></i>its box, not yours</span><span>dashed: outside this camera's mask (not scored)</span>
+  <span>Click a box: it from every camera and moment.</span>
+  <span><b style="color:var(--fg)">&#8644;#7</b> and a coloured ring: one track across the cameras - the same number on another camera is the same cow to the system</span>
+</div>
+<div id="cross"></div>
+<div id="grid"></div>
+<section id="insp"></section>
+<script>
+const DATA = __DATA__;
+const F = DATA.frames, MAP = DATA.mapping;
+const CAMS = [...new Set(F.map(f => f.cam))].sort();
+const moments = [];                                  // frames of the cameras within 1.5 s: one moment
+F.forEach((f, i) => {
+  const last = moments[moments.length - 1];
+  if (last && f.ts - last.ts <= 1.5 && !(f.cam in last.at)) last.at[f.cam] = i;
+  else moments.push({ ts: f.ts, at: { [f.cam]: i } });
+});
+const hitOf = f => { const m = {}, t = {}; f.hit.forEach(([i, j]) => { m[i] = j; t[j] = i; }); return [m, t]; };
+function status(f, k) {                              // your box k of frame f
+  const [m] = hitOf(f), j = m[k], id = f.mine[k][4];
+  if (j === undefined) return "missed";
+  const c = f.its[j][4];
+  if (!c) return "nocow";
+  return c === MAP[id] ? "right" : "wrong";
+}
+const pad = n => String(n).padStart(2, "0");
+function clock(ts) {
+  const d = new Date((ts + DATA.tz * 3600) * 1000);
+  return `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())}`;
+}
+let shown = new Set(CAMS), cow = "", errs = false, extra = true, zoom = false, both = false, sel = null, m = 0;
+const J = DATA.joined || {};
+const gcol = n => `hsl(${(n * 137.5) % 360} 85% 60%)`;
+function cross(mo) {                                  // your cows two shown cameras see at this moment, each judged
+  const by = {};
+  Object.entries(mo.at).filter(([c]) => shown.has(c)).forEach(([c, i]) => {
+    const f = F[i], [mm] = hitOf(f);
+    f.mine.forEach((b, k) => { const j = mm[k];
+      (by[b[4]] = by[b[4]] || []).push({ cam: c, fi: i, k, its: j === undefined ? null : f.its[j] }); });
+  });
+  return Object.entries(by).filter(([, v]) => new Set(v.map(x => x.cam)).size > 1).map(([id, v]) => {
+    const found = v.filter(x => x.its), roots = new Set(found.map(x => x.its[6])), cows = new Set(found.map(x => x.its[4]));
+    let kind, words;
+    if (found.length < v.length) { kind = "missed"; words = "not found on " + v.filter(x => !x.its).map(x => x.cam).join(", "); }
+    else if (roots.size === 1 && J[found[0].its[6]]) { kind = "track"; words = `ONE TRACK #${J[found[0].its[6]]}` +
+      (found[0].its[4] ? ` = ${found[0].its[4]}` : ", no name yet"); }
+    else if (cows.has(null) || cows.has(undefined) || cows.has("")) { kind = "noname"; words = "no name on " +
+      found.filter(x => !x.its[4]).map(x => x.cam).join(", ") + (roots.size > 1 ? ", not joined" : ""); }
+    else if (cows.size === 1) { kind = "oneid"; words = `one id ${[...cows][0]} (tracks not joined)`; }
+    else { kind = "two"; words = "two cows: " + found.map(x => `${x.cam} ${x.its[4]}`).join(" / "); }
+    return { id, kind, words, at: v[0] };
+  }).sort((a, b) => (+a.id - +b.id) || a.id.localeCompare(b.id));
+}
+try { const s = JSON.parse(localStorage.getItem("boxes-cams") || "null"); if (s) shown = new Set(s.filter(c => CAMS.includes(c))); } catch (e) {}
+if (!shown.size) shown = new Set(CAMS);
+const save = () => { try { localStorage.setItem("boxes-cams", JSON.stringify([...shown])); } catch (e) {} };
+const ids = [...new Set(F.flatMap(f => f.mine.map(b => b[4])))].sort((a, b) => (+a - +b) || a.localeCompare(b));
+const sel_ = document.getElementById("cow");
+ids.forEach(i => sel_.insertAdjacentHTML("beforeend", `<option value="${i}">your cow ${i}${MAP[i] ? " (its " + MAP[i] + ")" : ""}</option>`));
+function wanted(mo) {
+  const fs = Object.entries(mo.at).filter(([c]) => shown.has(c)).map(([, i]) => F[i]);
+  if (cow && !fs.some(f => f.mine.some(b => b[4] === cow))) return false;
+  if (errs && !fs.some(f => f.mine.some((b, k) => b[5] && (!cow || b[4] === cow) && status(f, k) !== "right"))) return false;
+  if (both && !cross(mo).some(x => !cow || x.id === cow)) return false;
+  return fs.length > 0;
+}
+const list = () => moments.map((mo, i) => i).filter(i => wanted(moments[i]));
+function go(d) {
+  const l = list();
+  if (!l.length) return;
+  let p = l.indexOf(m);
+  if (p < 0) p = l.findIndex(i => i > m), p = p < 0 ? l.length - 1 : p, d = 0;
+  m = l[Math.max(0, Math.min(l.length - 1, p + d))];
+  render();
+}
+function crop(f, b, H) {
+  const bw = Math.max(1e-3, b[2] - b[0]), bh = Math.max(1e-3, b[3] - b[1]);
+  let W = H * (bw * f.w) / (bh * f.h);
+  if (W > 2 * H) W = 2 * H;
+  const gw = W / bw, gh = gw * f.h / f.w, h = bh * gh;
+  return `<div class="crop" style="width:${W.toFixed(0)}px;height:${h.toFixed(0)}px;background-image:url('${f.src}');` +
+    `background-size:${gw.toFixed(1)}px ${gh.toFixed(1)}px;background-position:${(-b[0] * gw).toFixed(1)}px ${(-b[1] * gh).toFixed(1)}px"></div>`;
+}
+function boxEl(f, fi, b, kind, k, st) {
+  const [x1, y1, x2, y2] = b;
+  const isSel = sel && sel.fi === fi && sel.kind === kind && sel.k === k;
+  const dim = cow && !(kind === "mine" ? b[4] === cow : false) && !isSel;
+  let lab;
+  if (kind === "mine") {
+    const [mm] = hitOf(f), j = mm[k], c = j === undefined ? null : f.its[j][4];
+    lab = st === "right" ? `${b[4]} = ${c}` : st === "wrong" ? `${b[4]}: ${c}` : st === "missed" ? `${b[4]}: not found` : `${b[4]}: no name`;
+  } else lab = b[4] || "no name";
+  const it = kind === "mine" ? (j => j === undefined ? null : f.its[j])(hitOf(f)[0][k]) : b;
+  const g = it && J[it[6]];
+  return `<div class="box ${st} ${kind === "mine" && !b[5] ? "out" : ""} ${dim ? "dim" : ""} ${isSel ? "sel" : ""} ${g ? "j" : ""}"
+    data-fi="${fi}" data-kind="${kind}" data-k="${k}"
+    style="left:${x1 * 100}%;top:${y1 * 100}%;width:${(x2 - x1) * 100}%;height:${(y2 - y1) * 100}%${g ? `;--g:${gcol(g)}` : ""}"><span>${lab}</span>${g ? `<b class="jn">&#8644;#${g}</b>` : ""}</div>`;
+}
+function render() {
+  const mo = moments[m];
+  document.getElementById("when").textContent = mo ? `${clock(mo.ts)}  (${list().indexOf(m) + 1}/${list().length})` : "";
+  const cams = CAMS.filter(c => shown.has(c));
+  const grid = document.getElementById("grid");
+  grid.style.setProperty("--cols", cams.length > 2 ? 2 : cams.length);
+  grid.innerHTML = cams.map(c => {
+    const fi = mo ? mo.at[c] : undefined;
+    if (fi === undefined) return `<div class="panel"><div class="ph"><b>${c}</b></div><div class="none">no labelled frame at this moment</div></div>`;
+    const f = F[fi], [, taken] = hitOf(f);
+    let html = f.mine.map((b, k) => boxEl(f, fi, b, "mine", k, status(f, k))).join("");
+    if (extra) html += f.its.map((b, j) => taken[j] === undefined ? boxEl(f, fi, b, "its", j, "extra") : "").join("");
+    const bad = f.mine.filter((b, k) => b[5] && status(f, k) !== "right").length;
+    return `<div class="panel"><div class="ph"><b>${c}</b><span>${clock(f.ts)} · ${f.mine.length} yours, ${bad} not right · ${f.file}</span></div>
+      <div class="frame" style="aspect-ratio:${f.w}/${f.h}"><img src="${f.src}" alt="${c}" onerror="this.style.visibility='hidden'">${html}</div></div>`;
+  }).join("");
+  document.getElementById("cams").innerHTML = CAMS.map(c => `<button data-cam="${c}" class="${shown.has(c) ? "on" : ""}">${c}</button>`).join(" ");
+  const cr = mo ? cross(mo) : [];
+  document.getElementById("cross").innerHTML = cr.length ? `<span>your cows on two cameras now:</span>` + cr.map(x =>
+    `<span class="chip ${x.kind}" data-fi="${x.at.fi}" data-kind="mine" data-k="${x.at.k}" title="click: this cow on every camera">your ${x.id}: ${x.words}</span>`).join("") : "";
+  inspect();
+}
+function shot(f, b, W, st) {                        // the whole frame, the box marked, the rest darker
+  return `<div class="shot ${st || ""}" style="width:${W.toFixed(0)}px;aspect-ratio:${f.w}/${f.h}">` +
+    `<img src="${f.src}" alt="${f.cam}" loading="lazy" onerror="this.style.visibility='hidden'">` +
+    `<div class="mark" style="left:${b[0] * 100}%;top:${b[1] * 100}%;width:${(b[2] - b[0]) * 100}%;height:${(b[3] - b[1]) * 100}%"></div></div>`;
+}
+const view = (f, b, big, st) => zoom ? crop(f, b, big ? 220 : 110)
+  : shot(f, b, big ? Math.min(760, window.innerWidth - 64) : Math.min(300, window.innerWidth - 64), st);
+function strip(items) {
+  const by = {};
+  items.forEach(x => (by[x.f.cam] = by[x.f.cam] || []).push(x));
+  return Object.keys(by).sort().map(c => `<div class="cam">${c} · ${by[c].length}</div><div class="strip">` +
+    by[c].map(x => `<figure class="${x.here ? "here" : ""} ${x.st}" data-fi="${x.fi}" data-kind="${x.kind}" data-k="${x.k}">` +
+      `${view(x.f, x.b, false, x.st)}<figcaption>${clock(x.f.ts)}<br>${x.cap}</figcaption></figure>`).join("") + `</div>`).join("");
+}
+function inspect() {
+  const box = document.getElementById("insp");
+  if (!sel) { box.innerHTML = ""; return; }
+  const f = F[sel.fi], b = (sel.kind === "mine" ? f.mine : f.its)[sel.k];
+  if (!b) { box.innerHTML = ""; return; }
+  let facts, items = [], title;
+  if (sel.kind === "mine") {
+    const st = status(f, sel.k), [mm] = hitOf(f), j = mm[sel.k], c = j === undefined ? null : f.its[j][4];
+    const words = { right: "the right cow", wrong: "another cow", missed: "not found", nocow: "found, no name given" }[st];
+    facts = `<b>your ${b[4]}</b> → its <b>${c || "—"}</b> <span class="${st}" style="color:var(--c)">${words}</span><br>
+      ${MAP[b[4]] ? `<span class="note">your ${b[4]} is its ${MAP[b[4]]} overall</span><br>` : ""}
+      ${f.cam} · ${clock(f.ts)}${j !== undefined ? ` · track ${f.its[j][5]}` : ""}${j !== undefined && J[f.its[j][6]] ?
+        `<br><b class="jn" style="position:static;--g:${gcol(J[f.its[j][6]])};background:var(--g)">&#8644;#${J[f.its[j][6]]}</b> one track across the cameras: the same number on another camera is this cow to the system` :
+        j !== undefined ? `<br><span class="note">a track of ${f.cam} alone: not joined to another camera's</span>` : ""}${b[5] ? "" : `<br><span class="note">outside ${f.cam}'s mask: not scored</span>`}
+      ${st === "nocow" && (DATA.why || {})[f.its[j][5]] ? `<br><span class="note">no name: ${DATA.why[f.its[j][5]]}</span>` : ""}`;
+    title = `Your cow ${b[4]}, every camera and moment (its cow under each)`;
+    F.forEach((g, fi) => g.mine.forEach((x, k) => {
+      if (x[4] !== b[4]) return;
+      const s = status(g, k), [gm] = hitOf(g), gj = gm[k];
+      items.push({ f: g, fi, b: x, kind: "mine", k, st: s, here: fi === sel.fi && k === sel.k,
+                   cap: gj === undefined ? "not found" : (g.its[gj][4] || "no name") });
+    }));
+  } else {
+    facts = `<b>its ${b[4] || "box, no name given"}</b> <span class="note">(no box of yours here)</span><br>${f.cam} · ${clock(f.ts)} · track ${b[5]}` +
+      (!b[4] && (DATA.why || {})[b[5]] ? `<br><span class="note">no name: ${DATA.why[b[5]]}</span>` : "");
+    title = b[4] ? `Its cow ${b[4]}, every camera and moment (your name under each)` : "";
+    if (b[4]) F.forEach((g, fi) => { const [, gt] = hitOf(g); g.its.forEach((x, j) => {
+      if (x[4] !== b[4]) return;
+      const yk = gt[j];
+      items.push({ f: g, fi, b: x, kind: yk === undefined ? "its" : "mine", k: yk === undefined ? j : yk,
+                   st: yk === undefined ? "extra" : status(g, yk), here: fi === sel.fi && j === sel.k,
+                   cap: yk === undefined ? "not yours" : "your " + g.mine[yk][4] });
+    }); });
+  }
+  const st0 = sel.kind === "mine" ? status(f, sel.k) : "extra";
+  box.innerHTML = `<div class="top">${view(f, b, true, st0)}<div class="facts">${facts}</div></div>` +
+    (title ? `<h3>${title}</h3>` + strip(items) : "");
+}
+document.addEventListener("click", e => {
+  const t = e.target.closest("[data-fi]");
+  if (t) {
+    sel = { fi: +t.dataset.fi, kind: t.dataset.kind, k: +t.dataset.k };
+    const mi = moments.findIndex(mo => Object.values(mo.at).includes(sel.fi));
+    if (mi >= 0) m = mi;
+    if (!shown.has(F[sel.fi].cam)) { shown.add(F[sel.fi].cam); save(); }
+    render();
+    return;
+  }
+  const c = e.target.closest("[data-cam]");
+  if (c) {
+    shown.has(c.dataset.cam) ? shown.delete(c.dataset.cam) : shown.add(c.dataset.cam);
+    if (!shown.size) shown.add(c.dataset.cam);
+    save(); render();
+  }
+});
+document.getElementById("prev").onclick = () => go(-1);
+document.getElementById("next").onclick = () => go(1);
+sel_.onchange = () => { cow = sel_.value; sel = null; go(0); };
+document.getElementById("errs").onchange = e => { errs = e.target.checked; go(0); };
+document.getElementById("extra").onchange = e => { extra = e.target.checked; render(); };
+document.getElementById("zoom").onchange = e => { zoom = e.target.checked; inspect(); };
+document.getElementById("both").onchange = e => { both = e.target.checked; go(0); };
+document.addEventListener("keydown", e => {
+  if (e.target.tagName === "SELECT") return;
+  if (e.key === "ArrowLeft") go(-1);
+  else if (e.key === "ArrowRight") go(1);
+  else if (e.key === "Escape") { sel = null; render(); }
+  else if (e.key === "z" || e.key === "Z") { const x = document.getElementById("zoom"); x.checked = !x.checked; zoom = x.checked; inspect(); }
+  else if (e.key === "e" || e.key === "E") { const x = document.getElementById("errs"); x.checked = !x.checked; errs = x.checked; go(0); }
+  else if (e.key === "b" || e.key === "B") { const x = document.getElementById("both"); x.checked = !x.checked; both = x.checked; go(0); }
+});
+render();
+</script></body></html>
+"""
+
+
+def overlap(cfg):
+    """--overlap: each camera's mask its tracking_mask (the masks share floor), and the two rules that make a cow
+    counted by two cameras at once two cows - [identity] counted_apart_s (never one cow in the gallery) and [mct]
+    unlink_s (a cross-camera join undone) - off."""
+    grown = []
+    for cam in cfg["cameras"]:
+        if cam.get("tracking_mask"):
+            cam["mask"] = cam["tracking_mask"]
+            grown.append(cam["id"])
+    cfg["identity"]["counted_apart_s"] = 0
+    cfg["mct"]["unlink_s"] = 0
+    print(f"[trial] --overlap: {', '.join(grown) or 'no camera'} count their whole tracking_mask; a cow counted by "
+          "two cameras at once may be one (identity.counted_apart_s 0, mct.unlink_s 0) - an experiment, its cows "
+          "on shared floor are counted twice", flush=True)
+    return cfg
+
+
+def relink(cfg, out):
+    """--relink: the second pass's store copied to OUT/relink/ (and its gallery), its cross-camera joins, evidence,
+    the night's merges and the questions to a person cleared, and each second of it played again through
+    mct.TrackletLinker with this config - each camera's tracks as the trial made them, only the joining anew
+    (new floor_points, link_* settings, clocks). Then the night's merge by place. -> the new store's path."""
+    import contextlib
+    import io
+    import sqlite3
+    import gallery as gallery_mod
+    from mct import TrackletLinker
+    from pipeline import merge_by_place
+    from store import Store
+    src = os.path.join(out, "pass2", "herd.sqlite")
+    if not os.path.exists(src):
+        sys.exit(f"[relink] no {src}: play the trial first")
+    folder = os.path.join(out, "relink")
+    shutil.rmtree(folder, ignore_errors=True)
+    os.makedirs(folder)
+    dst = os.path.join(folder, "herd.sqlite")
+    with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:     # WAL and all
+        a.backup(b)
+    if os.path.isdir(os.path.join(out, "pass2", "gallery")):
+        shutil.copytree(os.path.join(out, "pass2", "gallery"), os.path.join(folder, "gallery"))
+    store = Store(dst)
+    for t in ("track_links", "track_evidence", "merge_reviews", "cow_aliases", "track_handovers"):
+        store.execute(f"DELETE FROM {t}")
+    store.execute("DELETE FROM events WHERE kind IN ('merged-by-place', 'clocks', 'merge-reviews')")
+    cfg = copy.deepcopy(cfg)
+    cfg["mct"].update(enabled=True, mode="link")
+    cams = {c["id"] for c in cfg["cameras"]}
+    per = collections.defaultdict(lambda: collections.defaultdict(list))
+    for cam, track, ts, x1, y1, x2, y2, pl in store.query("SELECT cam, track, ts, x1, y1, x2, y2, p_lying FROM seconds "
+                                                          "ORDER BY ts"):
+        if cam in cams:
+            per[int(round(ts))][cam].append({"box": [x1, y1, x2, y2], "p_lying": 0.5 if pl is None else pl, "track": track})
+    lk = TrackletLinker(cfg, store)
+    notes = io.StringIO()
+    with contextlib.redirect_stdout(notes):
+        for ts in sorted(per):
+            lk.update_all(float(ts), dict(per[ts]))
+    if lk.last_ts is not None:
+        lk.flush_evidence(lk.last_ts)
+    near = np.asarray(lk.nearest)
+    print(f"[relink] {len(per)} seconds played again with {', '.join(sorted(cams))}: tracks joined {lk.stats['linked']}, "
+          f"refused {lk.stats['link_refused']}" + (f"; two cameras' cows each other's nearest {len(near)} times, "
+          f"{np.percentile(near, 10):.0f} / {np.percentile(near, 50):.0f} / {np.percentile(near, 90):.0f} apart "
+          "(10th / 50th / 90th percentile)" if len(near) else "; no two cameras' cows ever on one floor"), flush=True)
+    for (a, b), (lag, n, sharp) in sorted(lk.clocks().items()):
+        print(f"[relink] clocks: {b}'s frames come {lag:+.1f} s late against {a}'s ({n} walks, {sharp:.0f} cm sharper)",
+              flush=True)
+    if os.path.isdir(os.path.join(folder, "gallery")):
+        g = gallery_mod.Gallery(os.path.join(folder, "gallery"), cfg)
+        merged = merge_by_place(g, store, cfg, (lk.last_ts or 0) + 3600)
+        if merged:
+            g.save()
+        print(f"[relink] the night: {len(merged)} pairs of names made one by place, "
+              f"{len(store.reviews('pending'))} left to a person (herd.py merges page --store {dst})", flush=True)
+    return dst
 
 
 def main(argv=None):
@@ -394,12 +1029,30 @@ def main(argv=None):
     p.add_argument("--boxes", default=None, help="your labelled frames (herd.py boxes: the folder with frames.json)")
     p.add_argument("--labels", default=None, help="their labels.json with cow ids: the second pass scored (IDF1)")
     p.add_argument("--score-only", action="store_true", help="score the trial already in --out, play nothing")
+    p.add_argument("--relink", action="store_true", help="the trial already in --out joined across cameras again with "
+                   "this config's [mct] and floor_points (each camera's tracks as they were: minutes, no GPU) -> "
+                   "OUT/relink/; scored with --boxes and --labels")
     p.add_argument("--cameras", nargs="*", default=None, help="score these cameras only (one id across them)")
+    p.add_argument("--overlap", action="store_true",
+                   help="an experiment: every camera counts its whole tracking_mask (masks share floor) and a cow "
+                        "counted by two cameras at once may be one cow - does one cow get one id on both? "
+                        "Never for a barn: shared floor counts its cows twice")
     args = p.parse_args(argv)
+    if args.relink:
+        cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
+        out = os.path.abspath(args.out.rstrip("\\"))
+        dst = relink(cfg, out)
+        if args.boxes and args.labels:
+            sc = score(dst, cfg, args.boxes, args.labels, page_dir=os.path.dirname(dst), cameras=args.cameras)
+            with open(os.path.join(os.path.dirname(dst), "score.json"), "w", encoding="utf-8") as fh:
+                json.dump(sc, fh, indent=2)
+            print_score(sc)
+            print(f"-> {os.path.join(os.path.dirname(dst), 'score.json')}")
+        return
     if args.score_only:
         if not (args.boxes and args.labels):
             p.error("--score-only needs --boxes and --labels")
-        cfg = load_config(args.config)
+        cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
         out = os.path.abspath(args.out.rstrip("\\"))
         sc = score(os.path.join(out, "pass2", "herd.sqlite"), cfg, args.boxes, args.labels, page_dir=out,
                    cameras=args.cameras)
@@ -414,7 +1067,7 @@ def main(argv=None):
     import gallery as gallery_mod
     import show_ids
     from store import Store
-    cfg = load_config(args.config)
+    cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
     tz = dt.timezone(dt.timedelta(hours=cfg["farm"]["timezone_offset_hours"]))
     recs, bad = recordings(args.videos, [c["id"] for c in cfg["cameras"]], cfg["farm"]["timezone_offset_hours"])
     if not recs:
@@ -424,13 +1077,19 @@ def main(argv=None):
     for d in ("pass1", "pass2"):
         shutil.rmtree(os.path.join(out, d), ignore_errors=True)
         os.makedirs(os.path.join(out, d))
+    if cfg["sampling"]["fps"] != 1.0:
+        print(f"[trial] !! [sampling] fps = {cfg['sampling']['fps']:g}: every camera writes that many rows a "
+              f"second (posture, identity, the gallery - {cfg['sampling']['fps']:g}x the work, the counts in "
+              "cow-seconds no more seconds). To follow walking cows more often set track_fps instead "
+              "(the tracker only) and keep fps = 1", flush=True)
     cfg["training_cache"]["enabled"] = False
     cfg["identity"]["new_cow_min_bursts"] = args.min_bursts
     first = copy.deepcopy(cfg)
     first["sampling"]["burst_every_s"] = args.burst_every
     print(f"[trial] 1/3 the first pass ({len(recs)} recordings, a burst every {args.burst_every:g} s): the gallery "
           f"collects the cows", flush=True)
-    models = play(first, groups, os.path.join(out, "pass1", "herd.sqlite"), None)
+    stopped = {"pass1": [], "pass2": []}
+    models = play(first, groups, os.path.join(out, "pass1", "herd.sqlite"), None, stopped["pass1"])
     # the night after it: the cows seen often enough get ids
     abstain = getattr(models, "id_abstain", None)
     folder = os.path.join(out, "pass1", "gallery")
@@ -445,9 +1104,22 @@ def main(argv=None):
           + ")", flush=True)
     shutil.copytree(folder, os.path.join(out, "pass2", "gallery"))
     print("[trial] 2/3 the second pass, with those cows: who is who", flush=True)
-    play(cfg, groups, os.path.join(out, "pass2", "herd.sqlite"), models)
-    print("[trial] 3/3 drawn back", flush=True)
+    play(cfg, groups, os.path.join(out, "pass2", "herd.sqlite"), models, stopped["pass2"])
     store2 = os.path.join(out, "pass2", "herd.sqlite")
+    # the second night: one cow named on two cameras by her two sides, made one by where she stood ([mct] llr)
+    from pipeline import merge_by_place
+    g2 = gallery_mod.Gallery(os.path.join(out, "pass2", "gallery"), cfg, abstain)
+    merged = merge_by_place(g2, Store(store2), cfg, last)
+    if merged:
+        g2.save()
+        print("[trial] one cow under two names, made one by where she stood: "
+              + ", ".join(f"{a} -> {b}" for a, b in merged), flush=True)
+    unsure = Store(store2).reviews("pending")
+    if unsure:
+        print(f"[trial] {len(unsure)} more pairs of names may be one cow - look at them: herd.py merges page "
+              f"--store {store2} --out {os.path.join(out, 'merges.html')}; then merges apply --store {store2} "
+              "--decisions decisions.json and trial --score-only", flush=True)
+    print("[trial] 3/3 drawn back", flush=True)
     shown = {}
     for cam, path, ts in recs:
         if cam in shown:
@@ -460,9 +1132,12 @@ def main(argv=None):
             shown[cam] = os.path.join(dest, "index.html")
         except SystemExit as e:
             print(f"[trial] {cam}: nothing drawn ({e})", flush=True)
-    per_cam, cows, odd = summary(store2, cfg, os.path.join(out, "pass2", "gallery"))
+    per_cam, cows, odd, links = summary(store2, cfg, os.path.join(out, "pass2", "gallery"))
     report = {"cows_enrolled": res["enrolled"], "cows_in_gallery": cows, "cameras": per_cam, "impossible": odd,
-              "held_back_herd_full": res.get("held_back_herd_full", 0), "show": shown}
+              "joined_across_cameras": links,
+              "held_back_herd_full": res.get("held_back_herd_full", 0), "show": shown,
+              "cameras_stopped": {k: [{"camera": c, "played_s": round(d, 1), "error": e} for c, d, e in v]
+                                  for k, v in stopped.items() if v}}
     with open(os.path.join(out, "trial.json"), "w", encoding="utf-8") as fh:
         json.dump(report, fh, indent=2)
     print(f"\n[trial] {len(res['enrolled'])} cows made from the first pass")
@@ -477,6 +1152,9 @@ def main(argv=None):
           f"cameras that share no floor at once {odd['one_cow_on_cameras_apart']} s, counted by two cameras at once "
           f"{odd['one_cow_counted_by_two_cameras']} s ({bad / n:.1%} of the named cow-seconds) - two cows given one "
           f"id (or masks that overlap); {len(odd['cows_seen_where_they_cannot_be'])} cows so")
+    if cfg["mct"].get("enabled"):
+        print("  tracks joined across cameras (one cow, one track): " +
+              (", ".join(f"{k} {v}" for k, v in sorted(links.items())) or "none"))
     if res.get("held_back_herd_full"):
         print(f"  !! [identity] max_cows = {cfg['identity'].get('max_cows')}: the gallery was full, "
               f"{res['held_back_herd_full']} more cows got no id - set it to the cows these cameras see (0: no "
@@ -486,6 +1164,11 @@ def main(argv=None):
         with open(os.path.join(out, "score.json"), "w", encoding="utf-8") as fh:
             json.dump(sc, fh, indent=2)
         print_score(sc)
+    for k, v in stopped.items():
+        for cam, done, err in v:
+            print(f"[trial] !! {k}: {cam} stopped at {int(done // 60)}:{int(done % 60):02d} of its recording by an error "
+                  f"({err}) - the trial went on without it: its counts and the score are of less. The traceback is "
+                  f"above, under [{cam}] !! stopped", flush=True)
     print(f"-> {os.path.join(out, 'trial.json')}; the videos: " + ", ".join(shown.values()))
 
 

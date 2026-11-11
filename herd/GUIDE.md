@@ -39,7 +39,7 @@ scaffold that switches on with the barn's footage (section 8).
 | Find the cows in a frame | RT-DETRv2 detector (`cowbench/detector.py`, class `Live`) | works; on CBVD-5 finds 74% of cows (51% of the far ones), see section 6 |
 | Cameras overlap | a mask per camera in the config: a cow counts where her box centre is (`common.in_mask`) | works |
 | Far cows are not tried at all | working zone (`common.in_zone`): boxes under `[zone] min_box_pct` (% of the frame) / `min_box_side_px` are dropped before tracking; optional `exclude` polygons are greyed out before the detector | works; `eval-det` suggests both cuts (section 4.0) |
-| Follow a cow between frames | `pipeline.Tracker` (box overlap, once a second) | works |
+| Follow a cow between frames | `pipeline.Tracker` / `mct.GlobalTracker` (box overlap once a second; `[tracker] kalman`: where her speed puts her; `low_score`: unsure boxes keep a track) | works |
 | Posture and activity every second | `model.FrameHeads` on the DINOv2 vector of the crop (`pipeline.Camera.second`) | works; error 2.4–2.6% posture, 17–19% activity (on annotated boxes) |
 | A 7 s, 25 fps burst a minute, cameras in turn | `pipeline.Camera.burst`, `step_burst` | works, tested with 5 cameras (section 6) |
 | A small Temporal Transformer attends to the burst's frames | `model.TemporalModel` (3 layers, d=256) | works and is trained |
@@ -56,6 +56,8 @@ scaffold that switches on with the barn's footage (section 8).
 | Alerts: lame cows, lying and rumination deviations | `report.py alerts` (against the cow's own week) | works; which direction of lying is "worse" is a **setting** (section 8.4) |
 | Vet verdicts, false alarms | `report.py verdict`, `alert-stats` | works |
 | Is one GPU enough | `herd.py stress` | tested: 5 cameras, GPU busy 18% (section 6) |
+| How many cameras live, at each width (`[sampling] burst_fps` too) | `bash herd/stress_pod.sh` (herd.py stress) | the barn's recordings as N cameras at once, more until it no longer keeps up |
+| Which frame width (`[sampling] frame_width`) | `herd.py resolution` | on your labelled frames: detector, posture / activity, identity and the cameras a machine keeps up with, at each width |
 
 ---
 
@@ -309,7 +311,8 @@ What holds even without `[mct]`:
   gallery together (best assignment, no cow twice), and a cow confirmed on one track
   is held by it for `claim_s` (120 s): another track seen at the same time gets her
   only with a burst surer by `claim_steal_margin` (0.08), else the next cow
-  (`claim-kept` events).
+  (`claim-kept` events). With `[mct]` the joins count too: a track joined to one seen
+  together with the cow's track on another camera is another cow.
 - **new cows** are grouped by average linkage of whole tracks, never joining two
   tracks seen together; with `max_cows` set (the herd's size) no new ids are made at
   the limit — the bursts wait (`held_back_herd_full` in the nightly event).
@@ -387,14 +390,310 @@ within 1 m of herself in 63% of the pairs, two different cows in 0.7%. So: calib
 the cameras (`floor_points`) before turning `[mct]` on; without calibration keep
 handover off (`handover_min_sim = 0.8`).
 
+**A plan from the cows' widths has the depth anyhow (`crosscam --depth auto`).** `autocalib`
+straightens a camera's floor so that cows are one width near and far: that fixes the across, not the
+depth along its view - the barn's cam1 had its 23 cows on a strip 3 m deep. `crosscam` finds, from
+your labels, the stretch of the plan (1.5-32 times along one direction) under which a cow's two points
+match best, and with `--depth auto` writes it to every camera of that floor and `link_dist` to the new
+scale (docker/README.md: the barn's cam1-cam2, on 5 minutes it was not fitted on, 29% of the cows
+right unstretched, 51% stretched 24x).
+
+**Evidence, not seconds near (`[mct] link_rule = "llr"`).** The barn's cam1/cam2 floor
+mapping puts a cow's true partner nearest in ~70% of the seconds; `link_share` asks for 60%
+of the seconds near *and* no other cow within `link_margin`, which cows lying side by side
+under such a mapping never give (a trial joined nothing). With `llr` every second two tracks
+of two cameras are both seen adds the log-likelihood that they are one cow, from their floor
+distance `d`:
+
+    log( (1 - link_wrong) * link_spread² / (2 link_sigma²) * exp(-d² / (2 link_sigma²)) + link_wrong )
+
+one cow's two points a normal of `link_sigma` (0: `link_dist` / 2.5) in all but `link_wrong`
+(0.3) of the seconds, two cows anywhere within `link_spread` (0: 4 x `link_dist`) - a near
+second counts for, a far one against (at most log 0.3), a wrong one costs little. A pair is
+joined at `link_llr` (40) when the two cameras' tracks of this second, matched one to one by
+their evidence (best assignment), keep it, and forbidding it costs that assignment
+`link_llr_margin` (20): a row of cows seen shifted by half a stall is told by the row, which
+no rule of one cow and her nearest can do. The joins weigh the evidence fading over
+`link_window_s` (120 s): summed over whole lives, a cow's new track (her old one lost) was
+outweighed by the hours her neighbour's track had had. `link_learn_offset = true` learns the
+floor's bend between the two cameras from the pairs joined (median per `link_offset_cell`).
+
+`python herd/mct_sim.py` tries the rules on a made-up barn where the truth is known (two cameras
+facing each other over a shared strip, 40 cows, most lying in rows of stalls 1.2 m apart, each
+camera's floor bent by up to 60 cm and 0.8-2 m off in 15% of the seconds, so that a cow's true
+partner is the other camera's nearest in 50-70% of the seconds - the barn's cam1/cam2: ~70%;
+minutes on any computer, not a pod). 30 min, 3 seeds:
+
+| rule | IDF1 both cameras | cow on both at once, one track | track purity |
+|---|---|---|---|
+| `link_share` (the default) | 0.613 | 28.7% | 93.6% |
+| `link_vote = 2` | 0.638 | 42.4% | 93.2% |
+| **`link_rule = "llr"`** | **0.683** | **70.1%** | 91.8% |
+| `llr` + `link_learn_offset` | 0.681 | 68.1% | 91.1% |
+
+The joins it makes wrong are mostly two neighbours the bend swaps (each cow of the pair nearer the
+other's point than her own, for minutes): place alone cannot tell them; the look can, once the identity
+model tells cows apart across views. Learning the bend did not help here (it learns from joins already
+made, wrong ones included) - it stays off. `mct_eval` scores `+llr`, `+llr+learn`, `~bent80+llr` and
+`~bent80+llr+learn` on MmCows; the barn's verdict is `trial` with `link_rule = "llr"` on your labels.
+
+How far to trust these numbers: a 30-minute run makes only ~20-25 joins across the two cameras, and
+one wrong join of two long-lying cows moves IDF1 by a few points - the same rule on the same seeds
+moved by up to ~0.07 when only the noise of the run changed (a camera's frames 1.5 s late: two wrong
+joins of 25 fewer). Differences of a few hundredths here are noise; the large ones (the joined share,
+the camera's tracker below) are not. All runs: `mct_sim` with a deterministic noise, the commands as
+given.
+
+**Each point its own uncertainty (`link_px`, off).** After Sternig et al. (Hough-homography): a
+box's point is off by a few pixels, and a pixel far along a camera's view is metres of floor, under
+it centimetres. With `link_px = 8` each floor point gets the covariance of `link_px` pixels (of a
+1920 x 1080 frame; plus `link_px_sigma` of the box's size) through the floor mapping's derivative
+there, plus `link_sigma`'s (then smaller, e.g. 30: the calibration's floor); two points are compared
+by Mahalanobis distance under the sum of theirs. `link_learn_spread = true` replaces that, per
+`link_offset_cell`, by the spread and shift of the pairs already joined there. `mct_sim
+--perspective` (cameras looking along the barn from its ends, the errors put in the picture: 6 px +
+2% of the box, 15% of the seconds 30-80% of it, the calibration up to 10 px off), 30 min, 3 seeds:
+
+| rule | IDF1 both cameras | cow on both at once, one track | track purity |
+|---|---|---|---|
+| `llr` | 0.677 | 52.8% | 88.3% |
+| `llr`, `link_sigma = 30` | 0.645 | 32.4% | 86.5% |
+| `llr`, `link_sigma = 30`, `link_px = 8` | 0.673 | 50.9% | 88.5% |
+| ... + `link_learn_spread` | 0.673 | 52.1% | 88.1% |
+
+With the picture's errors 2.5x larger (15 px, the calibration 30 px): `llr` 0.663, `link_px = 8`
+0.667, `link_px = 16` 0.671. Noise, both: the error that matters between two cameras is the
+calibration's, smooth over the floor and the same for every cow there - a cow's two points are off
+by it whatever the distance; where the cameras overlap both look from mid-distance, so the
+per-point spread changes little. On the barn's trial (cam1-cam2 replayed, `link_sigma = 30`,
+`link_px = 8`): 6 of the 23 labelled cows seen by both under one name, against 4 with `llr` alone -
+too few to tell. It stays off; a better calibration of cam1-cam2 is worth more.
+
+**One swap must not keep a cow apart for good (`link_strayed`, 10).** Two tracks of one camera that lived
+at the same time are never one cow - so when a camera's track of a joined cow swapped onto her neighbour and
+went on there, the cow's new track on that camera could never join her other camera's again: her old track
+still sat in the group, beside the new one. With `link_strayed` a join refused only by such a track takes it out
+of its group instead, when its recent evidence with the group's other cameras is under -`link_strayed` (it is
+with another cow now). The barn's three trials of 23 Oct played again (`trial --relink`): IDF1 66.3 -> 67.8%,
+71.2 -> 72.5%, 71.1 -> 73.1%; a cow on both cameras at one moment under one name 54 -> 59%, 62 -> 70%,
+55 -> 64%. 20 alike, 40 worse; `mct_sim` 0.683 -> 0.688, the wrong joins 421 -> 386.
+
+**A join the evidence turned against is undone (`link_rival`, 200).** Joins are for good, and a join made in
+the first seconds can be wrong: the barn's cows 6 and 9, standing side by side, were joined crossed (cam1's
+track of 6 to cam2's of 9 and back) and stayed so for ten minutes while the evidence went the other way (the
+crossed pairs -33 and 924, the right ones 1518 and 1389). With `link_rival` a join refused only by a track of the
+same camera in the other group takes that track out when the newcomer's evidence with the group's other cameras,
+summed, is `link_rival` above its own, and a second together at least half as good (a neighbour lying 1.2 m off
+for hours sums up as much as the cow on a shorter track; a second at a time she is several times better). The
+barn's four trials of 23 Oct played again: IDF1 67.8 -> 68.2%, 72.5 -> 74.0%, 73.1 -> 77.7%, 71.9 -> 76.1%; a cow
+on both cameras at one moment under one name 62 -> 74% (trial_36). `mct_sim`: IDF1 alike (0.688 -> 0.692), one
+track on both 73 -> 79%, but two cows on one track 386 -> 553 seconds - the four trials are one recording:
+check it on another of yours (`trial --relink` with `link_rival = 0` against the default).
+
+**A handing over is one cow (`link_overlap_s`, 60).** The barn's cow 19 lay with her neighbour in one box for
+4.5 minutes on cam1; then the detector split them - her own box, a new track - and the old track lingered 31 s on
+the neighbour's part and ended. 31 s of two tracks at once kept her two cameras apart for the rest of the
+recording. Two tracks of one camera alive together at most `link_overlap_s`, the earlier one ended (gone 10 s)
+before the later, may be one cow now; and any group holding two tracks of one camera seen at the same second (a
+track taken back after a join, or a handing over that was none) is taken apart, the one with less recent
+evidence with the group's other cameras leaving (before, a track taken back late could leave two cows in one group
+for minutes). The barn's four trials relinked: IDF1 68.2 -> 69.0%, 74.0%, 77.7 -> 79.1%, 77.5 -> 78.9%; cow 19 on
+one track on both cameras 27 -> 56 of 56 moments; `mct_sim` alike (0.692 -> 0.693).
+
+**A joined track asks its other camera (`link_cross_w` 0.2, `link_cross_confirm` 2).** On 19 Oct three cows
+side by side swapped tracks on cam2 (one walked in front of another and hid her: the hidden cow's track, waiting
+at her place - `still_s` - took the walker's box, an unsure one because a merged box held it) while cam1 saw each
+where she was. A camera's track joined across cameras now chooses its box with the other camera's word: where
+its joined track there sees the cow now (the pair's own offset over the last minute taken off), in sigmas of
+`link_cross_sigma` (0: `link_sigma`, else `link_dist` / 2.5) - a bonus of up to `link_cross_w` for a box right
+there, and a box taken other than by overlap (at her place when lost, taken back, an unsure box) only if her
+other camera sees her within `link_cross_confirm` sigmas, and never one another joined cow's other camera says
+is hers. Both cameras' tracker played again over the trials' boxes: on 19 Oct none of the three swapped, a cow on
+her own track cam2 88 -> 92% (changes 7 -> 3); on 23 Oct cam1 56 -> 68%, a cow on both cameras in her one group
+51 -> 59%; `mct_sim` one track on both 80 -> 83%, two cows on one track 554 -> 378 seconds. `link_cross_veto`
+(no box at all farther than that many sigmas) helped 19 Oct but lost on 23 Oct, where the two floors lie
+farther apart: off. A wrong join can lead a track astray with it - the joins' own rules undo those.
+
+**A walker's box goes back to the walker (`walker_size` 0.2).** 23 Oct, cam2: cow 13 walked up to cow 23, who
+had stood still for 270 s, and stopped in front of her. For a second their boxes ran into one; cow 13's track lost
+hers, cow 23's track took it - cow 23's box had been one size all along (0.111 +- 0.003 of the frame), this one
+was 23% taller - and followed cow 13 for the rest of the recording (cam1 the same with cows 17 and 14). With the
+camera's Kalman tracker on, a track still for `still_for_s` whose box this second is `walker_size` taller or
+shorter than its own over the last minute (that minute one size, within `walker_stable` 5%), while a track lost
+`walker_s` (5 s) ago at most was walking (`walker_speed`, 0.15 box heights a second) and its speed puts it on that
+box better than the still cow's own place, at a size nearer its own: the box goes back to the walker, and the
+still track waits for its cow at her place (`still_s`, `still_long_s`). The three trials of 23 Oct replayed (both
+cameras' trackers and the linker over their boxes): it fires once or twice a recording; cow 13 on her own track 20
+-> 39 of 42 moments, cow 23 6 -> 22 of 43, a cow on both cameras in her group 54 -> 57% / 53 -> 55%, no other cow
+changed; 19 Oct and `mct_sim` unchanged (it never fires there). Looser (a crowd's boxes running together, a cow at
+the frame's edge, a "walker" only jittering) it fired a dozen times on cam1 and lost 5 points there - hence the
+one-size minute and the walking speed.
+
+**How wide (`link_dist`).** llr's sigma is `link_dist` / 2.5: at 230 (what `crosscam --depth` said with a margin
+for minutes it had not learnt from) a neighbour 1.3 m off still adds +2.6 a second against the cow's +3.5 - the
+barn's cows 25 and 35 of 19 Oct, joined crossed in the first two minutes (25 then hid 35 on cam2), stayed so. The
+two recordings played again (`trial --relink`) at 110 / 140 / 160 / 180 / 230: 19 Oct IDF1 78.2% at 110-180 (a cow
+on both cameras under one name 92%) against 78.1% (82%) at 230; 23 Oct 78.0 / 79.4 / 79.7 / 79.5 / 78.9%. 160 for
+the barn's cam1-cam2; `crosscam --depth` now says about 2.1 x one cow's two points' median distance (no margin).
+Yours: `trial --relink` at a few values - minutes, no GPU.
+
+**Two cows named crossed get a name each.** While two cows' joins were crossed the gallery named them so (the
+barn's cows 25 and 35 of 19 Oct: cam1 -18 / cam2 -07 and cam1 -07 / cam2 -18); the joins put right, each group
+held both names and took the one with more bursts - both -07. Two groups alive at once on one camera, each named
+A by one camera and B by the other, the other way round, each camera all but sure (90% of its bursts): each takes
+one, the way most of their bursts say. 19 Oct relinked: IDF1 78.2 -> 80.2%; the four trials of 23 Oct unchanged.
+Any other two groups alive at once on one camera that took one name (23 Oct: cam1's gallery named cow 8 as cam2's
+had named cow 6 - both -01 for 975 s): the one whose other name (its cameras named it differently) costs it less to
+take, takes it, if no group beside it has it. trial_39 of 23 Oct: IDF1 77.4 -> 78.9%, one cow twice on one camera
+975 -> 2 s; the other trials unchanged (one -0.1).
+
+**The gallery's claims see the joins.** A cow confirmed on one track is held by it for `claim_s`; another track
+seen at the same time gets her only with a surer burst. "At the same time" was one camera's: a cow on cam1 could
+take a neighbour cam2 held, though cam2's track of hers was alive beside cam2's track of the neighbour. trial_39 of
+23 Oct: cow 10 (cam1 and cam2 joined, 43 moments) was never enrolled - her bursts went to cow 12 (-03) and cow 11
+(-10) at 0.92-0.98 while those two were held on cam2, and her group was left without a name 40 of 43 moments. The
+claims now also ask the linker: two tracks whose joined groups hold two tracks of one camera alive at once are two
+cows (`TrackletLinker.two_cows`), so her bursts go to the next cow or a new one. Only a full `trial` shows it
+(`--relink` keeps the names; the fingerprints are not stored).
+
+**A cow between two masks is counted by one camera (`count_holes`, on).** Each camera counts only its mask, and
+the masks are drawn on two pictures: where the floor mapping is 1.5-2 m off their edges do not meet. 23 Oct, the
+barn's masks: 286 of 859 cow-moments of your cows were in neither mask - tracked by both cameras, counted by none,
+no burst, no name (cow 14 after 420 s). The camera's tracker never minded the mask (it tracks in `tracking_mask`;
+the linker joined as many tracks with the masks as without): what changed is who counts. Now the linker, which has
+every camera's boxes of the second, says it: a box in its camera's mask, as ever; one outside it, where another
+camera also tracks, is counted here when nobody counts her where she is - joined to the other camera's track there
+outside its mask too, by the camera whose box of her is the bigger (the same answer on both, never two); not
+joined, when the other camera has no box within `count_dist` of her in its mask (0: 2.5 x `link_dist` - her two
+points lie 2-3 m apart where both cameras see far; at 1.5 x, 51 cow-moments were counted twice), and of the boxes
+near outside theirs, hers the biggest. A cow so counted gets her rows and bursts there; the gallery's "counted by
+two cameras at once: two cows" (`counted_apart_s`) still reads the masks alone. Floor only one camera tracks, left
+out of its mask, stays uncounted. Replayed with the barn's masks: counted by exactly one camera 66 -> 78% (by none
+286 -> 169, by both 2 -> 23). `trial` scores such a box on the camera that counted it, and says how many of your
+cows no camera counted ("your cows counted by no camera", `counted_by_none`).
+
+**A camera of its own tiles (`[[cameras]] tiles = true`).** The barn's cam4 of 19 Oct missed 32% of the labelled
+cows; of those inside its tracking zone two thirds (131 of 197) lay in one box with a neighbour - a row of far cows
+the detector saw as one (small: 0.4% of the frame against 0.9% for those found). `[detector] tiles` (the frame
+whole and in square tiles, far cows ~1.8x wider) costs every camera ~3x the detector's work; a camera's own
+`tiles` turns it on for that camera alone (its seconds, the frames between, its bursts; studio and the zones page
+show its cows so too). Check it with `trial` on your labels.
+
+**A camera unsure of a joined cow's name no longer undoes it.** `report.track_map` named a joined group only when
+every camera's bursts had a two-thirds majority: the barn's cow 10 (cam1 4 bursts to 3, cam2 2 to 0) went unnamed
+for the whole recording. Now the cameras that are sure name her, the unsure one left out (none sure: all the
+group's bursts together, two thirds). trial_36: IDF1 76.1 -> 77.6%, boxes found but unnamed 3% -> 1%.
+
+The store keeps each camera's own tracks (`seconds`, `bursts`); the joins are `track_links`, which the reports
+follow - the gallery sees the joined track at once. Before 2026-11-02 a joined camera's rows were written
+under the other camera's track: a join could not be undone and `trial --relink` on such a trial was wrong.
+
+**One cow under two names, made one by where she stood (`cow_merge_llr`).** Each camera's
+gallery names a cow by the side it sees, so a cow that walks from one camera's floor to the
+other's is enrolled twice unless her two tracks were joined at that moment. With `llr` the
+linker writes every pair of tracks' evidence to `track_evidence`; at night
+(`pipeline.merge_by_place`, before the gallery's own night; `trial` after its second pass)
+the evidence is summed per pair of names (`mct.cow_merges`: track -> cow from the bursts),
+so many short visits to the overlap add up where no single pair of tracks was enough. Two
+names are one cow at `cow_merge_llr` (200), `cow_merge_margin` (100) ahead of every rival (a
+name seen at the same time as the partner), never two names seen at the same time: the gallery merges
+their prototypes and fingerprints (`Gallery.merge`), the store aliases the old name
+(`cow_aliases`; the reports follow, `store.unalias_cow` undoes it), the night's event says
+`merged_by_place`. In `mct_sim` (30 min, 3 seeds, each camera naming its own side perfectly) it
+made 32 of the 106 cows seen by both cameras one name and put 2 names into another cow (at 60 / 30:
+39 cows, 3 wrong) - the hours a cow spends in the overlap are what it needs, so it grows with the days.
+Identity within one camera's view is the easy part (one side, another
+day: 96%); which of one camera's names is which of the other's is a slowly changing
+one-to-one match, learnt from hours of place, not from one look.
+
+**Sure, unsure, nothing: a person asked (`cow_review_llr`, `herd.py merges`).** As in a
+city's camera network, the night's pairs of names fall in three zones: sure ones
+(`cow_merge_llr`) are merged; unsure ones - at least `cow_review_llr` (60), `cow_review_margin`
+(30) ahead of every rival - wait in the store's `merge_reviews`; the rest are nothing. A
+confirmed burst's middle crop is kept as the cow's face on its camera (`gallery/faces/<cow>/`,
+one each `[identity] face_every_s`, the last `face_keep`). `herd.py merges page --config
+barn.toml --out merges.html` shows each unsure pair's faces side by side, camera by camera,
+with their bursts per camera and the evidence: S the same cow, D two cows, then Save
+decisions.json; `herd.py merges apply --decisions decisions.json` aliases a "same" pair at once
+(the reports follow) and the gallery merges it the next night; a "different" pair is never
+proposed again, however sure it looks later. The page also lists the nights' own merges to
+look over. `trial` says how many pairs wait and the command for its store (`--store
+trial/pass2/herd.sqlite`), and `trial --score-only` counts the answers.
+
+**The camera's own tracker: Kalman and unsure boxes (`[tracker] kalman`, `low_score`).** Every
+cross-camera rule joins tracks; a track broken in its own camera breaks the cow's evidence
+too. Two things from ByteTrack, for both trackers (`pipeline.Tracker`, and `mct.GlobalTracker`
+under `[mct]`):
+
+- `kalman = true`: a track's box is matched where its speed puts it now (`common.BoxKalman`,
+  constant velocity, its noise tuned for a frame a second, not ByteTrack's 30): a cow walking
+  more than about half her box a second keeps her track;
+- `low_score` (e.g. 0.2, under `[detector] threshold`): the detector keeps boxes down to it; the
+  sure ones are tracked as before, then the unsure ones only continue a track no sure box took
+  - one seen a moment ago where it is expected (IoU `low_iou`, 0.5), or a cow lying still at her
+  place - and never start one. The detector loses lying cows for minutes; their boxes often
+  stay there at a lower score. The bursts take only the sure boxes. Not with `[mct] mode =
+  "fused"`. The camera's counts say `low_boxes_kept`.
+
+`mct_sim.py --weak 0.003` lets lying cows fade for the detector (30-300 s at score 0.3 in 70% of
+the seconds, gone in the rest). 30 min, 3 seeds, `link_rule = "llr"` in all:
+
+| camera tracker | IDF1 both cameras | IDF1 within a camera | track purity |
+|---|---|---|---|
+| IoU (as before) | 0.462 | 0.528 | 86.2% |
+| `kalman` | 0.522 | 0.586 | 89.4% |
+| `low_score = 0.2` | 0.576 | 0.666 | 81.4% |
+| **both** | **0.672** | **0.756** | 85.4% |
+
+(`link_share`, the default joining, with the IoU tracker: 0.428 / 0.527.) Purity counts only the
+boxes a track kept: with `low_score` it keeps the hard ones too, which IDF1 counted as missed
+before. With no cow fading but every walk twice as fast (`--speed 2`, 20 min) `kalman` neither helps
+nor harms (IDF1 0.797 without, 0.793 with): it matters where tracks break. Its box is matched by the
+better of where her speed puts her and where she was - a cow stopping short of the guess keeps her
+track. Both are off by default; try them in `trial` on your labels and keep what raises IDF1.
+
+`inside_low` (e.g. 0.8): a box at least that much inside a bigger box of the same frame is unsure as
+well - it continues a track that expects it, starts none. Where standing cows crowd (the barn's cam1, a
+row at the fence: 6 cows, 5-10 boxes a second, two thirds of the seconds a different count) the detector
+boxes pieces of them that come and go, and each piece started a track and took a neighbour's: of a
+labelled cow's track changes 165 of 180 went to a track that already existed, 2 were a track ending. The
+barn's trial replayed through the camera's tracker (`seconds`' boxes, 10 minutes, scored on the labels):
+a labelled cow on her own track (best one-to-one of cows and tracks) cam1 42% -> 60%, cam2 71% -> 75%,
+her track changing 174 -> 50 times on cam1; 25% of the labelled boxes without a track instead of 16%
+(cows half hidden whose own track had broken). Kalman, `still_s`, `iou`, `max_age_s` moved none of it.
+
+**One clock (`time_offset_s`, PTP / NTP).** Every rule above compares two cameras at the same
+second, and a live frame is stamped when the server reads it: a camera whose stream comes 1.5 s
+late (encoding, the network, HEVC buffering) puts a walking cow a metre or more behind herself. Turn
+on PTP (IEEE 1588) or NTP in every camera against the server's own time source (`SETUP.md` section 3),
+and give each camera its own delay: `[[cameras]] time_offset_s` (s, negative: its frames are moved
+earlier) moves its frames onto the barn's clock - live, from recordings, in `trial`'s score and in
+`show-ids`. The linker measures it (`TrackletLinker.clocks`): for a cow walking on two cameras (her
+tracks joined, or both walking and each other's nearest within 3 x `link_dist`) the shift of one
+camera's floor path, within `lag_max_s`, that lays it on the other's, using only her moments in
+motion; summed over every such walk per camera pair. The run says at the end, e.g. "cam2's frames
+come +1.4 s late against cam1's (37 times a cow walked on both; ...): time_offset_s = -1.4 on cam2",
+and keeps it as the event `clocks`. In `mct_sim.py --lag L --rules llr+kalman` (30 min, 3 seeds; without
+`kalman` walking tracks break at 1 fps and nothing is measured), 13-44 walks a run: camera b late by 0 s
+was measured +0.4 / -0.6 / +0.6, by 1.5 s +1.5 / +1.5 / +2.7, by 3 s +2.8 / +2.4 / +3.0 - right to about half
+a second in half an hour, so it is said only from 0.5 s, and its numbers (walks, how sharp) are worth a
+look before it goes into barn.toml; hours of a barn give it many more walks. In that made-up barn the
+cows lying in the overlap make nearly all the joins, so a lag barely changed IDF1 there; walking cows
+crossing from one camera's floor to the other's - where one cow gets two names - are what it is for.
+
+**Neighbours on floor plans of their own** (each calibrated alone, placed apart: the studio's planes,
+autocalib's groups kept apart) never meet by place: such a pair in `neighbours` is joined by look in
+the strip they share, as one without a floor mapping (`[mct]` says so at the start). Calibrate them
+together (studio: Spots) to join them by place.
+
 Each camera then tracks in its `tracking_mask` (overlapping its neighbours; default
 its `mask`) but writes seconds and bursts only for boxes in its own `mask`, so a cow in
 an overlap is counted once, under one track. Across cameras `cannot_link` is added only
 for `disjoint` pairs (cameras with no shared floor): without a floor map, one cow in an
 overlap is seen by two cameras at once. Handovers are logged in `track_handovers`.
-Not yet: a Kalman filter on the floor point, a nightly merge of split profiles, and
-identity training with real cow ids across views (the fingerprint does not tell cows
-apart across views today).
+Not yet: a Kalman filter on the floor point, a nightly merge of split profiles by look
+(by place: `cow_merge_llr` above), and identity training with real cow ids across views (the
+fingerprint does not tell cows apart across views today).
 
 **Checking it — MmCows** (`mct_eval.py`, `mct_pod.sh`): four synchronised cameras over
 one pen of 16 cows, a frame a second (7/25 12:00–15:00), each cow's number in every
@@ -843,8 +1142,17 @@ the only fair test of the barn's own cameras.
    guess, and writes a labelling page; a person corrects the boxes in the browser and saves
    `labels.json`; `herd.py boxes export` makes `herd_det_barn_<date>.tgz` (COCO train / valid, the
    valid frames whole hours of a camera). Step by step: `SETUP.md` section 12. A few hundred frames
-   from different cameras and times of day are enough. (`cowbench/label/` - prelabel, CVAT,
-   `cvat2ava.py` - is the way for posture and activity labels too.)
+   from different cameras and times of day are enough. The same page takes each cow's posture and activity:
+   select a box, `1` standing / `2` lying, `3` feeding / `4` drinking / `5` neither / `6` ruminating (`0`
+   clears; `P` takes them from the frame before for boxes in the same place; `C` - or "... on all frames" - from
+   the same cow id's box on the other cameras' frames of the same moment, within 2 s, only what a box lacks). They are the box's 7th field in
+   `labels.json` (`[x1, y1, x2, y2, id or "", 0, {"posture": ..., "activity": ...}]` - older files read as
+   before), the COCO annotations' `attributes`, and `trial` scores them against what the cameras wrote at that
+   second ("posture ... right N of M", per camera, what was taken for what). Rumination is a head of its own,
+   decided once a burst: to the activity head (feeding / drinking / neither) your "ruminating" is neither, and
+   rumination is scored apart - ruminating or not against her track's burst nearest the moment (within 45 s; a
+   moment with none near is counted apart). (`cowbench/label/` - prelabel, CVAT,
+   `cvat2ava.py` - is the way for posture and activity labels of whole clips, for training the heads.)
 2. Train on the pod: `DET_ARCH=rfdetr DET_INIT=<the current best/> EXTRA=zenodo,mmcows bash
    herd/run_pod.sh detector` - with the archive in `/workspace`, its training frames join CBVD-5 and
    the public sets three times each (`BARN_REPEAT`), and every detector is scored on its held-out
@@ -941,6 +1249,8 @@ model sees fine detail: coat pattern, the jaw.
 | `pipeline.py` | real time: cameras, detector, tracker, bursts, cache |
 | `mct.py` | one track per cow across cameras (GlobalTracker) |
 | `mct_eval.py`, `mct_pod.sh` | that tracker scored on MmCows' four cameras |
+| `mct_sim.py` | the cross-camera joining rules on a made-up barn where the truth is known |
+| `merges.py` | `herd.py merges`: unsure pairs of cow names put to a person (section 4.8) |
 | `show_ids.py` | `herd.py show-ids`: who is who drawn on a recorded file (from the store) |
 | `reid.py`, `reid_pod.sh` | identity taught on sets with cow ids; MmCows labelled by its neck tags (section 4.9) |
 | `store.py` | SQLite: seconds, bursts, events, alerts, verdicts |

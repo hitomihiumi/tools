@@ -161,7 +161,9 @@ def test_frames_page_and_export_for_the_detector():
         box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--every", "10", "--detector", "none"])
         assert len(json.load(open(os.path.join(out, "frames.json")))["frames"]) == 18
         # labels: done frames are exported, one skipped is not; held out by whole hours of a camera
-        labels = {f["file"]: {"status": "done", "boxes": [[0.1, 0.4, 0.3, 0.8]]} for f in fr}
+        # (posture and activity, the page's 7th field: kept as the annotation's attributes)
+        labels = {f["file"]: {"status": "done", "boxes": [[0.1, 0.4, 0.3, 0.8, "", 0, {"posture": "lying", "activity": "feeding"}]]}
+                  for f in fr}
         labels[fr[1]["file"]] = {"status": "skip", "boxes": []}
         labels[fr[2]["file"]] = {"status": "", "boxes": [[0.1, 0.1, 0.2, 0.2]]}       # edited, not marked done
         lp = os.path.join(d, "labels.json")
@@ -180,6 +182,7 @@ def test_frames_page_and_export_for_the_detector():
         assert not hours(tr) & hours(va)                                              # whole hours held out
         a = tr["annotations"][0]
         assert a["bbox"] == [32.0, 72.0, 64.0, 72.0] and os.path.exists(os.path.join(root, "train", tr["images"][0]["file_name"]))
+        assert a["attributes"] == {"posture": "lying", "activity": "feeding"}
         import extra_det
         assert extra_det._sources("barn", os.path.join(work, "extra_det")) == ["barn"]   # eval takes it
 
@@ -238,12 +241,121 @@ def test_record_names_files_as_the_tools_read_them():
                              f'[[cameras]]\nid = "cam2"\nurl = "{src}"\n')
         import shutil
         if not shutil.which("ffmpeg"):
-            assert record.command("rtsp://x", 60, "o.mp4")[5:7] == ["-rtsp_transport", "tcp"]
+            assert record.command("rtsp://x", 60, "o.mkv")[5:7] == ["-rtsp_transport", "tcp"]
             return
         out = os.path.join(d, "rec")
         assert record.main(["--config", cfg, "--out", out, "--minutes", "0.05", "--cameras", "cam2"]) == 0
         recs, bad = common.recordings(out, ["cam1", "cam2"], 2)
         assert [c for c, _, _ in recs] == ["cam2"] and not bad
+        # the streams named on the command line: those cameras, a camera the config lacks too
+        out2 = os.path.join(d, "rec2")
+        assert record.main(["--config", cfg, "--out", out2, "--minutes", "0.05", "--url", f"cam1={src}",
+                            f"cam9={src}"]) == 0
+        recs, bad = common.recordings(out2, ["cam1", "cam2", "cam9"], 2)
+        assert sorted(c for c, _, _ in recs) == ["cam1", "cam9"] and not bad
+        assert all(p.endswith(".mkv") for _, p, _ in recs) and sorted(os.listdir(out2)) == sorted(
+            os.path.basename(p) for _, p, _ in recs)                              # nothing left beside them
+        assert record.main(["--config", cfg, "--out", out2, "--check", out2]) == 0     # every file reads to its end
+        # --fps: H.264 at that rate, steady; --keep-raw: the stream as it came beside it, not read by the tools
+        hevc = os.path.join(d, "hevc.mkv")
+        import subprocess
+        made = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", src, "-c:v", "libx265", "-x265-params", "log-level=none",
+                               hevc]).returncode == 0
+        cam_src = hevc if made else src
+        out3 = os.path.join(d, "rec3")
+        assert record.main(["--config", cfg, "--out", out3, "--minutes", "0.05", "--url", f"cam1={cam_src}",
+                            "--fps", "2", "--keep-raw"]) == 0
+        recs, _ = common.recordings(out3, ["cam1"], 2)
+        assert len(recs) == 1 and recs[0][1].endswith(".mkv")
+        assert [f for f in os.listdir(out3) if f.endswith(".mkv.raw")] and not any(f.endswith(".part") for f in os.listdir(out3))
+        assert record.codec(recs[0][1]) == "h264"
+        rate = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=avg_frame_rate",
+                               "-of", "csv=p=0", recs[0][1]], capture_output=True, text=True).stdout.strip()
+        assert rate in ("2/1", "2"), rate
+        if made:                                        # HEVC without --fps: H.264 at the camera's own rate (5)
+            out4 = os.path.join(d, "rec4")
+            assert record.main(["--config", cfg, "--out", out4, "--minutes", "0.05", "--url", f"cam1={hevc}"]) == 0
+            recs, _ = common.recordings(out4, ["cam1"], 2)
+            assert record.codec(recs[0][1]) == "h264" and os.listdir(out4) == [os.path.basename(recs[0][1])]
+
+
+def test_record_length_by_the_clock():
+    """A camera whose stamps jump ahead (the barn's: -t, going by the stamps, ended its recording seconds
+    in) is recorded for the whole time, the frames stamped as they arrive; a stream that stops early is
+    recorded on into a new file, and a recording short of its time is said."""
+    import shutil
+    import socket
+    import subprocess
+    import threading
+    import time
+    import common
+    import record
+    if not shutil.which("ffmpeg"):
+        return
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "src.mkv")                 # as a camera sends: no B-frames, parameter sets repeated
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", "testsrc=size=320x240:rate=25", "-t", "12",
+                        "-c:v", "libx264", "-bf", "0", "-g", "25", "-bsf:v", "dump_extra", src], check=True)
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as so:
+            so.bind(("127.0.0.1", 0))
+            port = so.getsockname()[1] // 2 * 2
+        sdp = os.path.join(d, "cam.sdp")
+        rtp = f"rtp://127.0.0.1:{port}"
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", src, "-c", "copy", "-t", "0.01", "-f", "rtp", rtp,
+                        "-sdp_file", sdp], capture_output=True)
+        cfg = os.path.join(d, "barn.toml")
+        open(cfg, "w").write("[farm]\ntimezone_offset_hours = 2\n")
+
+        def camera():                                    # 2 s in, its stamps jump 90 s ahead
+            time.sleep(1)
+            subprocess.run(["ffmpeg", "-v", "error", "-re", "-i", src, "-c", "copy", "-bsf:v",
+                            "setts=ts=TS+gte(N\\,50)*90/TB", "-f", "rtp", rtp], capture_output=True)
+        th = threading.Thread(target=camera)
+        th.start()
+        out = os.path.join(d, "rec")
+        assert record.main(["--config", cfg, "--out", out, "--minutes", "0.1", "--url", f"cam1={sdp}"]) == 0
+        th.join()
+        recs, _ = common.recordings(out, ["cam1"], 2)
+        assert len(recs) == 1 and record.length(recs[0][1]) > 5.0
+        # a stream of 1 s: recorded on into new files, and said to be short
+        short = os.path.join(d, "short.mp4")
+        _video(short, 1)
+        out2 = os.path.join(d, "rec2")
+        assert record.main(["--config", cfg, "--out", out2, "--minutes", "0.1", "--url", f"cam1={short}"]) == 1
+        recs, _ = common.recordings(out2, ["cam1"], 2)
+        assert len(recs) >= 2 and not [f for f in os.listdir(out2) if f.endswith(record.RAW)]
+
+
+def test_record_gpu_falls_back_to_the_cpu():
+    """--gpu: NVDEC + NVENC; a computer whose ffmpeg cannot use the card is said so at the start and
+    re-encodes on the CPU; a file the card refuses midway is re-encoded on the CPU."""
+    import shutil
+    import common
+    import record
+    cmd = record.encode("a.mkv.part", "b.mkv", 5, 20, gpu=True)
+    assert cmd[cmd.index("-hwaccel") + 1] == "cuda" and cmd[cmd.index("-c:v") + 1] == "h264_nvenc"
+    assert "-crf" not in cmd and cmd[cmd.index("-cq") + 1] == "20"
+    assert record.encode("a.mkv.part", "b.mkv", 5)[record.encode("a.mkv.part", "b.mkv", 5).index("-c:v") + 1] == "libx264"
+    if not shutil.which("ffmpeg"):
+        return
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, "src.mp4")
+        _video(src, 4)
+        cfg = os.path.join(d, "barn.toml")
+        open(cfg, "w").write("[farm]\ntimezone_offset_hours = 2\n")
+        ready, old = record.nvenc_ready(), record.nvenc_ready
+        for card in (False, True):                       # True: the card said ready, then refusing the file
+            record.nvenc_ready = (lambda: (True, "")) if card else old
+            out = os.path.join(d, f"rec{card}")
+            try:
+                assert record.main(["--config", cfg, "--out", out, "--minutes", "0.05", "--url", f"cam1={src}",
+                                    "--fps", "2", "--gpu"]) == 0
+            finally:
+                record.nvenc_ready = old
+            recs, _ = common.recordings(out, ["cam1"], 2)
+            assert len(recs) == 1 and record.codec(recs[0][1]) == "h264" and os.listdir(out) == [os.path.basename(recs[0][1])]
+            if ready[0]:                                 # a computer with the card: nothing to fall back from
+                break
 
 
 def test_zones_page_and_apply():
@@ -251,6 +363,8 @@ def test_zones_page_and_apply():
     import zone_page
     with tempfile.TemporaryDirectory() as d:
         cfg, rec = _setup(d)
+        text = open(cfg).read()
+        open(cfg, "w").write(text.replace('id = "cam1"', 'id = "cam1"\ntime_offset_s = -1.2', 1))
         sys.modules["detector"] = types.SimpleNamespace(Live=lambda *a, **k: (lambda img: [{"bbox": [0.1, 0.4, 0.3, 0.8], "det_score": 0.9}]))
         try:
             zone_page.main(["page", "--config", cfg, "--videos", rec, "--out", os.path.join(d, "zones")])
@@ -262,6 +376,7 @@ def test_zones_page_and_apply():
         assert set(cams) == {"cam1", "cam2"} and cams["cam1"]["w"] == 320 and cams["cam1"]["boxes"]
         assert cams["cam1"]["exclude"] == [[0.0, 0.0], [1.0, 0.0], [1.0, 0.2], [0.0, 0.2]]      # from the config
         assert os.path.exists(os.path.join(d, "zones", cams["cam2"]["still"]))
+        assert cams["cam1"]["keep"] == {"time_offset_s": -1.2} and cams["cam2"]["keep"] == {}   # kept on Save
         # a camera not in the config yet (cam3's recording), named on the command line
         import shutil as sh
         sh.copy(os.path.join(rec, "cam1_2026-10-20_06-00-00.mp4"), os.path.join(rec, "cam3_2026-10-20_06-00-00.mp4"))
@@ -289,6 +404,36 @@ def test_file_frames_on_the_recordings_own_clock():
         ts = [t for t, _ in pipeline.frames_from(path, 1000.0)]
         assert len(ts) == 15 and ts[0] == 1000.0 and abs(ts[-1] - 1002.8) < 0.05
         assert all(b > a for a, b in zip(ts, ts[1:]))
+
+
+def test_fix_videos_first_or_last_minutes_same_stretch_on_every_camera(monkeypatch):
+    """--last / --first: the last minutes before the first camera stopped (the first after the last started),
+    one stretch for all; names moved on."""
+    import fix_videos
+    lengths = {"cam1_2026-10-27_12-00-00.ts": 1800.0, "cam2_2026-10-27_12-00-05.ts": 1780.0}
+    monkeypatch.setattr(fix_videos, "duration", lambda p: lengths[os.path.basename(p)])
+    files = [(f"/r/{n}", f"/o/{n[:-3]}.mp4", n[:4]) for n in lengths]
+    kept, (a, b), cover = fix_videos.stretch(files, 10)
+    assert b - a == 600 and all(abs(v - 600) < 1e-6 for v in cover.values())
+    got = {os.path.basename(d): cut for _, d, cut in kept}
+    # cam2 stopped first (12:29:45): the stretch 12:19:45 - 12:29:45 on both
+    assert got == {"cam1_2026-10-27_12-19-45.mp4": (1185.0, 600.0), "cam2_2026-10-27_12-19-45.mp4": (1180.0, 600.0)}
+    # --first: from where cam2 started (12:00:05), on both
+    kept, (a, b), _ = fix_videos.stretch(files, 10, first=True)
+    assert {os.path.basename(d): cut for _, d, cut in kept} == {
+        "cam1_2026-10-27_12-00-05.mp4": (5.0, 600.0), "cam2_2026-10-27_12-00-05.mp4": (0.0, 600.0)}
+    # --from 12:10 with --first 10: from 12:10:00 on both
+    kept, (a, b), _ = fix_videos.stretch(files, 10, first=True, start_at="12:10")
+    assert {os.path.basename(d): cut for _, d, cut in kept} == {
+        "cam1_2026-10-27_12-10-00.mp4": (600.0, 600.0), "cam2_2026-10-27_12-10-00.mp4": (595.0, 600.0)}
+    vf = fix_videos.command("in.ts", "out.mp4", 25.0, cut=(1185.0, 600.0))
+    assert "trim=start=1185.000:duration=600.000" in vf[vf.index("-vf") + 1]
+    cp = fix_videos.command("in.ts", "out.mp4", 25.0, copy=True, cut=(10.0, 5.0))
+    assert cp[cp.index("-ss") + 1] == "10.000" and cp[cp.index("-t") + 1] == "5.000"
+    assert fix_videos.camera_of("x/cam1_2026.ts", ["cam1", "cam10"]) == "cam1"
+    assert fix_videos.camera_of("cam10_2026.ts", ["cam1"]) is None
+    assert fix_videos.camera_of("Cam_1 2026-10-27 12-00-00.ts", ["cam1"]) == "cam1"
+    assert fix_videos.camera_of("CAMERA01_x.TS", ["cam1"]) == "cam1"
 
 
 def test_fix_videos_command():

@@ -27,6 +27,7 @@ both (alerts.lying_directions) - which way is "worse" is the vet's call.
 from __future__ import annotations
 
 import argparse
+import collections
 import csv
 import datetime as dt
 import json
@@ -58,25 +59,98 @@ def day_expr(cfg):
     return f"date(ts + {off}, 'unixepoch')"
 
 
-def track_map(store, min_share=2 / 3):
-    """track -> cow from its confirmed bursts; tracks without a clear majority are left out."""
+def track_map(store, min_share=2 / 3, joins=True):
+    """track -> cow from its confirmed bursts; tracks without a clear majority are left out.
+
+    joins (store.track_links, mct): tracks joined into one cow are named together - by each camera whose bursts in
+    the group have a clear majority (min_share) of their own, a camera unsure left out (the barn's cow 10: cam1 4
+    to 3, cam2 2 to 0 - unnamed for the whole recording while any camera unsure undid the group); none sure, all
+    the group's bursts together. When two cameras' majorities name her differently (the same cow under each
+    camera's name for her side: the join is the evidence), the group takes the name with more bursts - the night
+    makes the two names one (pipeline.merge_by_place). joins=False: each track by its own
+    bursts alone (what the night compares)."""
     aliases = store.aliases() if hasattr(store, "aliases") else {}   # a merged profile counts as its cow
-    roots = store.track_roots() if hasattr(store, "track_roots") else {}   # tracks joined across cameras
-    votes = {}
-    for track, cow, n in store.query("SELECT track, cow, COUNT(*) FROM bursts WHERE state='confirmed' "
-                                     "GROUP BY track, cow"):
-        cow = aliases.get(cow, cow)
-        key = roots.get(track, track)
-        votes.setdefault(key, {})[cow] = votes.get(key, {}).get(cow, 0) + n
-    out = {}
-    for track, v in votes.items():
-        cow, n = max(v.items(), key=lambda kv: kv[1])
-        if n >= min_share * sum(v.values()):
-            out[track] = cow
+    roots = (store.track_roots() if hasattr(store, "track_roots") else {}) if joins else {}
+    votes = collections.defaultdict(lambda: collections.defaultdict(collections.Counter))   # group -> cam -> cow
+    for track, cam, cow, n in store.query("SELECT track, cam, cow, COUNT(*) FROM bursts WHERE state='confirmed' "
+                                          "GROUP BY track, cam, cow"):
+        votes[roots.get(track, track)][cam][aliases.get(cow, cow)] += n
+    out, options = {}, {}
+    for group, per_cam in votes.items():
+        tops = {}
+        for cam, v in per_cam.items():
+            cow, n = v.most_common(1)[0]
+            if n >= min_share * sum(v.values()):
+                tops[cam] = cow                                # a camera unsure which cow: left out
+        total = collections.Counter()
+        for v in per_cam.values():
+            total.update(v)
+        if tops:
+            ranked = sorted(set(tops.values()), key=lambda c: (total[c], c), reverse=True)   # ties: as before
+            out[group] = ranked[0]
+            if len(ranked) > 1:                                # its cameras named it differently
+                options[group] = [(c, total[c]) for c in ranked]
+        elif len(per_cam) > 1:                                 # every camera unsure: all their bursts together
+            cow, n = total.most_common(1)[0]
+            if n >= min_share * sum(total.values()):
+                out[group] = cow
+    if joins and options:
+        _one_name_each(store, roots, aliases, out, options)
     for track, root in roots.items():                          # every joined track is its root's cow
         if root in out:
             out[track] = out[root]
     return out
+
+
+def _one_name_each(store, roots, aliases, out, options):
+    """Two groups with tracks of one camera alive at once are two cows: one name each where they can. Two such
+    groups each named A by one camera and B by the other, the other way round (the gallery named them while their
+    joins were crossed, the joins since put right: the barn's cows 25 and 35 of 19 Oct, both -07) take one each,
+    the way most of their bursts say. Any other two that took one name (the barn's cows 6 and 8 of 23 Oct, cam1's
+    gallery naming 8 as cam2's named 6: both -01, 975 s): the one whose own other name (its cameras named it
+    differently: options, most bursts first) costs it least to take, takes it - if no group beside it has it.
+    The tracks' lives from their bursts."""
+    life = collections.defaultdict(list)                       # group -> [(cam, first, last)]
+    for track, cam, first, last in store.query("SELECT track, cam, MIN(ts), MAX(ts) FROM bursts GROUP BY track, cam"):
+        life[roots.get(track, track)].append((cam, first, last))
+    clash = lambda g, h: any(c1 == c2 and f1 <= l2 and f2 <= l1 for c1, f1, l1 in life[g] for c2, f2, l2 in life[h])
+    pairs = collections.defaultdict(list)                      # the two names -> groups named so
+    for g, opts in options.items():
+        if len(opts) == 2:
+            pairs[frozenset(c for c, _ in opts)].append(g)
+    for names, groups in pairs.items():
+        if len(groups) != 2 or not clash(*groups) or any(out.get(h) in names for h in out
+                                                           if h not in groups and any(clash(h, g) for g in groups)):
+            continue
+        g, h = groups
+        a, b = sorted(names)
+        v = lambda grp, c: dict(options[grp]).get(c, 0)
+        if v(g, a) + v(h, b) >= v(g, b) + v(h, a):
+            out[g], out[h] = a, b
+        else:
+            out[g], out[h] = b, a
+    # any two groups alive at once on one camera that took one name: the one with another name of its own (its
+    # cameras named it differently) whose move costs it least takes that other name, if no group beside it has it
+    by_name = collections.defaultdict(list)
+    for g, cow in out.items():
+        by_name[cow].append(g)
+    for cow, groups in list(by_name.items()):
+        rivals = [g for g in groups if any(h != g and clash(g, h) for h in groups)]
+        if len(rivals) < 2:
+            continue
+        free = lambda g: [(c, n) for c, n in options.get(g, []) if c != cow
+                          and not any(clash(g, h) for h in by_name.get(c, []) if h != g)]
+        movers = [g for g in rivals if free(g)]
+        if not movers:
+            continue
+        v = lambda g: dict(options.get(g, [])).get(cow, 0)
+        stay = max(rivals, key=lambda g: (v(g) - (free(g)[0][1] if free(g) else 0), g))
+        for g in movers:
+            if g != stay and any(clash(g, h) for h in by_name[cow] if h != g):
+                nxt = free(g)[0][0]
+                by_name[cow].remove(g)
+                by_name[nxt].append(g)
+                out[g] = nxt
 
 
 def daily(store, cfg, since=None, until=None):

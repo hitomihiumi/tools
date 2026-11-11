@@ -348,3 +348,36 @@ def test_right_spots_kept_when_some_lie_near_a_line():
         autocalib.main(["--config", cfg, "--out", os.path.join(d, "c"), "--points", pj])
         pair = json.load(open(os.path.join(d, "c", "calib.json")))["pairs"]["cam1:cam2"]
         assert pair["spots_used"] == 7 and pair["spots_left_out"] == [], pair
+
+
+def test_distort_undoes_undistort():
+    import autocalib
+    from common import undistort
+    u, v = np.meshgrid(np.linspace(0, 1, 21), np.linspace(0, 1, 21))
+    for k in (0.0, -0.2, -0.5):
+        a, b = autocalib.distort(*undistort(u, v, k, 16 / 9), k, 16 / 9)
+        assert np.abs(a - u).max() < 1e-6 and np.abs(b - v).max() < 1e-6
+
+
+def test_overlay_lays_the_same_floor_on_itself():
+    """Two cameras with the same floor_points and bent lens: the other's picture lands pixel on pixel, the
+    clicked spots too; the page and the pictures are written."""
+    import cv2
+    import autocalib
+    rng = np.random.default_rng(0)
+    img = cv2.resize(rng.integers(0, 255, (27, 48, 3), dtype=np.uint8), (480, 270), interpolation=cv2.INTER_NEAREST)
+    pts = [[0.35, 0.4, 0, 0], [0.65, 0.4, 800, 0], [0.95, 0.95, 800, 600], [0.05, 0.95, 0, 600], [0.5, 0.6, 400, 250]]
+    cfg = {"cameras": [{"id": c, "floor_points": pts, "distortion": -0.3, "aspect": 16 / 9} for c in ("a", "b")]}
+    with tempfile.TemporaryDirectory() as d:
+        fa = autocalib.camera_floor(cfg["cameras"][0])
+        warped, valid = autocalib.other_onto(img, img, fa, fa)
+        inner = valid.copy()
+        inner[:, :2] = inner[:, -2:] = False
+        inner[:2], inner[-2:] = False, False
+        assert valid[200, 240] and not valid[5, 240]                     # the floor below; the sky above it
+        assert np.abs(warped[inner].astype(int) - img[inner]).mean() < 3
+        with open(os.path.join(d, "points.json"), "w") as fh:
+            json.dump({"pairs": {"a:b": [[u, v, u, v] for u, v, _, _ in pts]}}, fh)
+        made = autocalib.overlay(cfg, d, [("a", "b")], {"a": img, "b": img}, os.path.join(d, "points.json"))
+        assert made == ["b_on_a", "a_on_b"]
+        assert os.path.exists(os.path.join(d, "overlay.html")) and os.path.exists(os.path.join(d, "b_on_a.jpg"))

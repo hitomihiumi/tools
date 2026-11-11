@@ -763,6 +763,34 @@ def same_features(folder, features):
     return False
 
 
+def arcface_head(dim, n_ids, k=3, s=30.0, m=0.3):
+    """Sub-center ArcFace (Deng et al. 2019, 2020): a centre on the sphere for each training cow - k of
+    them, so a cow's two flanks (different patches) need not be one point - and her fingerprint's angle
+    to her nearest centre made m larger before the softmax over every cow of the set (scaled by s): her
+    bursts held at least that angle nearer to her than to any other cow. Only for training: the
+    fingerprint and the gallery stay as they are."""
+    import math
+    import torch
+    import torch.nn.functional as F
+
+    class Head(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.k, self.s, self.m = k, s, m
+            self.w = torch.nn.Parameter(torch.randn(n_ids * k, dim) * 0.01)
+
+        def forward(self, f, y, m=None):
+            m = self.m if m is None else m
+            cos = (F.normalize(f, dim=-1) @ F.normalize(self.w, dim=-1).t()).view(len(f), -1, self.k).amax(-1)
+            cos = cos.clamp(-1 + 1e-7, 1 - 1e-7)
+            sin = (1 - cos * cos).sqrt()
+            phi = cos * math.cos(m) - sin * math.sin(m)                 # cos(theta + m)
+            phi = torch.where(cos > math.cos(math.pi - m), phi, cos - math.sin(math.pi - m) * m)   # past pi: no fold
+            hot = F.one_hot(y, cos.shape[1]).bool()
+            return F.cross_entropy(self.s * torch.where(hot, phi, cos), y)
+    return Head()
+
+
 def sampler(data, P, K, rng):
     """P bursts a step: P // K cows with two or more bursts, K bursts of each (other days, other cameras)."""
     groups = collections.defaultdict(list)
@@ -1075,6 +1103,11 @@ def reid_scores(split, fp, qfp=None, qmax=None, qmean=None):
     return res, rows
 
 
+# the metric train keeps the best epoch by (--pick)
+PICK = {"score": "score", "moment": "moment_cross_cam_top1", "other_camera": "other_camera_top1",
+        "other_day": "other_day_top1"}
+
+
 def evaluate(model, split, moments=None):
     fp, qmax, qmean = embed(model, split)
     m, rows = reid_scores(split, fp, qmax=qmax, qmean=qmean)
@@ -1171,13 +1204,31 @@ def cmd_train(args):
           f"{mm_line(m0)}", flush=True)
     rng = random.Random(args.seed)
     torch.manual_seed(args.seed)
-    opt = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.05)
+    head = frame_head = None
+    if args.loss != "supcon":                  # sub-center ArcFace over every training cow (only while training)
+        from model import ID_DIM
+        n_ids = int(tr.identity.max()) + 1
+        head = arcface_head(ID_DIM, n_ids, args.arc_k, args.arc_s, args.arc_m).to(dev)
+        print(f"[train] loss {args.loss}: sub-center ArcFace over {n_ids} cows ({args.arc_k} centres each, s "
+              f"{args.arc_s:g}, margin {args.arc_m:g} reached over {args.arc_warm} epochs)"
+              + (f" + SupCon (weight {args.arc_w:g} on ArcFace)" if args.loss == "both" else ""), flush=True)
+        if args.loss == "arcface" and mo_tr is not None:   # ArcFace alone: MmCows' frames too, over its cows
+            frame_head = arcface_head(ID_DIM, len(mo_tr.ids), args.arc_k, args.arc_s, args.arc_m).to(dev)
+            print(f"[train] frame against frame: ArcFace over {len(mo_tr.ids)} MmCows cows (no SupCon anywhere)",
+                  flush=True)
+    heads = [h for h in (head, frame_head) if h is not None]
+    groups = [{"params": model.parameters()}]
+    for h in heads:                            # the centres start at random: they learn faster
+        groups.append({"params": h.parameters(), "lr": args.lr * 10, "weight_decay": 0.0})
+    opt = torch.optim.AdamW(groups, lr=args.lr, weight_decay=0.05)
     steps = max(1, len(tr.bursts) // args.P)
-    sched = torch.optim.lr_scheduler.OneCycleLR(opt, args.lr, total_steps=args.epochs * steps, pct_start=0.05)
+    sched = torch.optim.lr_scheduler.OneCycleLR(opt, [g.get("lr", args.lr) for g in groups], total_steps=args.epochs * steps,
+                                                pct_start=0.05)
     batches = sampler(tr, args.P, args.K, rng)
     os.makedirs(args.out, exist_ok=True)
     best, best_state, best_m, since = -1.0, None, None, 0
     hist = open(os.path.join(args.out, "history.jsonl"), "w", encoding="utf-8")
+    pick = PICK[args.pick]
     for epoch in range(args.epochs):
         model.train()
         losses = []
@@ -1186,16 +1237,24 @@ def cmd_train(args):
             # some views one frame only: mct.py follows a cow by one frame a second
             x, t, v = views(tr, ids, rng, args.crop_s, args.single_p, dev)
             o = model(x, t, v)
-            loss = supcon(o["fingerprint"], torch.as_tensor(tr.identity[ids], device=dev), args.temperature)
+            y = torch.as_tensor(tr.identity[ids], device=dev)
+            margin = args.arc_m * min(1.0, (epoch + 1) / max(1, args.arc_warm))   # ArcFace's margin grown in
+            if head is None:
+                loss = supcon(o["fingerprint"], y, args.temperature)
+            else:
+                loss = args.arc_w * head(o["fingerprint"], y, margin)
+                if args.loss == "both":
+                    loss = loss + supcon(o["fingerprint"], y, args.temperature)
             if mo_tr is not None:
                 fx, fy = mo_tr.sample(rng, args.moments)
                 fx = torch.from_numpy(fx).to(dev)[:, None]
                 o2 = model(fx, fx.new_zeros(len(fx), 1), torch.ones(len(fx), 1, dtype=torch.bool, device=dev))
-                loss = loss + args.frame_w * supcon(o2["fingerprint"], torch.as_tensor(fy, device=dev),
-                                                    args.temperature)
+                fy = torch.as_tensor(fy, device=dev)
+                loss = loss + args.frame_w * (frame_head(o2["fingerprint"], fy, margin) if frame_head is not None
+                                              else supcon(o2["fingerprint"], fy, args.temperature))
             opt.zero_grad(set_to_none=True)
             loss.backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            torch.nn.utils.clip_grad_norm_(list(model.parameters()) + [q for h in heads for q in h.parameters()], 1.0)
             opt.step()
             sched.step()
             losses.append(float(loss.detach()))
@@ -1206,8 +1265,8 @@ def cmd_train(args):
               f"{m.get('other_day_top1', 0):.1%}, another camera {m.get('other_camera_top1', 0):.1%}, one frame "
               f"{m.get('frame_other_day_top1', 0):.1%}{mm_line(m)}", flush=True)
         since += 1
-        if m["score"] > best:
-            best, best_m, since = m["score"], dict(m, epoch=epoch + 1), 0
+        if m.get(pick, 0.0) > best:
+            best, best_m, since = m.get(pick, 0.0), dict(m, epoch=epoch + 1), 0
             best_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
         if since >= args.patience:
             break
@@ -1217,13 +1276,17 @@ def cmd_train(args):
     ab = fit_abstain(rows, args.max_error, os.path.join(args.out, "abstain.json"))
     th = calibrate(model, va, mo_va)
     write_json(os.path.join(args.out, "thresholds.json"), th)
+    loss = {"loss": args.loss, "temperature": args.temperature, "pick": args.pick,
+            **({"arc_s": args.arc_s, "arc_m": args.arc_m, "arc_k": args.arc_k, "arc_w": args.arc_w}
+               if args.loss != "supcon" else {})}
     torch.save({"in_dim": base.in_dim, "kw": {k: v for k, v in base.kw.items() if k != "frame_id"},
                 "state": {k: v.cpu() for k, v in model.state_dict().items()}, "features": ck.get("features", {}),
                 "base": os.path.abspath(args.model), "init": os.path.abspath(args.init) if args.init else "",
                 "sources": sorted(set(args.sources) | set(ck0.get("sources", []) if args.init else [])),
-                "eval": best_m, "before": m0, "thresholds": th},
+                "eval": best_m, "before": m0, "thresholds": th,
+                "loss": loss},
                os.path.join(args.out, "identity.pt"))
-    write_json(os.path.join(args.out, "eval.json"), {"before": m0, "after": best_m,
+    write_json(os.path.join(args.out, "eval.json"), {"loss": loss, "before": m0, "after": best_m,
                                                      "abstain": {k: ab[k] for k in ("threshold", "dev_top1", "dev")}})
     print(f"[train] best epoch {best_m['epoch']}: another day {best_m.get('other_day_top1', 0):.1%} (was "
           f"{m0.get('other_day_top1', 0):.1%}), another camera {best_m.get('other_camera_top1', 0):.1%} (was "
@@ -1324,12 +1387,24 @@ def main(argv=None):
     t.add_argument("--lr", type=float, default=None, help="default 1e-4, 3e-5 with --init")
     t.add_argument("--init", default=None, help="an identity.pt to fine-tune (else the herd model's transformer)")
     t.add_argument("--temperature", type=float, default=0.1)
+    t.add_argument("--loss", choices=("supcon", "arcface", "both"), default="supcon",
+                   help="supcon: bursts of a step against each other (as before); arcface: sub-center ArcFace over "
+                        "every training cow, and MmCows' frame against frame over its cows - no SupCon anywhere; "
+                        "both: ArcFace + SupCon (the frames SupCon)")
+    t.add_argument("--arc-s", type=float, default=30.0, help="ArcFace: the scale")
+    t.add_argument("--arc-m", type=float, default=0.3, help="ArcFace: the angular margin (radians)")
+    t.add_argument("--arc-k", type=int, default=3, help="ArcFace: centres per cow (sub-centers: a cow's two flanks)")
+    t.add_argument("--arc-w", type=float, default=1.0, help="ArcFace: its weight (with --loss both)")
+    t.add_argument("--arc-warm", type=int, default=3, help="ArcFace: epochs over which the margin grows to --arc-m")
     t.add_argument("--crop-s", type=float, default=2.0, help="the shortest view (s); up to 5.6 s")
     t.add_argument("--single-p", type=float, default=0.25, help="share of views cut to one frame")
     t.add_argument("--frame-w", type=float, default=1.0, help="weight of the frame-against-frame loss on MmCows' "
                    "seconds (a cow from two cameras at once; 0: off)")
     t.add_argument("--moments", type=int, default=8, help="MmCows seconds a step for that loss")
     t.add_argument("--patience", type=int, default=6)
+    t.add_argument("--pick", choices=sorted(PICK), default="score",
+                   help="keep the epoch best by: score (the mean), moment (frame against frame at one second across "
+                        "cameras - what the tracker asks), other_camera, other_day")
     t.add_argument("--max-error", type=float, default=0.01, help="the NaN model's error budget")
     args = p.parse_args(argv)
     if args.cmd == "train" and args.out is None:

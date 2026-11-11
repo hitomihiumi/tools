@@ -132,6 +132,8 @@ def cmd_barn(args):
     cfg = load_config(args.config)
     store = Store(args.store or cfg["store"]["path"])
     start = dt.datetime.fromisoformat(args.start).timestamp()
+    cam_cfg = next((c for c in cfg["cameras"] if c["id"] == args.cam), {})
+    start += float(cam_cfg.get("time_offset_s") or 0.0)      # the run moved this camera's frames by it
     t0 = start + args.from_min * 60
     t1 = t0 + args.minutes * 60
     secs, tm, nm, bursts = _lookup(store, cfg, args.cam, t0, t1)

@@ -107,6 +107,66 @@ docker compose run --rm herd zones page --config /data/barn.toml --videos /data/
    docker compose run --rm herd zones apply --config /data/barn.toml --cameras /data/cameras.toml
    ```
 
+**Zones, floor calibration and its check in one page (studio).** Once the cameras are in `barn.toml`
+(their `url`, e.g. from the zones page above), everything else can be edited in one place and saved
+straight into `barn.toml`:
+
+```bash
+docker compose run --rm -p 8765:8765 herd studio --config /data/barn.toml --videos /data/rec_fixed
+```
+
+Open <http://localhost:8765> in a browser (Ctrl+C in the terminal stops it). `-p 8765:8765` lets the
+browser reach it. Every camera's picture at one moment of the recordings (`--at`; the left panel can move
+it), one, two or four cameras at once (keys `1` `2` `4`) or the **Plan** (`P`): the floor from above, the
+cameras' pictures carried onto it, their masks and the spots. Tools (keys in brackets):
+
+- **Mask / Exclude / Tracking** (`M` `E` `T`): click round an area, a click on the first corner or Enter
+  closes it; drag a corner, double-click an edge for a corner more, right-click a corner to remove it;
+- **Floor** (`O`): the floors themselves (a pen is floor A, the next pen B, an alley C - "+ New floor"),
+  the main way to calibrate. Click a floor's corners round its edge on one camera (A1, A2, ...), then the
+  same corners on the others: the next corner that camera has not got is picked (ringed where the planes
+  put it, once there are planes); `N` skips one it does not see, Esc to add new corners there instead. A
+  corner the camera does not see (the near ones are often under it) is no problem: pick an **edge** (the
+  buttons A1–A2, ... on the right, or a click on the outline) and click a few points along it on the
+  pictures - where the fence or kerb meets the floor; a double-click on the outline puts a corner between
+  two. Measured sizes put the plan on the real floor: for 4 corners "a rectangle" width x length (cm) and
+  where its first corner is, or X, Y of any corner or spot (a post, a drinker's corner). Then, in order:
+  a camera with 8 equations of the measured floor (2 per measured corner or point, 1 per edge point) gets
+  its plane on its own; a camera that sees none follows one placed already through 4 spots it shares; two
+  cameras with 5 spots in common are fitted together and put on the corners either of them sees (two
+  cameras facing each other, each seeing the other's near corners); and "Fit / Refine all" adjusts every
+  plane together - a camera that shares only a thin strip with its neighbour, its plane set roughly by
+  hand first (tool Plane), is pulled onto the floor by the strip's spots and its edges. Every camera shows
+  the floors' outlines (dashed where only the planes put them) and its grid only on the floors. A far
+  corner lies on its edge already, so a camera that sees 2 corners and the side edges has 6 equations,
+  not 8: the page says what to add (a measured post along each side, or spots shared with the camera
+  opposite). A post on an edge: click its foot as an edge point, type how far it is from the edge's first
+  corner along the fence (a tape) and it becomes a measured point - then put it on the other cameras
+  that see it (tool Spots);
+- **Spots** (`S`): one spot of the floor on every camera that sees it. Click it on one camera, then the
+  same place on the others - once the planes are known, where it should be is ringed (dashed): click
+  there. Each spot shows how far (px) it is from where the cameras together put it: green agrees, amber a
+  little off, red off. Every two cameras with 5 spots in common are fitted at once (Auto-fit, as
+  `autocalib --points`), all cameras they join on one plan;
+- **Plane** (`F`): the floor grid on each calibrated camera (about 1 m when the plan is in cm; `G` shows
+  it with any tool), and the plane moved as a whole. On the picture: drag and the floor follows the hand
+  (the camera tilted and panned), Shift+drag rolls it. On the right: Tilt, Pan, Roll, Zoom and the Lens
+  bend - how the floor sits in the picture - and Turn, Size and Move - where the camera's floor lies on
+  the plan; Reset puts it back. On the **Plan** each camera's floor has a dot where it begins and an
+  arrow where it looks: drag the dot to move it, the arrow to turn it. Lay another camera over this one
+  (*over it*) and move the plane until the floor lines up. "Start a plane" gives a camera without one a
+  plane to begin from; "Remove plane" drops a wrong one;
+- **Select** (`V`): select and move anything, Del removes it. `Ctrl+Z` / `Ctrl+Shift+Z` undo and redo,
+  `Ctrl+wheel` zooms.
+
+Nothing is written until **Save** (`Ctrl+S`): the zones of the cameras changed, the cameras' planes
+(`floor_points` / `distortion` / `aspect`, set or removed) and, after a fit, `[mct]` (link on, `link_dist`, the calibrated pairs out
+of `disjoint`). The old file is kept as `barn.toml.bak`, the spots go to `calib/points.json`. The floor
+plan is in about cm when `calib/` holds the cows' boxes cached by an `autocalib --videos` run
+(`boxes_<cam>.json`); without them `link_dist` is a guess. Without recordings:
+`--image cam1=/data/cam1.jpg --image cam2=...`, or the pictures the spots were clicked on
+(`calib/pick`) are used.
+
 A still from a camera, and its zone drawn:
 
 ```bash
@@ -119,10 +179,32 @@ docker compose run --rm herd show-zone --config /data/barn.toml --camera cam1 --
 **Recordings.** Every camera at once, an hour:
 
 ```bash
-docker compose run --rm herd record --config /data/barn.toml --out /data/rec --minutes 60
+docker compose run --rm herd record --config /data/barn.toml --out /data/rec --minutes 60 --fps 5 --gpu
 ```
 
-The files are named as the tools read them (`rec/cam1_2026-10-20_06-00-00.mp4`). Recordings made
+The files are named as the tools read them (`rec/cam1_2026-10-20_06-00-00.mkv`, Matroska: a recording
+cut short - Ctrl+C, the network gone - still reads up to where it stopped). While it records, each camera
+goes into `<name>.mkv.part` as the camera sends it; at the end it becomes `<name>.mkv`:
+
+- `--fps 5`: re-encoded to H.264 at 5 frames a second, steady (at each 1/5 s the frame the camera sent
+  last). The tools take a frame a second and the tracker `track_fps` a few more, so 5 is plenty - and the
+  files and the time to encode them are a fraction;
+- without `--fps`: an HEVC (H.265) camera re-encoded to H.264 at its own rate (the tools' reader decodes
+  some cameras' HEVC poorly); an H.264 camera kept as it came.
+- `--gpu`: that re-encoding on the NVIDIA card (decoded with NVDEC, encoded with NVENC) - many times
+  faster, the CPU left free. The log says at the start when the card cannot (`Cannot load libcuda.so.1`:
+  no card given to the container; then a current NVIDIA driver and `docker compose build` again - the
+  image asks the driver for its video part) and the CPU does it; a file the card refuses midway is
+  re-encoded on the CPU.
+
+The length goes by the computer's clock, whatever the cameras' own time stamps do (the barn's jump ahead,
+which cut the first test recordings short); a stream that stops early is recorded on into a new file
+(`cam1_<its start>.mkv`, read after the first). At the end the log says per camera how many of the minutes
+asked were recorded, `!!` when short.
+
+`--keep-raw` keeps the stream as it came too (`<name>.mkv.raw`, not read by the tools). After the
+recording the log says per camera what share of its frames arrived (over the internet the barn's four
+cameras lose ~40%). `record --check /data/rec` checks recordings already made, every frame. Recordings made
 elsewhere work too: copy them into `docker/data/rec/`, named by camera id and local start time.
 
 **Damaged recordings.** A recorder's file can play in a player and still be read wrong by the tools:
@@ -136,6 +218,19 @@ docker compose run --rm herd fix-videos --videos /data/rec --out /data/rec_fixed
 
 `--copy` only re-wraps the stream (fast; enough when just the container is broken). Then pass
 `--videos /data/rec_fixed` to the commands below (and to `zones page`).
+
+A stretch of a long recording, for a smaller set (`.ts` and the other formats alike):
+
+```bash
+docker compose run --rm herd fix-videos --videos /data/rec_new --out /data/rec_first10 --cameras cam1 cam2 --first 10
+```
+
+`--cameras`: only these cameras' files. `--first 10` / `--last 10`: the first / last 10 minutes, the
+same stretch of time on every camera - it starts where the camera that started last started / ends where
+the camera that stopped first stopped - each file named by its new start (the time in its name moved
+on), so the tools still put the cameras side by side. Frame-exact, so not with `--copy`. `--first 10 --from
+14:00`: ten minutes from 14:00 (the clock of the names) - another stretch of the same day, e.g. for
+`crosscam --also`, best hours later, once the cows have moved and lie elsewhere.
 
 **Naming the cows** (`herd/SETUP.md` section 11):
 
@@ -297,6 +392,124 @@ The second scores a rehearsal already made. The log and `trial/score.json` give:
 Only the boxes a camera counts (its mask) are scored. Use the labels.json with the ids as the gallery
 page saved them (the same cow one id on every camera).
 
+**Which cow on the neighbour camera is she, by where she stands** (`crosscam`). The cameras do not move,
+so what surrounds a cow in one frame says where on the floor she is; your labels (one cow, one id on
+every camera) show where that place is in the neighbour's frame. It learns that mapping from them -
+nothing measured - and checks it honestly: each labelled moment is left out, the mapping fitted on the
+rest, and that moment's cows put onto the other camera and matched by distance:
+
+```bash
+docker compose run --rm herd crosscam --config /data/barn.toml --boxes /data/boxes --labels /data/labels.json
+```
+
+Per pair of neighbours: the right cow how often (beside a guess), from the boxes' bottom centres and from
+their centres, each lens's distortion as the pairs show it (the config's may be off), the cows it missed,
+your cows put again and again where another of yours is (one cow under two names on the two cameras, or
+two names swapped: check them in `ids.html`), `boxes/crosscam_<a>_<b>.jpg` - where each cow was put on
+the second camera against where you named her, the far ones red and named - and `boxes/crosscam.json`.
+Misses count half on each camera's picture (a cow far from one camera is small on it and large on the
+other's). `--planes 3` (the default) also tries up to three floor planes, each pair on the one it fits
+best - the bedding, the alley and a lens one plane cannot follow - and says how well that matches; `--apply`
+still writes one plane.
+
+No plane at all: the mapping learnt from the pairs themselves, from where each box is, how big and how
+tall (a standing cow's centre is higher than a lying one's) - once as one smooth mapping, once from each
+box's nearest pairs (a step between the bedding and the alley stays a step). Within one recording a lying
+cow's other moments teach her own place, so check it on another recording too, where the cows lie elsewhere:
+
+```bash
+docker compose run --rm herd crosscam --config /data/barn.toml --boxes /data/boxes_first10 --labels /data/labels_first10.json --also /data/boxes /data/labels.json
+```
+
+`--also`: fitted on one recording, checked on the other, both ways. The cows' names need not match between
+the two sets - only within each. `--apply`, when one of the two is
+calibrated and the other not: the other gets floor_points on its floor (barn.toml.bak kept), so
+`[mct] link` joins the two cameras' tracks by it. Both calibrated: `--apply --onto cam1` keeps cam1's
+and replaces the other's. It maps by the better of the two points, and writes `floor_at = "centre"`
+(or `"bottom"`) on both cameras: the point of a box the run then puts on the floor. `--gate` (0.15 of
+the frame height): how far from every box of the other camera a cow may land and still match one.
+
+**The floor plan's depth** (`--depth auto`). A plan made by `autocalib` (cows of one width near and far,
+nothing measured) has the across right and the depth along the camera's view anyhow: the barn's cam1
+had its 23 cows on a strip 3 m deep, neighbours 60 cm apart, so half a metre off put a cow on her
+neighbour. `crosscam` always says how your cows match on the plan as it is and, when it would help,
+stretched along one direction (1.5-32 times, the other kept); `--depth auto` writes that stretch to
+every camera on the floor (the pair and the [mct] neighbours joined to it) and `[mct] link_dist` to the
+new scale; `--depth 8` stretches that much along the best direction. With `--apply` it comes after,
+on the new calibration:
+
+```bash
+docker compose run --rm herd crosscam --config /data/barn.toml --boxes /data/boxes --labels /data/labels.json --cameras cam1 cam2 --apply --onto cam1 --depth auto
+```
+
+Past the barn's true depth it still helps while the two cameras agree along that direction better than
+across it - the plan is then the linker's scale, not centimetres (only `[mct]` reads it). The barn's
+cam1-cam2 (labels of 10 minutes; fitted on the first 5, checked on the next 5): the right cow 22% with
+the config before, 29% after `--apply`, 38% stretched 8x, 50% 16x, 51% 24x, 44% 40x. On the labels it
+was fitted on the numbers are higher (74% at 8x): label minutes of another hour, when the cows lie
+elsewhere, and run it again on all of them.
+
+**Box by box, every camera at once:** `trial/boxes.html` (written with the score; `--score-only` writes
+it again for a trial already made). Each labelled moment shows its cameras side by side, your boxes
+with your ids and the cow the system gave each: green the right cow, red another, orange not found,
+violet found but given no name (a click says why: no burst on that short track, none sure enough, or split between cows), grey dotted its boxes you did not name, dashed outside the camera's mask (not
+scored). **One cow on both cameras:** above the frames, every cow of yours both shown cameras have at that moment, judged:
+`ONE TRACK #7` (green: the system follows her as one cow across the cameras - her boxes on both carry `⇄#7` and
+a ring of one colour), `one id` (the same name, tracks not joined), `two cows` (red), `no name` or `not found` on
+a camera; B keeps only such moments, a click on one shows her on every camera. ←/→ go through the moments, E keeps
+only those with a mistake, the cameras switch on and off,
+and "your cow" keeps the moments with her. Click a box: its whole frame large with the box marked (the
+rest darker), and that cow of yours (or its cow) in every camera's frames at every moment, the box marked
+and the other side's name under each; a frame takes you to its moment. Z (close-ups) shows the boxes cut out
+instead. The
+frames are read from `boxes/frames/` where they are, so open the page on the computer that has them.
+
+**Does one cow get one id on two cameras?** The score says it for every cow of yours it scored on two
+cameras: the same cow of its on all of them or not (and at one moment on two cameras, how often the same).
+With masks that share no floor your cows are rarely scored on two cameras. `--overlap` is an experiment
+for that: each camera counts its whole `tracking_mask`, and the two rules that make a cow counted by two
+cameras at once two cows (`[identity] counted_apart_s`, `[mct] unlink_s`) are off. Never for a barn: on
+shared floor its cows are counted twice.
+
+```bash
+docker compose run --rm herd trial --overlap --config /data/barn.toml --videos /data/rec_fixed --out /data/trial_overlap --boxes /data/boxes --labels /data/labels.json
+```
+
+**Is the joining on at all?** A run with `[mct] mode = "link"` ends with `[run] [mct] two cameras' cows each
+other's nearest ...` and `tracks joined across cameras N`; with `link_rule = "llr"` the store's `track_evidence`
+fills. None of it in the log: the image is older than the code (`docker compose build` after `git pull`) or the
+container reads another barn.toml.
+
+**Another calibration or [mct] setting, without playing the recordings again** (minutes, no GPU): each camera's
+tracks as the trial made them, only the joining across cameras done anew with the config as it is now, then
+scored on your labels:
+
+```bash
+docker compose run --rm herd trial --relink --overlap --config /data/barn.toml --out /data/trial_overlap --boxes /data/boxes --labels /data/labels.json
+```
+
+It writes `trial_overlap/relink/` (a copy of the store, the trial's own left as it was) and says how far apart
+the two cameras put their nearest cows and how many tracks it joined. Recalibrate (studio, `autocalib --pick`),
+relink, compare - then a full trial with the calibration that wins.
+
+The score then says, for every moment one of your cows is in both cameras' frames and both found her: how
+often she was on **one joined track** (the linker found her on both), had **one id** (the same cow on both -
+joins, the night's merges and your `merges apply` answers followed), **two different cows**, or **no name** on
+one camera (no burst sure enough there yet) - over all, per camera pair, and the cows of yours it got wrong.
+
+**Several identity models, one rehearsal each, on a pod** (`herd/trial_pod.sh`): which identity model
+is best on your own cows. Upload to the pod's `/workspace`:
+
+| where | what |
+|---|---|
+| `/workspace/models/` | the archives in `docker/models/` (`herd_models_*.tgz`, the detector's, `herd_rumination_*.tgz`; those two may also lie in `/workspace` itself, and models the pod already has under `/workspace/herd/` are linked in) and a `herd_reid_*.tgz` of each identity model to compare (identity models trained on that pod are taken as they are) |
+| `/workspace/data/` | `barn.toml` (the RTSP passwords out: the trial plays files), `rec_fixed/`, `boxes/` (`frames.json`; with its `frames/` the page of one cow under two names gets pictures), `labels.json` |
+
+Then `bash herd/trial_pod.sh` (and `bash herd/trial_pod.sh log`). `/models` and `/data` point at those two
+folders, so barn.toml's paths stay as they are; the script stops naming any `/models/...` file it lacks.
+Each identity model gets `/workspace/data/trial_<model>/` and a line in the table at the end (IDF1 of all
+cameras and of each); `/workspace/export/herd_trials_<date>.tgz` keeps every `score.json` and `trial.json`.
+
 **Cameras that share floor, calibrated without measuring anything.** A cow seen by two cameras should
 be one cow. `[mct] link` joins her two tracks by where she stands on one floor plan. Marks measured by
 hand are not needed: a cow that gets up or walks does it at the same moment on both cameras. The
@@ -330,6 +543,98 @@ numbered alike) - it shows whether the recording had enough cows walking. If no 
 an hour or more (the feeding time is best) and run `autocalib` on that. A few minutes of cows lying
 is not enough: their boxes only twitch, and a twitch is no evidence of where a cow stands.
 
+**Cows that walk keep their track: `track_fps`.** Once a second a walking cow moves more than her own
+box and her track breaks (a new one, often a new name). With
+
+```toml
+[sampling]
+track_fps = 4
+```
+
+the detector and the tracker also look at 3 frames between the seconds; what is written (posture,
+identity, a row a second) stays once a second. The detector's work on the seconds is 4 times as much:
+the rehearsal takes longer, and live the GPU must keep up - when it does not, seconds are missed
+(`seconds_missed` in the camera's counts).
+
+**One cow, one track across cameras.** A cow's tracks on two cameras are joined only when both see her
+at once - so the masks (where a camera counts) share no floor, and at least one camera of each pair has
+a `tracking_mask` reaching into the other's floor (where it follows cows it does not count; zones page,
+the tracking layer). Calibrated pairs (cam1-cam2) are joined by where the cow stands; a pair that shares
+only a strip along a fence (cam3-cam4: no floor mapping) by look - a cow one camera sees beyond its mask
+is one of the other's counted cows, the one her frame ids are clearly nearest to over 10 s. `trial` says
+how many tracks were joined per camera pair.
+
+**A trial before 2026-10-30 that joined nothing at all** (`trial.json`: `"joined_across_cameras": {}`; the log:
+"two cameras' cows never seen at one second on one floor"): the cameras played from files met the linker by the
+wall clock, and a camera one second ahead of the other (a burst takes seconds) met it one second off from then on -
+no second of both cameras ever reached it. Fixed (they now meet by the recordings' clock); the trial already made
+needs no new run, its tracks are joined anew in minutes:
+
+```bash
+docker compose run --rm herd trial --relink --config /data/barn.toml --out /data/trial --boxes /data/boxes --labels /data/labels.json
+```
+
+(the barn's trial of 23 Oct: one joined track for a cow on both cameras 0% -> 40% of the moments, 11 of 23 cows
+under one name, IDF1 45% -> 57%).
+
+A trial made between that fix and 2026-11-02 that joined tracks wrote a joined camera's rows under the other
+camera's track: `--relink` on it is wrong (it cannot take the joins apart). Play such a trial again.
+
+**When a trial joins nothing** (the log: "tracks joined across cameras 0", most seconds turned away by
+`link_margin`): the floor mapping is right in only part of the seconds and the cows lie side by side. Join by
+evidence instead of by seconds near (`herd/GUIDE.md` section 4.8):
+
+```toml
+[mct]
+link_rule = "llr"           # every second both cameras see two tracks: evidence for or against one cow
+link_learn_offset = true    # the floor's bend between the cameras learnt from the cows joined
+```
+
+and run `trial` again. With it the night also puts together one cow the gallery named twice - once by each
+camera's side of her - by where she stood over the hours (`cow_merge_llr`): the trial says which names it
+made one ("one cow under two names, made one by where she stood"), and the score counts them as one cow.
+
+**Pairs the night was not sure of: you decide.** Pairs with some evidence but not enough wait for a person.
+The trial says how many; look at them (each name's faces, camera by camera, side by side):
+
+```bash
+docker compose run --rm herd merges page --store /data/trial/pass2/herd.sqlite --out /data/trial/merges.html
+```
+
+Open `docker/data/trial/merges.html`: **S** the same cow, **D** two cows, then **Save decisions.json**, move it
+to `docker/data/`, and:
+
+```bash
+docker compose run --rm herd merges apply --store /data/trial/pass2/herd.sqlite --decisions /data/decisions.json
+docker compose run --rm herd trial --score-only --config /data/barn.toml --out /data/trial --boxes /data/boxes --labels /data/labels.json
+```
+
+Live, the same with `--config /data/barn.toml` instead of `--store`: "same" counts in the reports at once, the
+gallery merges the two the next night; "different" is never asked again.
+
+**Tracks that break in one camera** (a cow walking, a lying cow the detector loses for minutes) break the
+joining too. Two settings from ByteTrack (`herd/GUIDE.md` section 4.8):
+
+```toml
+[tracker]
+kalman = true        # a walking cow's box looked for where her speed puts it
+low_score = 0.2      # boxes the detector is unsure of (under [detector] threshold) keep a cow's track, never start one
+inside_low = 0.8     # a box 80% inside a bigger one (a piece of a crowded cow) keeps a track, never starts one
+```
+
+**Tracks that jump between cows standing close** (`trial`'s `split` and `merged` full of neighbours; in
+`boxes.html` one cow's ring changing colour at the fence): where standing cows crowd the detector also boxes
+pieces of them - a head, a back half - that come and go; each started a track and took a neighbour's. The barn's
+cam1 (a row of cows at the right edge, 6 cows and 5-10 boxes a second): a labelled cow on her own track 42% of
+the time, 60% with `inside_low = 0.8` (cam2 71% -> 75%); more boxes are left without a track (cam1 16% -> 25%
+of your labelled ones: a cow half hidden behind another whose track had broken), so check `trial`'s IDF1 and
+the cows on two cameras with it on and off.
+
+**One clock.** Joining compares two cameras at the same second. Turn on time sync in every camera's web page
+(PTP if it has it, else NTP, against the same server as this computer). A camera's stream may still come late:
+the end of a `trial` (and of a live run) says it, e.g. `cam2's frames come +1.4 s late against cam1's ...:
+time_offset_s = -1.4 on cam2`. Put that line into cam2's `[[cameras]]` block and run `trial` again.
+
 **No cows walking: click the same spots on both pictures.** Nothing is measured; you only show
 which spot of one picture is which spot of the other:
 
@@ -360,6 +665,23 @@ gallery join their cows by look.
 the px), grey were left out. Fix them on the page (it remembers your clicks), save, run again. Then the check on the cows (share, and what chance alone would give) and the
 pictures `calib/cam1_cam2.jpg`, `calib/cam3_cam4.jpg`. With `--apply` the pairs also leave `[mct]
 disjoint`; two groups of cameras that share no floor are kept far apart on the plan.
+
+**Check the calibration by eye** - what barn.toml holds now (its `floor_points`, `distortion`), on the
+pictures the spots were clicked on (`calib/pick`):
+
+```bash
+docker compose run --rm herd autocalib --config /data/barn.toml --out /data/calib --overlay
+```
+
+For each calibrated pair, both ways, the other camera's picture is carried over the floor onto this one
+and laid over it half-transparent: `calib/cam2_on_cam1.jpg`, `calib/cam1_on_cam2.jpg`, and
+`calib/overlay.html` with a slider (0% this camera only, 100% the other's). Where the mapping is right
+the floor's lines, stall edges and the feet of posts and drinkers stay in place as the slider moves;
+cows' backs, walls and rails stand above the floor and never line up - that is expected. Circles are
+the spots clicked on this picture, crosses where the other picture's clicks land (the line between: px
+off); yellow / blue are the other camera's `mask` / `tracking_mask` drawn on this picture. Darkened: no
+floor both cameras see. Options: `--pairs cam1:cam2`, `--videos /data/rec_fixed --at 300` (the
+recordings' moment 300 s in instead of the clicked pictures), `--alpha 0.7` (the jpgs' opacity).
 
 ## 7. The barn, live
 

@@ -18,6 +18,7 @@ Training (on CBVD-5 today, on the barn's own footage later):
 Running:
     herd.py run --config barn.toml [--start ISO]   cameras (RTSP) or files -> herd.sqlite
     herd.py stress --model M --detector D          one GPU: a burst alone, then 5 cameras live
+    herd.py resolution --config barn.toml --boxes B --labels L [--video F]   frame width: quality against cameras
     herd.py show-ids --config barn.toml --cam cam1 --video F --start ISO   who is who, drawn on a recorded file
 
 Barn data for identity (once the barn runs with [training_cache] enabled):
@@ -26,16 +27,20 @@ Barn data for identity (once the barn runs with [training_cache] enabled):
     herd.py barn video --config barn.toml --videos DIR --out D   recorded camera files -> D/training_cache
     herd.py barn build --cache C --out F [--merges merges.csv] [--val-from DAY]
     then train --extra-train F/train, eval --extra-val F/val
+Cameras' zones, floor calibration and its check, all in one page (a local web server; saves to barn.toml):
+    herd.py studio --config barn.toml --videos DIR [--calib C] [--port 8765]   then http://localhost:8765
 Cameras' zones, drawn on their pictures:
     herd.py zones page --config barn.toml --videos DIR --out D    D/zones.html -> cameras.toml
     herd.py zones apply --config barn.toml --cameras cameras.toml
 Recordings for them:
-    herd.py record --config barn.toml --out DIR --minutes 60   every camera at once -> DIR/<cam>_<time>.mp4
+    herd.py record --config barn.toml --out DIR --minutes 60 [--fps 5]   every camera at once -> DIR/<cam>_<time>.mkv
     herd.py fix-videos --videos DIR --out DIR2             damaged recordings -> clean .mp4 the tools read
 A dress rehearsal on recordings (two passes: the gallery fills, then who is who, drawn per camera):
     herd.py trial --config barn.toml --videos DIR --out D [--boxes B --labels L]   (L: your ids -> IDF1)
 Cameras sharing floor calibrated by the cows moving in both (nothing measured; then [mct] link):
     herd.py autocalib --config barn.toml --store D/pass2/herd.sqlite --videos DIR --out C [--apply]
+    herd.py crosscam --config barn.toml --boxes B --labels L [--apply]   (which cow on the neighbour camera,
+        by where she stands: learnt from your ids, checked moment by moment)
 The models on the barn's own labels (nothing trained on them):
     herd.py check --config barn.toml [--det herd_det_barn_X.tgz] [--ids herd_barn_ids_X.tgz]
 Cow boxes on the barn's cameras (detector training):
@@ -49,6 +54,8 @@ Reports:
     herd.py report --config barn.toml alert-stats           how often alerts were right
     herd.py report --config barn.toml daily                 per cow per day
     herd.py gallery --config barn.toml                      the cows the system knows
+    herd.py merges page --config barn.toml --out merges.html   one cow under two names? (the night was unsure)
+    herd.py merges apply --config barn.toml --decisions decisions.json
 """
 
 from __future__ import annotations
@@ -118,6 +125,9 @@ def main():
     if cmd == "stress":
         import stress
         return stress.main(argv)
+    if cmd == "resolution":
+        import resolution
+        return resolution.main(argv)
     if cmd == "barn":
         import barn_dataset
         return barn_dataset.main(argv)
@@ -127,12 +137,18 @@ def main():
     if cmd == "zones":
         import zone_page
         return zone_page.main(argv)
+    if cmd == "studio":
+        import studio
+        return studio.main(argv)
     if cmd == "autocalib":
         import autocalib
         return autocalib.main(argv)
     if cmd == "trial":
         import trial
         return trial.main(argv)
+    if cmd == "crosscam":
+        import crosscam
+        return crosscam.main(argv)
     if cmd == "check":
         import check
         return check.main(argv)
@@ -147,6 +163,9 @@ def main():
         return report.main(argv)
     if cmd == "gallery":
         return gallery_cmd(argv)
+    if cmd == "merges":
+        import merges
+        return merges.main(argv)
     print(f"unknown command {cmd}\n{__doc__}")
     return 2
 

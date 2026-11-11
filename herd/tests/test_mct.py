@@ -2,6 +2,7 @@
 import _paths  # noqa: F401
 import collections
 import copy
+import itertools
 import json
 import os
 import tempfile
@@ -243,6 +244,32 @@ def test_overlap_counts_every_second_once():
         assert [r[2] for r in rows] == [float(k) for k in range(10)]            # one row a second
         assert len({r[1] for r in rows}) == 1                                   # one track
         assert {r[0] for r in rows} == {"cam1", "cam2"}                          # owned by each in turn
+
+
+def test_a_box_the_tracker_found_unsure_is_no_cow_this_second():
+    """[tracker] inside_low with no low box from the detector: the piece the tracker leaves without a track is
+    left out of the second (it crashed CoSeen: a None among the tracks)."""
+    import mct
+    import pipeline
+    from store import Store
+    rng = np.random.default_rng(4)
+    cfg = _mct_cfg([("cam1", {})], enabled=True)
+    cfg["cameras"] = [dict(c, min_box_pct=0.0, min_box_side_px=0) for c in cfg["cameras"]]
+    cfg["tracker"]["inside_low"] = 0.8
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+        models = _FakeModels()
+        cam = pipeline.Camera(cfg["cameras"][0], 0, 1, cfg, models, shared, store, 0.0)
+        cam.glob = mct.GlobalTracker(cfg, store, shared.separate)
+        img = np.zeros((64, 64, 3), np.uint8)
+        cow, other, piece = _box(0.3, s=0.15), _box(0.75), [0.25, 0.4, 0.35, 0.5]     # piece: inside cow
+        models.ids = {0.3: _unit(rng.normal(size=8)), 0.75: _unit(rng.normal(size=8))}
+        for k in range(3):
+            models.boxes = [cow, other, piece]
+            cam.second(float(k), img)
+        rows = store.query("SELECT track, x1 FROM seconds")
+        assert len(rows) == 6 and len({r[0] for r in rows}) == 2                 # the two cows, every second
 
 
 def test_frame_id_training_points_frames_at_their_burst():
@@ -522,6 +549,77 @@ def test_linker_refuses_a_chain_that_joins_cows_apart():
     assert lk.stats["linked"] >= 1 and lk.stats["link_contradicted"] >= 1
 
 
+def test_linker_by_vote_joins_the_pair_most_often_near():
+    """Two cows side by side, still; camera b's floor mapping is off: half the seconds its cows land 3 m away,
+    now and then swapped. Each pair is near under half the time (never link_share's 60%), but clearly more
+    often than the swapped one - joined by vote, each to the right one."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    results = {}
+    for vote in (0.0, 2.0):
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+        cfg["mct"].update(link_min_s=3, link_dist=120.0, link_margin=0.0, link_vote=vote, link_vote_share=0.15)
+        lk = mct.TrackletLinker(cfg)
+        true_b, now = lk.floor["b"], {"k": 0}
+
+        def bent(b, pl=0.5):                               # where b says its cow is: off as the second has it
+            x, y = true_b(b, pl)
+            k = now["k"]
+            x += 300.0 if k % 2 == 0 else 0.0
+            if k % 10 == 1:                                # swapped: each lands on the other cow's place
+                x += 100.0 if b[0] < 0.3 else -100.0
+            return x, y
+        lk.floor["b"] = bent
+        for k in range(60):
+            now["k"] = k
+            out = lk.update_all(float(k), {"a": [{"box": box(0.3)}, {"box": box(0.4)}],
+                                           "b": [{"box": box(0.3)}, {"box": box(0.4)}]})
+        results[vote] = out
+    assert results[0.0]["a"] != results[0.0]["b"]                  # 60% of the time: never
+    assert results[2.0]["a"] == results[2.0]["b"]                  # by vote: each to the right one
+
+
+def test_linker_vote_rivals_only_on_the_partner_camera():
+    """Three cameras over one cow: her tracks on b and c are not each other's rivals for a's track - all three
+    joined by vote."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b", "c")]
+    cfg["mct"].update(link_min_s=3, link_dist=120.0, link_margin=0.0, link_vote=2.0)
+    lk = mct.TrackletLinker(cfg)
+    for k in range(10):
+        out = lk.update_all(float(k), {c: [{"box": box(0.3)}] for c in ("a", "b", "c")})
+    assert out["a"] == out["b"] == out["c"]
+
+
+def test_linker_place_and_look_together():
+    """Two cows lying 10 cm apart, camera b's floor 80 cm off at random: by place alone each is b's nearest to
+    either about as often (no vote won); with the look in the same number (link_look_cm) to the right one."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    e1, e2 = [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]
+    out = {}
+    for look in (0.0, 300.0):
+        rng = np.random.default_rng(0)
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+        cfg["mct"].update(link_min_s=3, link_dist=120.0, link_margin=0.0, link_vote=2.0, link_look_cm=look)
+        lk = mct.TrackletLinker(cfg)
+        true_b = lk.floor["b"]
+        lk.floor["b"] = lambda b, pl=0.5: (lambda p: (p[0] + rng.normal(0, 80.0), p[1]))(true_b(b, pl))
+        for k in range(60):
+            res = lk.update_all(float(k), {"a": [{"box": box(0.30), "emb": e1}, {"box": box(0.31), "emb": e2}],
+                                           "b": [{"box": box(0.30), "emb": e1}, {"box": box(0.31), "emb": e2}]})
+        out[look] = res
+    assert out[0.0]["a"] != out[0.0]["b"]
+    assert out[300.0]["a"] == out[300.0]["b"]
+
+
 def test_linker_leaves_disjoint_cameras_alone():
     """Two cameras in [mct] disjoint whose floor plans happen to coincide: their cows are never joined."""
     import mct
@@ -747,6 +845,55 @@ def test_trial_scored_against_your_ids():
         data = json.loads(html.split("const DATA = ", 1)[1].split(";\n", 1)[0])
         assert [x["id"] for x in data["cards"][0]["ids"]] == ["4", "7"] and len(data["labels"]["frames"]) == 5
         assert all(os.path.exists(os.path.join(d, c["src"])) for x in data["cards"][0]["ids"] for c in x["crops"])
+        # every moment box by box: the frames read where they are, the one outside the mask kept (not scored)
+        page = open(sc["boxes_page"], encoding="utf-8").read()
+        bd = json.loads(page.split("const DATA = ", 1)[1].split(";\n", 1)[0])
+        assert len(bd["frames"]) == 4 and bd["mapping"] == sc["all"]["mapping"]
+        f0 = bd["frames"][0]
+        assert os.path.exists(os.path.join(d, f0["src"])) and [b[5] for b in f0["mine"]] == [True, True, False]
+        assert sorted(map(tuple, f0["hit"])) == [(0, 0), (1, 1)]
+
+
+def test_trial_says_why_a_track_has_no_cow():
+    import report
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        s = Store(os.path.join(d, "s.sqlite"))
+        s.seconds([("cam1", t, 100.0 + k, 0.1, 0.1, 0.2, 0.2, "lying", "none", 0.9)
+                   for t in ("named", "short", "unsure", "split") for k in range(5)])
+        b = lambda tr, st, cow, ts: s.burst(("cam1", tr, ts, st, cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        for k in range(3):
+            b("named", "confirmed", "P1", 100.0 + k)
+            b("unsure", "tentative", "P2", 100.0 + k)
+        b("split", "confirmed", "P1", 100.0)
+        b("split", "confirmed", "P3", 101.0)
+        why = trial.unnamed(s, report.track_map(s))
+        assert set(why) == {"short", "unsure", "split"}
+        assert "no burst" in why["short"] and "none sure" in why["unsure"] and "split" in why["split"]
+
+
+def test_trial_cross_camera_and_overlap():
+    """Your cow on two cameras: the same cow of its on both or not, by cow and by moment; --overlap grows each
+    mask to its tracking_mask and turns off the two rules that make two cameras' counts two cows."""
+    import copy as _copy
+    import trial
+    from common import DEFAULTS
+    seen = {"4": [("cam1", 100.0, "P1"), ("cam1", 105.0, "P1"), ("cam1", 110.0, "P1"),
+                  ("cam2", 100.2, "P1"), ("cam2", 105.0, "P1"), ("cam2", 110.0, "P1")],
+            "7": [("cam1", 100.0, "P2"), ("cam1", 105.0, "P2"), ("cam1", 110.0, "P2"),
+                  ("cam2", 100.0, "P3"), ("cam2", 105.0, "P3"), ("cam2", 120.0, "P3")],
+            "9": [("cam1", 100.0, "P4")] * 5}
+    x = trial.cross_camera(seen)
+    assert x["cows_on_two_cameras"] == 2 and x["same_cow_on_all"] == 1
+    assert x["cows"]["4"]["same"] and not x["cows"]["7"]["same"] and "9" not in x["cows"]
+    assert x["moments"] == 5 and x["moments_same_cow"] == 3            # 4 at 100/105/110, 7 at 100/105
+    cfg = _copy.deepcopy(DEFAULTS)
+    cfg["cameras"] = [{"id": "cam1", "mask": [[0, 0], [0.5, 0], [0.5, 1]], "tracking_mask": [[0, 0], [1, 0], [1, 1]]},
+                      {"id": "cam2", "mask": [[0.5, 0], [1, 0], [1, 1]]}]
+    trial.overlap(cfg)
+    assert cfg["cameras"][0]["mask"] == [[0, 0], [1, 0], [1, 1]] and cfg["cameras"][1]["mask"] == [[0.5, 0], [1, 0], [1, 1]]
+    assert cfg["identity"]["counted_apart_s"] == 0 and cfg["mct"]["unlink_s"] == 0
 
 
 def test_trial_score_finds_frames_cut_with_another_time_zone():
@@ -783,6 +930,7 @@ def test_tracks_counted_by_two_cameras_at_once_are_two_cows():
     with tempfile.TemporaryDirectory() as d:
         st = Store(os.path.join(d, "s.sqlite"))
         cfg = _cfg(counted_apart_s=10)
+        cfg["cameras"] = [{"id": "cam1", "mask": [[0, 0], [1, 0], [1, 1]]}, {"id": "cam2", "mask": [[0, 0], [1, 0], [1, 1]]}]
         g = pipeline.SharedGallery(type("G", (), {"save": lambda self: None, "migration_due": lambda self, ts: False})(),
                                    st, cfg, 0.0)
         g.next_nightly = 1e12
@@ -796,3 +944,1192 @@ def test_tracks_counted_by_two_cameras_at_once_are_two_cows():
         assert not g.apart("c", "e")
         g.save()
         assert ("a", "b") in set(st.cannot_link_pairs())
+
+
+def test_neighbours_without_floor_joined_by_look_in_their_strip():
+    """cam4 sees, beyond its mask (its tracking_mask), the strip along the fence that cam3 counts. No floor
+    mapping between them. A cow there - cam3's, seen by cam4 too - becomes one track: her frame ids
+    clearly nearest to one of cam3's cows over look_min_s seconds; two look-alikes are left apart."""
+    import mct
+    rng = np.random.default_rng(4)
+    A, B, C = (_unit(rng.normal(size=64)) for _ in range(3))
+    near = lambda v: _unit(v + 0.1 * rng.normal(size=64))           # one frame: cos ~0.6 to her own
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": "cam3", "mask": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+                      {"id": "cam4", "mask": [[0.3, 0], [1, 0], [1, 1], [0.3, 1]],
+                       "tracking_mask": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
+    cfg["mct"].update(neighbours=[["cam3", "cam4"]], look_min_s=10, look_min_sim=0.5, look_margin=0.05)
+    lk = mct.TrackletLinker(cfg)
+    box = lambda x, y=0.5: [x - 0.05, y - 0.05, x + 0.05, y + 0.05]
+    for k in range(15):
+        out = lk.update_all(float(k), {
+            "cam3": [{"box": box(0.2), "emb": near(A)}, {"box": box(0.6), "emb": near(B)}],
+            "cam4": [{"box": box(0.1), "emb": near(A)},              # in cam4's strip: cam3's cow A
+                     {"box": box(0.7), "emb": near(C)}]})            # cam4's own cow
+    assert out["cam4"][0] == out["cam3"][0] and out["cam4"][1] not in out["cam3"]
+    assert lk.stats["joined_by_look"] == 1
+
+    # two of cam3's cows alike: the one in the strip is not given to either
+    lk = mct.TrackletLinker(cfg)
+    for k in range(15):
+        out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}, {"box": box(0.6), "emb": near(A)}],
+                                       "cam4": [{"box": box(0.1), "emb": near(A)}]})
+    assert out["cam4"][0] not in out["cam3"] and lk.stats["joined_by_look"] == 0
+
+    # cam4's own cow (once inside its mask) that walks into the strip is not a visitor: never joined
+    lk = mct.TrackletLinker(cfg)
+    for k in range(70):
+        x = max(0.1, 0.5 - 0.02 * max(0, k - 10))              # walks from cam4's floor into the strip
+        out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}],
+                                       "cam4": [{"box": box(x), "emb": near(A)}]})
+    assert out["cam4"][0] != out["cam3"][0] and lk.stats["joined_by_look"] == 0
+
+
+class _WalkModels:
+    """The detector reads the cow's place off the frame (its first pixel); posture and activity fixed."""
+    crop_size, margin = 16, 0.1
+
+    def detect(self, img, **kw):
+        x = img[0, 0, 0] / 255.0
+        return [[x - 0.05, 0.4, x + 0.05, 0.6]]
+
+    def encode(self, crops, **kw):
+        return None
+
+    def frame_heads(self, feats, boxes, with_id=False, **kw):
+        n = len(boxes)
+        pp, pa = np.tile([0.1, 0.9], (n, 1)), np.tile([0.1, 0.1, 0.8], (n, 1))
+        return (pp, pa, [None] * n) if with_id else (pp, pa)
+
+
+def test_walking_cow_keeps_her_track_with_track_fps():
+    """A cow walking 1.5 box widths a second: tracked once a second her boxes never overlap - a new track
+    every second; with track_fps 4 the frames between keep her on one track (still one row a second)."""
+    import mct
+    import pipeline
+    from store import Store
+    tracks = {}
+    for link, fps in itertools.product((False, True), (1.0, 4.0)):
+        cfg = _cfg()
+        cfg["sampling"]["track_fps"] = fps
+        cfg["cameras"] = [{"id": "cam1", "mask": []}]
+        cfg["mct"].update(enabled=link, mode="link")
+        with tempfile.TemporaryDirectory() as d:
+            store = Store(os.path.join(d, "s.sqlite"))
+            shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+            cam = pipeline.Camera(cfg["cameras"][0], 0, 1, cfg, _WalkModels(), shared, store, 0.0)
+            if link:                                              # [mct] link: the per-second rendezvous
+                cam.glob = mct.FusedSeconds(mct.TrackletLinker(cfg, store, shared.separate), ["cam1"])
+            for i in range(41):                                   # 8 frames a second, 5 s
+                t = i / 8
+                img = np.zeros((64, 64, 3), np.uint8)
+                img[0, 0, 0] = int(round((0.1 + 0.15 * t) * 255))
+                cam.push(t, img)
+                cam.step_seconds(t)
+            rows = store.query("SELECT track, ts FROM seconds ORDER BY ts")
+            assert [r[1] for r in rows] == [0.0, 1.0, 2.0, 3.0, 4.0, 5.0]       # one row a second either way
+            tracks[(link, fps)] = len({r[0] for r in rows})
+            assert cam.stats["track_frames"] == (0 if fps == 1.0 else 15)
+    assert tracks == {(False, 1.0): 6, (False, 4.0): 1, (True, 1.0): 6, (True, 4.0): 1}, tracks
+
+
+def test_join_undone_when_both_cameras_count_the_cow():
+    """A join by look, then cam4's track goes on to one of cam4's own cows (inside its mask) while cam3 still
+    counts its cow: counted by both cameras at once for unlink_s seconds - two cows: undone, and the
+    store's link too; they are never joined again."""
+    import mct
+    from store import Store
+    rng = np.random.default_rng(4)
+    A, B = (_unit(rng.normal(size=64)) for _ in range(2))
+    near = lambda v: _unit(v + 0.1 * rng.normal(size=64))
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": "cam3", "mask": [[0, 0], [1, 0], [1, 1], [0, 1]]},
+                      {"id": "cam4", "mask": [[0.3, 0], [1, 0], [1, 1], [0.3, 1]],
+                       "tracking_mask": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
+    cfg["mct"].update(neighbours=[["cam3", "cam4"]], look_min_s=10, look_min_sim=0.5, look_margin=0.05, unlink_s=10)
+    box = lambda x, y=0.5: [x - 0.05, y - 0.05, x + 0.05, y + 0.05]
+    with tempfile.TemporaryDirectory() as d:
+        st = Store(os.path.join(d, "s.sqlite"))
+        lk = mct.TrackletLinker(cfg, st)
+        for k in range(15):                                   # cam3's cow A seen by cam4 in its strip
+            out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}],
+                                           "cam4": [{"box": box(0.1), "emb": near(A)}]})
+        assert out["cam4"][0] == out["cam3"][0] and st.track_roots()
+        for k in range(15, 60):                               # cam4's track walks into its own floor
+            x = min(0.6, 0.1 + 0.02 * (k - 14))
+            out = lk.update_all(float(k), {"cam3": [{"box": box(0.2), "emb": near(A)}],
+                                           "cam4": [{"box": box(x), "emb": near(B)}]})
+        assert out["cam4"][0] != out["cam3"][0] and lk.stats["unlinked"] == 1
+        assert not st.track_roots()                                          # the link gone from the store
+
+
+def test_calibrated_cows_counted_by_two_cameras_near_stay_two():
+    """Two calibrated cameras, a cow counted in each one's mask at nearly one floor place (the barn: two cows
+    lying side by side, each camera seeing the nearer): joined by the floor at first, then undone as two
+    cows - each camera counts its own; the place said once."""
+    import contextlib
+    import io
+    import mct
+    cfg = _cfg()
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    cfg["cameras"] = [{"id": "cam1", "mask": [[0, 0], [0.6, 0], [0.6, 1], [0, 1]], "floor_points": pts},
+                      {"id": "cam2", "mask": [[0.4, 0], [1, 0], [1, 1], [0.4, 1]], "floor_points": pts}]
+    cfg["mct"].update(neighbours=[["cam1", "cam2"]], link_dist=80, unlink_s=10)
+    box = [0.45, 0.4, 0.55, 0.5]
+    lk = mct.TrackletLinker(cfg)
+    said = io.StringIO()
+    with contextlib.redirect_stdout(said):
+        for k in range(40):
+            out = lk.update_all(float(k), {"cam1": [{"box": box}], "cam2": [{"box": [v + 0.03 for v in box]}]})
+    assert out["cam1"][0] != out["cam2"][0] and lk.stats["linked"] == 1 and lk.stats["unlinked"] == 1
+    assert lk.stats["counted_by_two_near"] > 0 and said.getvalue().count("nearly one floor place") == 1
+
+
+def test_linker_llr_joins_through_wrong_seconds_and_keeps_neighbours_apart():
+    """Three cows lying 1.2 m apart in a row, camera b's floor 60 cm off along the row and in 30% of the seconds
+    1-2 m anywhere: counted second by second a neighbour is often the nearest; summed as evidence, each cow is
+    joined to her own track and no two cows to one."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    rng = np.random.default_rng(0)
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5)
+    lk = mct.TrackletLinker(cfg)
+    true_b = lk.floor["b"]
+
+    def bent(b, pl=0.5):
+        x, y = true_b(b, pl)
+        if rng.random() < 0.3:
+            a = rng.uniform(0, 2 * np.pi)
+            return x + 150 * np.cos(a), y + 150 * np.sin(a)
+        return x + 60 + rng.normal(0, 20), y + rng.normal(0, 20)
+    lk.floor["b"] = bent
+    xs = (0.40, 0.52, 0.64)
+    for k in range(120):
+        out = lk.update_all(float(k), {c: [{"box": box(x)} for x in xs] for c in ("a", "b")})
+    assert out["a"] == out["b"]
+    assert len(set(out["a"])) == 3
+
+
+def test_linker_llr_learns_the_bend_between_two_cameras():
+    """Camera b's floor 90 cm off everywhere: once the first cows are joined the offset is learnt from them."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x, y: [x - 0.03, y - 0.05, x + 0.03, y]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_learn_offset=True, link_offset_min=10)
+    lk = mct.TrackletLinker(cfg)
+    true_b = lk.floor["b"]
+    lk.floor["b"] = lambda b, pl=0.5: (lambda p: (p[0] + 90.0, p[1]))(true_b(b, pl))
+    cows = [(0.1 + 0.2 * i, 0.3 + 0.4 * (i % 2)) for i in range(5)]
+    for k in range(60):
+        out = lk.update_all(float(k), {c: [{"box": box(x, y)} for x, y in cows] for c in ("a", "b")})
+    assert out["a"] == out["b"]
+    off = lk._offset("a", "b", np.array([[500.0, 500.0]]))[0]
+    assert abs(off[0] - 90.0) < 5 and abs(off[1]) < 5
+
+
+def test_cow_merges_puts_one_cows_two_names_together():
+    """Each camera names a cow by her side (xa / xb): their tracks' evidence summed over pairs of names joins xa
+    with xb, not with the neighbour ya her tracks were also near now and then; names seen together never."""
+    import mct
+    track_cow = {}
+    ev = {}
+    for c in "xyz":
+        for k in range(4):                                   # four short visits to the overlap, each too weak alone
+            ta, tb = f"{c}a{k}", f"{c}b{k}"
+            track_cow[ta], track_cow[tb] = f"{c}a", f"{c}b"
+            ev[(ta, tb)] = 20.0
+    ev[("xa0", "yb0")] = 25.0                                # a neighbour, near once
+    apart = [("xa", "ya"), ("xa", "za"), ("ya", "za"), ("xb", "yb"), ("xb", "zb"), ("yb", "zb")]
+    got = dict(mct.cow_merges(ev, track_cow, apart, min_llr=60.0, margin=30.0))
+    top = lambda n: top(got[n]) if n in got else n
+    assert all(top(f"{c}a") == top(f"{c}b") for c in "xyz")
+    assert len({top(f"{c}a") for c in "xyz"}) == 3
+    kept = dict(mct.cow_merges(ev, track_cow, apart + [("xa", "xb")], min_llr=60.0, margin=30.0))
+    top = lambda n: top(kept[n]) if n in kept else n
+    assert top("xa") != top("xb") and top("ya") == top("yb")
+
+
+def test_merge_by_place_merges_the_gallery_and_the_reports_follow():
+    """The night: cow A (camera a's name) and cow B (camera b's) are one by their tracks' evidence - the gallery
+    keeps one, the store aliases the other, the report counts her tracks on both cameras as one cow."""
+    import pipeline
+    import report
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for k in range(3):
+            store.burst(("a", "ta", 100.0 + k, "confirmed", "A", 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+            store.burst(("b", "tb", 100.0 + k, "confirmed", "B", 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        store.put_evidence([("ta", "tb", 250.0, 300, 400.0)])
+        gal = _gallery(os.path.join(d, "g"), {"A": [1, 0, 0], "B": [0, 1, 0]})
+        cfg = _cfg()
+        cfg["mct"].update(enabled=True, mode="link", link_rule="llr")
+        assert pipeline.merge_by_place(gal, store, cfg, 1000.0) == [("B", "A")]
+        assert set(gal.cows) == {"A"} and len(gal.cows["A"]["prototypes"]) == 2
+        assert report.track_map(store) == {"ta": "A", "tb": "A"}
+        cfg["mct"]["link_rule"] = "near"                     # the old rule keeps no evidence: nothing merged
+        assert pipeline.merge_by_place(gal, store, cfg, 1000.0) == []
+
+
+# ------------------------------------------------------------------ the camera's tracker: Kalman, unsure boxes
+
+def test_box_kalman_follows_a_walking_box():
+    """A box moving 0.08 a second: after a few seconds the filter expects it where it will be, not where it was."""
+    from common import BoxKalman, iou
+    box = lambda x: [x, 0.4, x + 0.1, 0.5]
+    kf = BoxKalman(box(0.1), 0.0)
+    for k in range(1, 6):
+        kf.update(float(k), box(0.1 + 0.08 * k))
+    assert iou(kf.predict(6.0), box(0.1 + 0.08 * 6)) > 0.8
+    assert iou(box(0.1 + 0.08 * 5), box(0.1 + 0.08 * 6)) < 0.5
+
+
+def test_tracker_keeps_a_fast_walker_with_kalman():
+    """A cow setting off and walking up to 0.08 of the frame a second with a box 0.1 wide: at 1 fps her boxes soon
+    overlap too little for IoU alone (a new track every second); with the Kalman filter one track."""
+    import mct
+    import pipeline
+    box = lambda x: [x, 0.4, x + 0.1, 0.5]
+    xs = np.cumsum([0.05, 0.02, 0.035, 0.05, 0.065, 0.075, 0.08, 0.08, 0.08, 0.08])
+    for kalman, ok in ((False, lambda n: n >= 5), (True, lambda n: n == 1)):
+        cfg = _mct_cfg([("a", {})])
+        cfg["tracker"]["kalman"] = kalman
+        g = mct.GlobalTracker(cfg)
+        t = pipeline.Tracker("a", 0.3, 5, kalman=kalman)
+        gids, tids = set(), set()
+        for k, x in enumerate(xs):
+            gids |= set(g.update("a", float(k), [{"box": box(x)}]))
+            tids |= {tid for tid, _ in t.update(float(k), [box(x)])}
+        assert ok(len(gids)) and ok(len(tids)), (kalman, gids, tids)
+
+
+def test_unsure_boxes_only_continue_a_track():
+    """ByteTrack's second round: a cow's box under the threshold keeps her track; an unsure box where no track was
+    starts none (None / left out)."""
+    import mct
+    import pipeline
+    box = lambda x: [x, 0.4, x + 0.1, 0.5]
+    g = mct.GlobalTracker(_mct_cfg([("a", {})]))
+    t = pipeline.Tracker("a", 0.3, 5)
+    first = g.update("a", 0.0, [{"box": box(0.2)}])[0]
+    (tid, _), = t.update(0.0, [box(0.2)])
+    for k in range(1, 4):                                  # the detector unsure of her for three seconds
+        out = g.update("a", float(k), [{"box": box(0.2), "low": True}, {"box": box(0.7), "low": True}])
+        assert out == [first, None]
+        got = t.update(float(k), [], low=[box(0.2), box(0.7)])
+        assert [x for x, _ in got] == [tid]
+    assert g.update("a", 30.0, [{"box": box(0.5), "low": True}]) == [None]
+    lk = mct.TrackletLinker(_mct_cfg([("a", {})]))
+    lk.update_all(0.0, {"a": [{"box": box(0.2)}]})
+    assert lk.update_all(1.0, {"a": [{"box": box(0.2), "low": True}, {"box": box(0.7), "low": True}]})["a"][1] is None
+
+
+def test_models_split_the_detectors_boxes_at_its_threshold():
+    """[tracker] low_score: the detector keeps boxes down to it; detect() still gives only the sure ones."""
+    import pipeline
+
+    class Det:
+        threshold = 0.5
+
+        def __call__(self, img):
+            return [{"bbox": [0, 0, 0.1, 0.1], "det_score": 0.9}, {"bbox": [0.5, 0.5, 0.6, 0.6], "det_score": 0.3},
+                    {"bbox": [0.7, 0.7, 0.8, 0.8], "det_score": 0.1}][:2 + (self.threshold < 0.1)]
+    m = pipeline.Models.__new__(pipeline.Models)
+    m.detector, m.det_high = Det(), 0.0
+    m.gpu = lambda urgent, kind: __import__("contextlib").nullcontext()
+    m.detector.threshold, m.det_high = 0.2, 0.5
+    img = np.zeros((4, 4, 3), np.uint8)
+    assert m.detect(img) == [[0, 0, 0.1, 0.1]]
+    assert m.detect_split(img) == ([[0, 0, 0.1, 0.1]], [[0.5, 0.5, 0.6, 0.6]])
+
+
+# ------------------------------------------------------------------ the night unsure: a person asked
+
+def test_cow_merges_three_zones():
+    """Sure pairs merged; pairs with some evidence but not enough go to a person; the rest nothing."""
+    import mct
+    track_cow = {f"{c}{k}": c for c in ("xa", "xb", "ya", "yb", "za", "zb") for k in range(2)}
+    ev = {("xa0", "xb0"): 300.0, ("ya0", "yb0"): 90.0, ("za0", "zb0"): 20.0}
+    apart = [("xa", "ya"), ("xa", "za"), ("ya", "za"), ("xb", "yb"), ("xb", "zb"), ("yb", "zb")]
+    reviews = []
+    got = mct.cow_merges(ev, track_cow, apart, reviews=reviews)
+    assert got == [("xb", "xa")]
+    assert [r[:2] for r in reviews] == [("yb", "ya")] and reviews[0][2] == 90.0
+
+
+def test_unsure_pair_asked_then_merged_or_never_again():
+    """The night stores an unsure pair; a person's "same" aliases it at once and the next night merges the gallery;
+    "different" keeps it from being proposed again; the page shows both names' faces."""
+    import merges
+    import pipeline
+    import report
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "herd.sqlite"))
+        for k in range(3):
+            for cam, tr, cow in (("a", "ta", "A"), ("b", "tb", "B"), ("a", "tc", "C"), ("b", "td", "D")):
+                store.burst((cam, tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        store.put_evidence([("ta", "tb", 120.0, 300, 400.0), ("tc", "td", 100.0, 300, 400.0)])
+        store.add_cannot_link([("ta", "tc"), ("tb", "td")], 100.0)
+        gal = _gallery(os.path.join(d, "gallery"), {c: v for c, v in zip("ABCD", np.eye(4))})
+        cfg = _cfg()
+        cfg["mct"].update(enabled=True, mode="link", link_rule="llr")
+        cfg["store"]["path"] = os.path.join(d, "herd.sqlite")
+        shared = pipeline.SharedGallery(gal, store, cfg, 0.0)
+        for cow, cam in (("A", "a"), ("B", "b"), ("A", "a")):
+            shared.face(cow, cam, 1000.0, np.full((224, 224, 3), 128, np.uint8))
+        assert len(os.listdir(os.path.join(d, "gallery", "faces", "A"))) == 1      # one each face_every_s
+        assert pipeline.merge_by_place(gal, store, cfg, 1000.0) == []
+        assert {(r["old"], r["into"]) for r in store.reviews("pending")} == {("B", "A"), ("D", "C")}
+        page = os.path.join(d, "merges.html")
+        merges.main(["page", "--store", store.db.execute("PRAGMA database_list").fetchone()[2], "--out", page])
+        html = open(page, encoding="utf-8").read()
+        assert "gallery/faces/A/a_1000.jpg" in html and "gallery/faces/B/b_1000.jpg" in html
+        dec = os.path.join(d, "decisions.json")
+        json.dump({"decisions": [{"old": "B", "into": "A", "answer": "same"},
+                                 {"old": "D", "into": "C", "answer": "different"}]}, open(dec, "w"))
+        merges.main(["apply", "--store", os.path.join(d, "herd.sqlite"), "--decisions", dec])
+        assert report.track_map(store)["tb"] == "A" and set(gal.cows) == set("ABCD")   # the reports at once
+        assert pipeline.merge_by_place(gal, store, cfg, 2000.0) == [("B", "A")]      # the gallery the next night
+        assert set(gal.cows) == {"A", "C", "D"}
+        assert not store.reviews("pending")
+        store.put_evidence([("tc", "td", 1000.0, 3000, 2500.0)])                    # however sure it looks now
+        assert pipeline.merge_by_place(gal, store, cfg, 3000.0) == [] and "D" in gal.cows
+
+
+# ------------------------------------------------------------------ the cameras' clocks
+
+def test_linker_measures_how_late_a_cameras_frames_come():
+    """Cows walking on two cameras whose floor plans agree, camera b's frames 1.2 s late: her two tracks are joined
+    and the linker says b is 1.2 s late (what time_offset_s = -1.2 on b puts right)."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 2000, 0], [1, 1, 2000, 1000], [0, 1, 0, 1000]]
+    box = lambda x, y: [x / 2000 - 0.03, y / 1000 - 0.08, x / 2000 + 0.03, y / 1000]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0)
+    for late in (1.2, -0.7, 0.0):
+        lk = mct.TrackletLinker(cfg)
+        where = lambda t, y0: (200 + 60 * max(0.0, t - 30), y0)         # 30 s still, then walking 60 cm/s
+        for k in range(150):
+            out = lk.update_all(float(k), {"a": [{"box": box(*where(k, y))} for y in (300, 700)],
+                                           "b": [{"box": box(*where(k - late, y))} for y in (300, 700)]})
+        assert out["a"] == out["b"]
+        (lag, n, sharp), = lk.clocks(min_n=1).values()
+        assert abs(lag - late) <= 0.15 and sharp > 20, (late, lag, n, sharp)
+
+
+def test_neighbours_on_floor_plans_of_their_own_joined_by_look():
+    """cam3 and cam4 each calibrated on a plane of its own, placed far apart on the plan (the barn's config): by place
+    they never meet, so their strip is joined by look, as for neighbours with no floor mapping."""
+    import mct
+    plan = lambda x0: [[0, 0, x0, 0], [1, 0, x0 + 1000, 0], [1, 1, x0 + 1000, 1000], [0, 1, x0, 1000]]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": "cam3", "mask": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]], "floor_points": plan(200000)},
+                      {"id": "cam4", "mask": [[0.5, 0], [1, 0], [1, 1], [0.5, 1]], "floor_points": plan(400000)},
+                      {"id": "cam5", "mask": [], "floor_points": plan(400500)}]
+    cfg["mct"].update(neighbours=[["cam3", "cam4"], ["cam4", "cam5"]])
+    assert mct.TrackletLinker(cfg).by_look == [("cam3", "cam4")]
+
+
+def test_trial_says_how_often_one_cow_on_two_cameras_got_one_id():
+    """Your cow in both cameras' frames at one moment: on one joined track, the same cow, two cows, or no name on one
+    of them - counted per moment, per camera pair and per cow of yours."""
+    import trial
+    seen = {"4": [("cam1", 100.0, "g1", "P1"), ("cam2", 100.2, "g1", "P1"),            # one track, one id
+                  ("cam1", 105.0, "g1", "P1"), ("cam2", 105.0, "g7", None)],           # her cam2 track: no name yet
+            "7": [("cam1", 100.0, "g2", "P2"), ("cam2", 100.0, "g3", "P3"),            # two tracks, two cows
+                  ("cam1", 110.0, "g2", "P2"), ("cam2", 130.0, "g3", "P2")]}           # not at one moment
+    m = trial.cross_camera_moments(seen)
+    assert (m["moments"], m["one_track"], m["same_cow"], m["two_cows"], m["no_name"]) == (3, 1, 1, 1, 1)
+    assert m["cows"]["7"] == {"moments": 1, "one_track": 0, "same_cow": 0, "two_cows": 1, "no_name": 0}
+    assert m["camera_pairs"]["cam1-cam2"]["moments"] == 3
+
+
+def test_trial_relink_joins_a_recorded_trial_anew():
+    """trial --relink: the second pass's tracks as they were, joined across cameras again with the config's floor -
+    a copy in OUT/relink, the old joins cleared, the original store untouched."""
+    import trial
+    from store import Store
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "pass2"))
+        st = Store(os.path.join(d, "pass2", "herd.sqlite"))
+        rows = []
+        for t in range(100, 220):
+            for cam, tr, x in (("cam1", "a1", 0.3), ("cam1", "a2", 0.6), ("cam2", "b1", 0.3), ("cam2", "b2", 0.6)):
+                rows.append((cam, tr, float(t), x - 0.03, 0.45, x + 0.03, 0.5, "lying", "none", 0.9))
+        st.seconds(rows)
+        st.link_tracks(100.0, "b2", "a1")                    # a wrong join of the trial: cleared
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("cam1", "cam2")]
+        cfg["mct"].update(link_rule="llr")
+        dst = trial.relink(cfg, d)
+        roots = Store(dst).track_roots()
+        assert {frozenset((t, r)) for t, r in roots.items()} == {frozenset(("a1", "b1")), frozenset(("a2", "b2"))}
+        assert Store(os.path.join(d, "pass2", "herd.sqlite")).track_roots() == {"b2": "a1"}
+
+
+def test_joined_tracks_two_cameras_two_names_one_cow():
+    """cam1 named her A (7 bursts), cam2 B (10): joined, the two-thirds rule over the group gave no name at all.
+    Each camera clear on its own: the group takes B (more bursts), the night sees A and B as one cow. A camera
+    split between two names is left out: the other's clear C names the group (cam1's C/D 3 to 3 undid it before)."""
+    import report
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for cam, tr, cow, n in (("cam1", "ta", "A", 7), ("cam2", "tb", "B", 10), ("cam1", "tc", "C", 3),
+                                ("cam1", "tc", "D", 3), ("cam2", "td", "C", 5)):
+            for k in range(n):
+                store.burst((cam, tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        store.link_tracks(150.0, "tb", "ta")
+        store.link_tracks(150.0, "td", "tc")
+        assert report.track_map(store) == {"ta": "B", "tb": "B", "tc": "C", "td": "C"}
+        assert report.track_map(store, joins=False) == {"ta": "A", "tb": "B", "td": "C"}
+
+
+def test_boxes_page_shows_one_cow_joined_across_cameras():
+    """boxes.html: your cow on both cameras at one moment - its two tracks joined: the group's number on both
+    (joined), the page's data says which root each box is under."""
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        st = Store(os.path.join(d, "s.sqlite"))
+        rows = []
+        for t in range(100, 121):
+            rows += [("cam1", "a1", float(t), 0.1, 0.4, 0.3, 0.6, "lying", "none", 0.9),
+                     ("cam2", "b1", float(t), 0.5, 0.4, 0.7, 0.6, "lying", "none", 0.9),
+                     ("cam2", "b2", float(t), 0.1, 0.1, 0.2, 0.2, "lying", "none", 0.9)]
+        st.seconds(rows)
+        for tr, cam, cow in (("a1", "cam1", "P1"), ("b1", "cam2", "P1"), ("b2", "cam2", "P2")):
+            for k in range(3):
+                st.burst((cam, tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        st.link_tracks(105.0, "b1", "a1")
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"{c}/{t}.jpg", "cam": c, "ts": float(t), "w": 1920, "h": 1080} for c in ("cam1", "cam2")
+                  for t in (100, 110)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        lab = {"cam1": [[0.1, 0.4, 0.3, 0.6, "4"]], "cam2": [[0.5, 0.4, 0.7, 0.6, "4"], [0.1, 0.1, 0.2, 0.2, "9"]]}
+        json.dump({"frames": {f["file"]: {"boxes": lab[f["cam"]], "status": "done"} for f in frames}},
+                  open(os.path.join(d, "labels.json"), "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1", "mask": []}, {"id": "cam2", "mask": []}]
+        sc = trial.score(os.path.join(d, "s.sqlite"), cfg, boxes, os.path.join(d, "labels.json"), page_dir=d)
+        assert sc["cross_camera_moments"]["one_track"] == 2
+        bd = json.loads(open(sc["boxes_page"], encoding="utf-8").read().split("const DATA = ", 1)[1].split(";\n", 1)[0])
+        assert bd["joined"] == {"a1": 1}
+        cam2 = next(f for f in bd["frames"] if f["cam"] == "cam2")
+        assert sorted(b[6] for b in cam2["its"]) == ["a1", "b2"]
+
+
+def test_floor_point_uncertainty_through_the_cameras_mapping():
+    """link_px (Sternig et al.): a far box's point is metres of floor along the camera's view, a near one's
+    tens of cm - so 1.5 m off far away is still one cow, while 1.5 m off right under the camera is not."""
+    import mct
+    import mct_sim
+    mct_sim.perspective(True)
+    try:
+        cams = [{"id": c, "mask": [], "floor_points": mct_sim.floor_points(c), "floor_at": "centre"} for c in ("a", "b")]
+        far_a, near_a = mct_sim.cow_box("a", 1300.0, 600.0), mct_sim.cow_box("a", 150.0, 600.0)
+    finally:
+        mct_sim.perspective(False)
+    cfg = _cfg()
+    cfg["cameras"] = cams
+    cfg["mct"].update(link_rule="llr", link_sigma=30.0, link_px=8.0)
+    lk = mct.TrackletLinker(cfg)
+    (pf,), (pn,) = lk._points("a", [{"box": far_a}]), lk._points("a", [{"box": near_a}])
+    ev_far, ev_near = np.linalg.eigvalsh(pf[3]), np.linalg.eigvalsh(pn[3])
+    assert np.sqrt(ev_far[-1]) > 2.5 * np.sqrt(ev_near[-1])         # far: much broader
+    assert np.sqrt(ev_far[-1]) > 1.8 * np.sqrt(ev_far[0])            # and long along the view (x, the barn's length)
+    exact = lambda p, dx: (((p[0][0] + dx, p[0][1]), (p[1][0] + dx, p[1][1]), p[2], np.eye(2) * lk.sigma ** 2 / 2))
+    llr = lambda p, dx: float(lk._llr_cov("a", "b", [p], [exact(p, dx)])[0, 0])
+    assert llr(pf, 150.0) > 0 > llr(pn, 150.0)
+    flat = mct.TrackletLinker(dict(cfg, mct=dict(cfg["mct"], link_px=0.0)))
+    assert float(flat._llr(np.array([[150.0]]))[0, 0]) < 0          # one sigma for all: far 1.5 m counts against
+
+
+def test_fused_seconds_meet_by_the_recordings_clock_however_slow_a_camera():
+    """Files: a camera a second ahead (pipeline.Lockstep allows one) met the other one second off, every second -
+    by the wall clock (wait_s) the barn's trial joined no track across cameras. By the recordings' clock every
+    second meets, a camera whose recording ends early or begins late holds no one up."""
+    import threading
+    import time
+    import mct
+    import pipeline
+
+    class Rec:
+        stats = {}
+
+        def __init__(self):
+            self.calls = []
+
+        def update_all(self, ts, per):
+            self.calls.append((ts, tuple(sorted(per))))
+            return {c: [None] * len(d) for c, d in per.items()}
+
+    def play(cam, fs, lock, start, seconds, busy):
+        for k in range(seconds * 10):                      # 10 frames a second
+            ts = start + k / 10
+            lock.wait(cam, ts)
+            if k % 10 == 0:
+                time.sleep(busy.get(ts, 0.03))             # the second's work, a burst now and then
+                fs.update(cam, ts, [{"box": [0, 0, 1, 1]}])
+        lock.finish(cam)
+
+    def run():
+        rec = Rec()
+        fs = mct.FusedSeconds(rec, ["a", "b", "c"], wait_s=0.02)
+        lock = pipeline.Lockstep({"a": 100.0, "b": 100.0, "c": 108.0})
+        fs.files(lock, stuck_s=20.0)
+        th = [threading.Thread(target=play, args=("a", fs, lock, 100.0, 12, {103.0: 0.3})),
+              threading.Thread(target=play, args=("b", fs, lock, 100.0, 9, {105.0: 0.2})),     # ends at 109
+              threading.Thread(target=play, args=("c", fs, lock, 108.0, 4, {}))]               # begins at 108
+        for t in th:
+            t.start()
+        for t in th:
+            t.join(timeout=30)
+        assert not any(t.is_alive() for t in th)
+        return rec.calls
+    calls = run()
+    assert len(calls) == 12                                # each second once, every camera of it together
+    got = dict(calls)
+    assert all(got[float(t)] == ("a", "b") for t in range(100, 108))
+    assert got[108.0] == ("a", "b", "c") and got[110.0] == ("a", "c")
+
+
+def test_inside_low_a_piece_of_a_cow_takes_no_track():
+    """[tracker] inside_low: a box inside a bigger one (a piece of a crowded cow) starts no track and takes no
+    neighbour's; a cow half hidden behind another keeps the track that expects her."""
+    import mct
+    cfg = _cfg()
+    cfg["mct"]["enabled"] = False
+    cfg["tracker"]["inside_low"] = 0.8
+    gt = mct.GlobalTracker(cfg)
+    near, behind = [0.5, 0.3, 0.9, 0.9], [0.55, 0.35, 0.7, 0.6]           # behind: 100% inside near's box
+    her = lambda x: {"box": [x, 0.33, x + 0.17, 0.6], "emb": None}         # a cow walking behind the near one
+    a, b = gt.update("c1", 0.0, [{"box": near, "emb": None}, her(0.30)])
+    assert a and b
+    # a piece of the near cow shows up: no track of its own
+    a2, b2, piece = gt.update("c1", 1.0, [{"box": near, "emb": None}, her(0.35),
+                                         {"box": [0.6, 0.4, 0.75, 0.55], "emb": None}])
+    assert (a2, b2) == (a, b) and piece is None
+    # she walks on behind the near cow (at 0.5 wholly inside its box): her track expects her, she keeps it
+    for t, x in ((2.0, 0.40), (3.0, 0.45), (4.0, 0.50)):
+        got = gt.update("c1", t, [{"box": near, "emb": None}, her(x)])
+        assert got == [a, b], (t, got)
+    # off (0): the piece would have started a track
+    cfg["tracker"]["inside_low"] = 0.0
+    g0 = mct.GlobalTracker(cfg)
+    g0.update("c1", 0.0, [{"box": near, "emb": None}])
+    assert g0.update("c1", 1.0, [{"box": near, "emb": None}, {"box": behind, "emb": None}])[1] is not None
+
+
+def _swap_scene(strayed):
+    """Two cows on two cameras, given tracks: cam a's track of cow X swaps onto cow Y at second 60 and X goes on
+    under a new track there; camera b follows both all along. -> (the linker, its answers at the end)."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_strayed=strayed, link_rival=0.0)
+    lk = mct.TrackletLinker(cfg)
+    X, Y = 0.3, 0.7
+    for k in range(200):
+        # a: before 60 "a1" on X, "a2" on Y; after it "a1" on Y (a swap: a2 lost), "a3" on X
+        a = [{"box": box(X), "track": "a1"}, {"box": box(Y), "track": "a2"}] if k < 60 else \
+            [{"box": box(Y), "track": "a1"}, {"box": box(X), "track": "a3"}]
+        out = lk.update_all(float(k), {"a": a, "b": [{"box": box(X), "track": "bX"}, {"box": box(Y), "track": "bY"}]})
+    return lk, out
+
+
+def test_link_strayed_a_swapped_track_leaves_and_the_cow_is_joined_again():
+    """One swap on one camera: the track that went on with the other cow leaves its group, and the cow's new
+    track joins her other camera's (link_strayed); without it she stays apart for good."""
+    lk, out = _swap_scene(10.0)
+    assert lk.root("a3") == lk.root("bX")                                  # X: her new track on a, and b's
+    assert lk.root("a1") != lk.root("bX")                                  # the swapped track out of X
+    assert lk.stats["unlinked_strayed"] >= 1
+    lk0, _ = _swap_scene(0.0)
+    assert lk0.root("a3") != lk0.root("bX") and lk0.root("a1") == lk0.root("bX")
+
+
+def test_the_store_keeps_each_cameras_own_tracks_the_gallery_the_joined():
+    """[mct] link: a cow joined across cameras is one track to the gallery, but the store keeps each camera's own
+    track (the join is a track_link) - so a join undone, or played again by trial --relink, holds."""
+    import pipeline
+    from store import Store
+
+    class Glob:                                   # cam2's own track "t2" is joined to cam1's "t1"
+        def update(self, cam, ts, dets):
+            return ["t1"]
+
+        def raw(self, cam, ts):
+            return ["t1" if cam == "cam1" else "t2"]
+
+    cfg = _mct_cfg([("cam1", {}), ("cam2", {})], enabled=True)
+    cfg["cameras"] = [dict(c, min_box_pct=0.0, min_box_side_px=0) for c in cfg["cameras"]]
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+        models = _FakeModels()
+        models.boxes, models.ids = [_box(0.5)], {0.5: _unit(np.ones(8))}
+        seen = []
+        shared.counted = lambda cam, ts, tracks: seen.append(tuple(tracks))
+        for i, c in enumerate(cfg["cameras"]):
+            cam = pipeline.Camera(c, i, 2, cfg, models, shared, store, 0.0)
+            cam.glob = Glob()
+            cam.second(0.0, np.zeros((64, 64, 3), np.uint8))
+        assert sorted(store.query("SELECT cam, track FROM seconds")) == [("cam1", "t1"), ("cam2", "t2")]
+        assert seen == [("t1",), ("t1",)]                                  # the gallery: one cow
+
+
+def _crossed_scene(rival):
+    """Two cows, given tracks: for the first 40 s camera b's floor puts each where the other is (the two joined
+    crossed), then right for 300 s. -> the linker."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_strayed=0.0, link_rival=rival)
+    lk = mct.TrackletLinker(cfg)
+    X, Y = 0.3, 0.5
+    for k in range(340):
+        bx, by = (Y, X) if k < 40 else (X, Y)
+        lk.update_all(float(k), {"a": [{"box": box(X), "track": "aX"}, {"box": box(Y), "track": "aY"}],
+                                 "b": [{"box": box(bx), "track": "bX"}, {"box": box(by), "track": "bY"}]})
+    return lk
+
+
+def test_link_rival_a_crossed_join_the_evidence_turned_against_is_undone():
+    """Two cows joined crossed at first (each to the other's track on camera b): the evidence since says
+    otherwise, and the join follows it (link_rival); without it they stay crossed."""
+    lk = _crossed_scene(200.0)
+    assert lk.root("aX") == lk.root("bX") and lk.root("aY") == lk.root("bY")
+    assert lk.root("aX") != lk.root("aY")
+    lk0 = _crossed_scene(0.0)
+    assert lk0.root("aX") == lk0.root("bY")                                # crossed for good
+
+
+def test_report_names_a_joined_cow_though_one_camera_is_unsure():
+    """A joined cow whose bursts on one camera split 4 to 3 and on the other agree: named by the sure camera (the
+    barn's cow 10 was unnamed for the whole recording); every camera unsure, by all their bursts together."""
+    import report
+    from store import Store
+    row = lambda cam, tr, k, cow: (cam, tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100)
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for k, cow in enumerate("AAAABBB"):
+            store.burst(row("cam1", "t1", k, cow))
+        for k in range(2):
+            store.burst(row("cam2", "t2", 10 + k, "A"))
+        store.link_tracks(150.0, "t2", "t1")
+        assert report.track_map(store) == {"t1": "A", "t2": "A"}
+        store2 = Store(os.path.join(d, "s2.sqlite"))                    # both unsure: 4+3 A, 3+0... together
+        for k, cow in enumerate("AAAABBB"):
+            store2.burst(row("cam1", "u1", k, cow))
+        for k, cow in enumerate("AAAB"):
+            store2.burst(row("cam2", "u2", 10 + k, cow if k else "B"))
+        store2.link_tracks(150.0, "u2", "u1")
+        assert report.track_map(store2) == {}                           # 6 A of 11: no clear majority
+        assert report.track_map(store2, joins=False) == {}
+
+
+def _handover_scene(overlap):
+    """Cow X on two cameras, given tracks: camera a follows her as "a1" for 100 s, then her box splits from a
+    neighbour's - "a2" on her from 80 s, "a1" lingers on the neighbour's place to 110 s and ends; camera b
+    follows her as "bX" all along. -> the linker."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_overlap_s=overlap, link_rival=0.0,
+                      link_strayed=0.0)
+    lk = mct.TrackletLinker(cfg)
+    X, N = 0.3, 0.45
+    for k in range(300):
+        a = []
+        if k < 80:
+            a.append({"box": box(X), "track": "a1"})
+        elif k < 110:
+            a.append({"box": box(N), "track": "a1"})
+        if k >= 80:
+            a.append({"box": box(X), "track": "a2"})
+        lk.update_all(float(k), {"a": a, "b": [{"box": box(X), "track": "bX"}]})
+    return lk
+
+
+def test_link_overlap_s_a_handing_over_is_one_cow():
+    """A camera's track of a cow handed on to a new one with 30 s of both: one cow on both cameras
+    (link_overlap_s 60); without it the new track never joins."""
+    lk = _handover_scene(60.0)
+    assert lk.root("a2") == lk.root("bX") == lk.root("a1")
+    lk0 = _handover_scene(0.0)
+    assert lk0.root("a2") != lk0.root("bX")
+
+
+def test_two_tracks_of_one_camera_seen_together_leave_one_group():
+    """Two tracks of one camera in one group (joined while one seemed gone) seen together again: the one with less
+    evidence with the group's other cameras leaves."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5)
+    lk = mct.TrackletLinker(cfg)
+    for k in range(60):                                   # a1 and bX: one cow, joined
+        lk.update_all(float(k), {"a": [{"box": box(0.3), "track": "a1"}], "b": [{"box": box(0.3), "track": "bX"}]})
+    for k in range(60, 120):                              # a1 gone, a2 on her: joined too
+        lk.update_all(float(k), {"a": [{"box": box(0.3), "track": "a2"}], "b": [{"box": box(0.3), "track": "bX"}]})
+    assert lk.root("a1") == lk.root("a2") == lk.root("bX")
+    for k in range(120, 130):                             # a1 back, on another cow far off: two cows at once
+        lk.update_all(float(k), {"a": [{"box": box(0.3), "track": "a2"}, {"box": box(0.8), "track": "a1"}],
+                                 "b": [{"box": box(0.3), "track": "bX"}]})
+    assert lk.root("a2") == lk.root("bX") != lk.root("a1")
+    assert lk.stats["unlinked_seen_together"] == 1
+
+
+def _steal_scene(cross):
+    """Cows X and Y seen by two cameras a and b, joined. Then on camera a X is hidden and Y walks unseen into X's
+    place; camera b sees X go off and Y come there. -> the track camera a gives the box at X's place."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x, y: [x - 0.05, y - 0.05, x + 0.05, y + 0.05]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, link_cross_w=0.2 if cross else 0.0,
+                      link_cross_confirm=2.0 if cross else 0.0)
+    lk = mct.TrackletLinker(cfg)
+    for k in range(90):
+        xb = (0.3, min(0.9, 0.5 + 0.04 * max(0, k - 59)))                    # b: X walks off along y from 60
+        yb = (max(0.3, 0.6 - 0.0375 * max(0, k - 61)), 0.5)                  # b: Y walks to X's place from 62
+        a = [] if k < 60 else None
+        if k < 60:
+            a = [{"box": box(0.3, 0.5)}, {"box": box(0.6, 0.5)}]
+        elif k < 64:
+            a = [{"box": box(0.6, 0.5)}]                                      # a: X hidden, Y still there
+        elif k < 70:
+            a = []                                                            # a: Y unseen too
+        else:
+            a = [{"box": box(0.3, 0.5)}]                                      # a: Y at X's place
+        out = lk.update_all(float(k), {"a": a, "b": [{"box": box(*xb)}, {"box": box(*yb)}]})
+        if k == 59:
+            x_a, x_b = lk.raw_last["a"][0], lk.raw_last["b"][0]
+        if k == 75:
+            return lk, x_a, x_b, lk.raw_last["a"][0]
+
+
+def test_link_cross_a_lost_cows_track_takes_no_box_its_other_camera_says_is_another():
+    """Camera a lost cow X; her neighbour walked unseen into X's place. X's track there, waiting at her place
+    (still_s), took her box - unless her other camera, which sees X gone off, is asked (link_cross_confirm)."""
+    lk, x_a, x_b, got = _steal_scene(True)
+    assert lk.root(x_a) == lk.root(x_b)                                     # X joined across the cameras
+    assert got != x_a                                                       # Y's box: not X's track
+    lk0, x_a0, _, got0 = _steal_scene(False)
+    assert got0 == x_a0                                                     # without: X's track took it
+
+
+def test_report_two_cows_named_crossed_get_a_name_each():
+    """Two joined cows alive at once, named crossed by the gallery (cam1 A / cam2 B and cam1 B / cam2 A, each
+    camera sure): each takes one of the two names, the way most bursts say - not both the one with more bursts."""
+    import report
+    from store import Store
+    row = lambda cam, tr, k, cow: (cam, tr, 100.0 + 60 * k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100)
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for tr, cam, cow, n in (("x1", "cam1", "B", 6), ("x2", "cam2", "A", 8),      # cow X
+                                ("y1", "cam1", "A", 8), ("y2", "cam2", "B", 5)):     # cow Y
+            for k in range(n):
+                store.burst(row(cam, tr, k, cow))
+        store.link_tracks(150.0, "x2", "x1")
+        store.link_tracks(150.0, "y2", "y1")
+        tm = report.track_map(store)
+        assert tm["x1"] == tm["x2"] != tm["y1"] == tm["y2"]
+        assert tm["y1"] == "A" and tm["x1"] == "B"                          # 8 + 6 beats 8 + 5
+
+
+def test_a_camera_of_its_own_tiles_asks_the_detector_so():
+    """[[cameras]] tiles = true: that camera's frames go to the detector in tiles (far cows seen as one box), the
+    others as [detector] tiles says."""
+    import pipeline
+    from store import Store
+
+    class Models(_FakeModels):
+        def detect(self, img, **kw):
+            self.asked.append(kw.get("tiles"))
+            return self.boxes
+    cfg = _mct_cfg([("cam1", {}), ("cam4", {"tiles": True})], enabled=False)
+    cfg["cameras"] = [dict(c, min_box_pct=0.0, min_box_side_px=0) for c in cfg["cameras"]]
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+        models = Models()
+        models.boxes, models.ids, models.asked = [], {}, []
+        for i, c in enumerate(cfg["cameras"]):
+            pipeline.Camera(c, i, 2, cfg, models, shared, store, 0.0).second(0.0, np.zeros((64, 64, 3), np.uint8))
+        assert models.asked == [None, True]
+
+
+def test_report_two_cows_alive_at_once_do_not_share_a_name():
+    """Two joined cows alive at once on one camera both took name X (cow 8's cam1 track named so by the gallery,
+    cow 6's cam2 track too): the one whose other name costs it less (4 X / 3 Y against 6 X / 4 Z) takes Y."""
+    import report
+    from store import Store
+    row = lambda cam, tr, k, cow: (cam, tr, 100.0 + 60 * k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100)
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        for tr, cam, cow, n in (("a1", "cam1", "X", 4), ("a2", "cam2", "Y", 3),      # cow 8
+                                ("b2", "cam2", "X", 6), ("b1", "cam1", "Z", 4)):     # cow 6
+            for k in range(n):
+                store.burst(row(cam, tr, k, cow))
+        store.link_tracks(150.0, "a2", "a1")
+        store.link_tracks(150.0, "b1", "b2")
+        tm = report.track_map(store)
+        assert tm["a1"] == tm["a2"] == "Y" and tm["b1"] == tm["b2"] == "X"
+
+
+def test_claims_hold_a_cow_against_a_neighbours_group_on_another_camera():
+    """Cow A confirmed on cam2's track; cam1's track of her neighbour, never seen with it (another camera), whose
+    joined group holds a cam1 track alive beside A's group's cam1 track: two cows - A is held there too."""
+    import pipeline
+    from store import Store
+    a, b = np.eye(16)[0], np.eye(16)[2]
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {"A": a, "B": b}), store, _cfg(), 1000.0)
+        shared.groups = lambda x, y: {x, y} == {"g-A", "g-n"}        # the linker: two groups, two cows
+        out = lambda v: {"fingerprint": v, "quality_max": 0.5, "quality_mean": 0.5}
+        assert shared.decide(out(_unit(a)), 0.05, 1000.0, "g-A")["cow"] == "A"
+        assert shared.decide(out(_unit(a * 0.9 + b * 0.25)), 0.05, 1010.0, "g-n")["cow"] != "A"
+        assert shared.decide(out(_unit(a)), 0.05, 1020.0, "g-other")["cow"] == "A"   # not known apart: may be her
+
+
+def test_linker_two_cows_by_their_groups():
+    """Two joined groups with tracks of one camera alive at the same time are two cows; one group is one cow."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    box = lambda x: [x - 0.03, 0.45, x + 0.03, 0.5]
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": c, "mask": [], "floor_points": pts} for c in ("a", "b")]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5)
+    lk = mct.TrackletLinker(cfg)
+    for k in range(60):
+        lk.update_all(float(k), {"a": [{"box": box(0.3), "track": "a1"}, {"box": box(0.7), "track": "a2"}],
+                                 "b": [{"box": box(0.3), "track": "b1"}, {"box": box(0.7), "track": "b2"}]})
+    assert lk.root("a1") == lk.root("b1") and lk.root("a2") == lk.root("b2")
+    assert lk.two_cows("b1", "b2") and lk.two_cows("a1", "b2")            # b2's group holds a2, alive beside a1
+    assert not lk.two_cows("a1", "b1")
+
+
+def test_a_camera_stopped_by_an_error_is_said_and_frees_the_others(monkeypatch, capsys):
+    """An error in one camera's work ends that camera only (Lockstep lets the others on) - and is kept with how far
+    its recording got, for herd.py trial to say beside the score instead of scoring a shorter recording silently."""
+    import threading
+    import pipeline
+
+    class Cam:
+        def __init__(self, cid, bad_at=None):
+            self.id, self.bad_at = cid, bad_at
+
+        def push(self, ts, img):
+            pass
+
+        def step(self, ts):
+            if self.bad_at is not None and ts >= self.bad_at:
+                raise KeyError("boom")
+
+    monkeypatch.setattr(pipeline, "frames_from", lambda url, start: ((100.0 + i, None) for i in range(10)))
+    lock = pipeline.Lockstep({"cam3": 100.0, "cam4": 100.0})
+    ended = {}
+    th = [threading.Thread(target=pipeline.run_file, args=(cam, "x.mp4", 100.0), kwargs={"lockstep": lock, "ended": ended})
+          for cam in (Cam("cam3", bad_at=103.0), Cam("cam4"))]
+    for t in th:
+        t.start()
+    for t in th:
+        t.join(timeout=30)
+    assert not any(t.is_alive() for t in th)                   # cam4 did not wait for cam3 for ever
+    assert ended["cam3"][0] == 3.0 and "KeyError" in ended["cam3"][1]
+    assert ended["cam4"] == (9.0, None)
+    out = capsys.readouterr()
+    assert "[cam3] !! stopped at 0:03" in out.out and "boom" in out.err
+
+
+def _walker_scene(walker_size):
+    """23 Oct cam2 (its boxes): cow 23 stands still; cow 13 walks up, their boxes run into one, cow 13 stands in front
+    of her for 10 s and walks on. -> [(t, gids)], the still cow's gid, the walker's."""
+    import mct
+    cfg = _cfg()
+    cfg["mct"]["enabled"] = False
+    cfg["tracker"]["kalman"] = True
+    cfg["mct"]["walker_size"] = walker_size
+    gt = mct.GlobalTracker(cfg)
+    still = [0.739, 0.215, 0.792, 0.327]                                       # h 0.112
+    walker = lambda t: [0.436 + 0.03 * (t - 50), 0.209, 0.556 + 0.03 * (t - 50), 0.363]   # h 0.154, 0.2 h a second
+    front = [0.73, 0.211, 0.817, 0.347]                                       # the walker's box in front of her
+    log = []
+    for t in range(75):
+        if t < 50:
+            dets = [still]
+        elif t <= 57:
+            dets = [still, walker(t)]
+        elif t == 58:                                   # she reaches her: the still cow's box swells with the walker
+            dets = [walker(t), [0.735, 0.212, 0.812, 0.352]]
+        elif t <= 69:                                   # one box, the walker's size, hiding the still cow
+            dets = [front]
+        else:                                           # the walker goes on; the still cow shows again
+            dets = [[front[0] + 0.03 * (t - 69), front[1], front[2] + 0.03 * (t - 69), front[3]], still]
+        log.append((t, gt.update("c1", float(t), [{"box": b, "emb": None} for b in dets])))
+    return log, log[0][1][0], log[50][1][1]
+
+
+def test_walker_takes_her_box_back_from_a_still_cows_track():
+    """[mct] walker_size: the still cow's track (one size for minutes) must not take the walker's box when their
+    boxes run into one - the walker's track, lost a second, has it by its speed, and the still cow's track waits at
+    her place and takes her back when she shows again. Off, the still track keeps the walker and the two swap."""
+    log, still, walker = _walker_scene(0.2)
+    at = dict(log)
+    assert all(at[t] == [walker] for t in range(59, 70))
+    assert all(at[t] == [walker, still] for t in range(71, 75))
+    log, still, walker = _walker_scene(0.0)
+    at = dict(log)
+    assert at[60] == [still]                            # off: the still cow's track follows the walker
+    assert at[73] == [still, walker]                    # ... and the two cows end swapped
+
+
+def _holes_linker(**mct_over):
+    """Two cameras on one floor (the same mapping: a frame's x 0-1 is 0-1000 cm), a's mask x < 0.5, b's x > 0.6 - a hole
+    between them, 0.5-0.6; b tracks only x > 0.3. Tracks given."""
+    import mct
+    pts = [[0, 0, 0, 0], [1, 0, 1000, 0], [1, 1, 1000, 1000], [0, 1, 0, 1000]]
+    cfg = _cfg()
+    left, right = [[0, 0], [0.5, 0], [0.5, 1], [0, 1]], [[0.6, 0], [1, 0], [1, 1], [0.6, 1]]
+    cfg["cameras"] = [{"id": "a", "mask": left, "floor_points": pts},
+                      {"id": "b", "mask": right, "floor_points": pts, "tracking_mask": [[0.3, 0], [1, 0], [1, 1], [0.3, 1]]}]
+    cfg["mct"].update(link_rule="llr", link_dist=160.0, link_min_s=5, neighbours=[["a", "b"]], **mct_over)
+    return mct.TrackletLinker(cfg)
+
+
+def test_a_cow_between_two_masks_is_counted_by_one_camera():
+    """[mct] count_holes: a cow in the strip neither mask holds is counted by exactly one camera - joined, the one
+    whose box of her is bigger; not joined, hers when the other camera counts no cow near her; never two cameras
+    for one cow, and floor only her camera tracks, left out of its mask, stays uncounted."""
+    box = lambda x, w=0.04: [x - w / 2, 0.45, x + w / 2, 0.55]
+    lk = _holes_linker()
+    for k in range(30):                    # one cow in the hole, both cameras on her: joined, b's box the bigger
+        lk.update_all(float(k), {"a": [{"box": box(0.55), "track": "a1"}], "b": [{"box": box(0.55, 0.06), "track": "b1"}]})
+    assert lk.root("a1") == lk.root("b1")
+    assert lk.count_last == {"a": [False], "b": [True]}
+    # in a's mask: a counts her, b (outside its own) does not
+    lk.update_all(30.0, {"a": [{"box": box(0.45), "track": "a1"}], "b": [{"box": box(0.45, 0.06), "track": "b1"}]})
+    assert lk.count_last == {"a": [True], "b": [False]}
+    # a cow in the hole only a sees (b misses her) - a counts her; a cow b counts in its mask 4.3 m off (beyond
+    # count_dist, 2.5 x link_dist) is no reason not to
+    lk2 = _holes_linker()
+    lk2.update_all(0.0, {"a": [{"box": box(0.55), "track": "a9"}], "b": [{"box": box(0.98), "track": "b9"}]})
+    assert lk2.count_last == {"a": [True], "b": [True]}
+    # not joined (one second), b's box of her in b's mask near her: b counts her, a does not
+    lk2.update_all(1.0, {"a": [{"box": box(0.58), "track": "a8"}], "b": [{"box": box(0.62), "track": "b8"}]})
+    assert lk2.count_last == {"a": [False], "b": [True]}
+    # floor b does not track (x < 0.3, out of a's mask? no: a's mask holds it) - a cow at 0.2 is a's anyway;
+    # a cow outside a's mask where b tracks nothing either is left out
+    lk3 = _holes_linker()
+    lk3.cam_cfg["a"] = dict(lk3.cam_cfg["a"], mask=[[0, 0], [0.1, 0], [0.1, 1], [0, 1]])
+    lk3.masks["a"] = lk3.cam_cfg["a"]["mask"]
+    lk3.update_all(0.0, {"a": [{"box": box(0.15), "track": "a7"}], "b": []})
+    assert lk3.count_last["a"] == [False]                # 1.5 m: b tracks from 3 m on (a cell's margin: 2 m)
+    # off: the masks alone
+    lk4 = _holes_linker(count_holes=False)
+    lk4.update_all(0.0, {"a": [{"box": box(0.55), "track": "a9"}], "b": [{"box": box(0.98), "track": "b9"}]})
+    assert lk4.count_last == {"a": [False], "b": [True]}
+
+
+def test_camera_writes_the_cow_the_tracker_says_it_counts_in_a_hole():
+    """pipeline: a box outside the camera's mask is written when the tracker says this camera counts her (a cow in
+    no camera's mask, [mct] count_holes) - and kept out of the gallery's "counted by two cameras at once"."""
+    import pipeline
+    from store import Store
+    cfg = _mct_cfg([("cam1", {"mask": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]],
+                              "tracking_mask": [[0, 0], [1, 0], [1, 1], [0, 1]]})], enabled=True)
+    cfg["cameras"] = [dict(c, min_box_pct=0.0, min_box_side_px=0) for c in cfg["cameras"]]
+
+    class Glob:                      # the linker's answers: two tracks, the one outside the mask counted here
+        def update(self, cam, ts, dets):
+            return ["t-in", "t-hole"][:len(dets)]
+
+        def raw(self, cam, ts):
+            return ["t-in", "t-hole"]
+
+        def counts(self, cam, ts):
+            return [True, True]
+
+        def track_at(self, cam, ts, box):
+            return None
+
+    with tempfile.TemporaryDirectory() as d:
+        store = Store(os.path.join(d, "s.sqlite"))
+        shared = pipeline.SharedGallery(_gallery(d, {}), store, cfg, 0.0)
+        seen = []
+        shared.counted = lambda cam, ts, tracks: seen.append(list(tracks))
+        models = _FakeModels()
+        cam = pipeline.Camera(cfg["cameras"][0], 0, 1, cfg, models, shared, store, 0.0)
+        cam.glob = Glob()
+        models.boxes = [_box(0.3), _box(0.75)]
+        models.ids = {0.3: _unit(np.ones(8)), 0.75: _unit(np.arange(8.0) + 1)}
+        cam.second(0.0, np.zeros((64, 64, 3), np.uint8))
+        rows = store.query("SELECT track FROM seconds ORDER BY x1")
+        assert [r[0] for r in rows] == ["t-in", "t-hole"]
+        assert seen == [["t-in"]] and cam._hole[0] == {"t-hole"}
+
+
+def test_trial_scores_a_cow_counted_outside_the_mask_and_says_who_counted_none():
+    """A box of yours outside the camera's mask is scored there when the camera counted her (a cow between two
+    masks, [mct] count_holes); a cow of yours where the camera tracks that no camera counted is said."""
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        st = os.path.join(d, "s.sqlite")
+        s = Store(st)
+        s.seconds([("cam1", "t1", float(t), 0.1, 0.4, 0.3, 0.6, "lying", "none", 0.9) for t in range(100, 111)] +
+                  [("cam1", "t2", float(t), 0.85, 0.4, 0.95, 0.6, "lying", "none", 0.9) for t in range(100, 111)])
+        for tr, cow in (("t1", "P1"), ("t2", "P2")):
+            for k in range(3):
+                s.burst(("cam1", tr, 100.0 + k, "confirmed", cow, 0.9, 0.2, 0.9, 0.1, "lying", "none", None, 0.5, 100))
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"cam1/{t}.jpg", "cam": "cam1", "ts": float(t), "w": 1920, "h": 1080} for t in (100, 105, 110)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        # 4 in the mask, 7 outside it and counted (t2), 9 outside it where the camera tracks - counted by none
+        lab = {"boxes": [[0.1, 0.4, 0.3, 0.6, "4"], [0.85, 0.4, 0.95, 0.6, "7"], [0.6, 0.7, 0.7, 0.9, "9"]], "status": "done"}
+        labels = os.path.join(d, "labels.json")
+        json.dump({"frames": {f["file"]: lab for f in frames}}, open(labels, "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1", "mask": [[0, 0], [0.5, 0], [0.5, 1], [0, 1]],
+                           "tracking_mask": [[0, 0], [1, 0], [1, 1], [0, 1]]}]
+        sc = trial.score(st, cfg, boxes, labels)
+        a = sc["all"]
+        assert a["your_boxes"] == 6 and a["found_with_a_cow"] == 6 and abs(a["idf1"] - 1.0) < 1e-9
+        assert sc["counted_by_none"] == {"moments": 9, "none": 3, "cows": {"9": 3}}
+
+
+def test_trial_scores_the_posture_and_activity_you_gave_boxes():
+    """The box page's posture / activity (a box's 7th field, with or without a cow id) against what the camera wrote
+    at that second: right of found, the confusion, per camera; a box of yours it did not find is said apart."""
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        st = os.path.join(d, "s.sqlite")
+        s = Store(st)
+        s.seconds([("cam1", "t1", float(t), 0.1, 0.4, 0.3, 0.6, "lying", "feeding", 0.9) for t in range(100, 111)] +
+                  [("cam1", "t2", float(t), 0.5, 0.4, 0.7, 0.6, "standing", "none", 0.1) for t in range(100, 111)])
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"cam1/{t}.jpg", "cam": "cam1", "ts": float(t), "w": 1920, "h": 1080} for t in (100, 105, 110)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        # rumination: once a burst - t2's burst at 103 ruminating, none of t1's
+        s.burst(("cam1", "t2", 103.0, "confirmed", "P2", 0.9, 0.2, 0.9, 0.8, "standing", "none", None, 0.5, 100, 1))
+        lab = {"boxes": [[0.1, 0.4, 0.3, 0.6, "4", 0, {"posture": "lying", "activity": "feeding"}],
+                         [0.5, 0.4, 0.7, 0.6, "", 0, {"posture": "lying", "activity": "ruminating"}],   # no id: still scored
+                         [0.8, 0.1, 0.9, 0.2, "", 0, {"activity": "drinking"}]], "status": "done"}   # not found
+        labels = os.path.join(d, "labels.json")
+        json.dump({"frames": {f["file"]: lab for f in frames}}, open(labels, "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1"}]
+        sc = trial.score(st, cfg, boxes, labels)
+        p, a = sc["posture"], sc["activity"]
+        assert (p["boxes"], p["right"], p["not_found"]) == (6, 3, 0)
+        assert p["confusion"] == {"lying": {"lying": 3, "standing": 3}} and p["cameras"]["cam1"]["share"] == 0.5
+        # ruminating is "neither" to the activity head ...
+        assert (a["boxes"], a["right"], a["not_found"]) == (6, 6, 3) and a["confusion"]["none"] == {"none": 3}
+        # ... and rumination scored against her track's burst nearest the moment (t1: none near)
+        r = sc["rumination"]
+        assert (r["boxes"], r["right"], r["not_found"]) == (3, 3, 3) and r["confusion"] == {"ruminating": {"ruminating": 3}}
+        trial.print_score(sc)
+
+
+def test_resolution_scores_each_width_on_your_labelled_frames():
+    """herd.py resolution: at each width the detector's boxes against yours (by size), posture / activity of the
+    crops of your boxes, the nearest named box the same cow, the costs and the cameras they allow."""
+    import cv2
+    import resolution
+    import pipeline
+    from PIL import Image
+
+    class Models:                    # sees far cows only at Full HD; posture right when the crop is sharp
+        crop_size, margin = 16, 0.1
+
+        def detect_many(self, imgs, **kw):
+            out = []
+            for im in imgs:
+                far = [[0.70, 0.10, 0.74, 0.16]] if im.shape[1] >= 1600 else []
+                out.append([[0.1, 0.4, 0.3, 0.8]] + far)
+            return out
+
+        def encode(self, crops, **kw):
+            return np.stack([c.astype(np.float32).std() + np.zeros(4) for c in crops])
+
+        def frame_heads(self, feats, boxes, with_id=False, **kw):
+            n = len(boxes)
+            sharp = feats[:, 0] > 20
+            pp = np.where(sharp[:, None], [[0.1, 0.9]], [[0.9, 0.1]])
+            pa = np.tile([0.1, 0.1, 0.8], (n, 1))
+            ids = np.array([[1.0, 0, 0] if b[0] < 0.5 else [0, 1.0, 0] for b in boxes]) + 0.01
+            return pp, pa, ids
+
+        def burst(self, *a, **kw):
+            return {}
+
+    with tempfile.TemporaryDirectory() as d:
+        os.makedirs(os.path.join(d, "frames", "cam1"))
+        frames, labels = [], {}
+        rng = np.random.default_rng(1)
+        for k in range(4):
+            f = f"frames/cam1/{k}.jpg"
+            Image.fromarray(rng.integers(0, 255, (1080, 1920, 3), dtype=np.uint8)).save(os.path.join(d, f))
+            frames.append({"file": f, "cam": "cam1", "ts": 100.0 + 10 * k, "w": 1920, "h": 1080, "boxes": []})
+            labels[f] = {"status": "done", "boxes": [[0.1, 0.4, 0.3, 0.8, "7", 0, {"posture": "lying", "activity": "none"}],
+                                                     [0.70, 0.10, 0.74, 0.16, "9", 0, {"posture": "lying"}]]}
+        json.dump({"frames": frames}, open(os.path.join(d, "frames.json"), "w"))
+        json.dump({"frames": labels}, open(os.path.join(d, "labels.json"), "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1"}]
+        fr = resolution.labelled_frames(d, os.path.join(d, "labels.json"))
+        assert len(fr) == 4 and fr[0]["boxes"][0][1] == "7"
+        m = Models()
+        hi, lo = resolution.one_width(m, fr, 1920, {}), resolution.one_width(m, fr, 800, {})
+        assert hi["detector"]["recall"] == 1.0 and lo["detector"]["recall"] == 0.5
+        assert lo["detector"]["recall_by_size"] == {"far": 0.0, "near": 1.0}
+        assert hi["posture"]["boxes"] == 8 and hi["identity"]["all"] == 1.0 and hi["identity"]["questions"] == 8
+        assert set(hi["ms"]) >= {"detector_frame", "crop", "encode_crop", "heads_box", "resize_from_full_hd"}
+        c = resolution.capacity(dict(hi, width=1920), cfg, 2.0, 50.0, 8, 16.0, 16 / 9)
+        assert c["cameras"] == min(c["cameras_by_gpu"], c["cameras_by_ram"]) and c["ring_buffer_mb"] > 1400
+        assert "| 1920 |" in resolution.table([dict(hi, capacity=c)])
+        # crop-size policies: a fixed side for every cow, or the box's own pixels
+        imgs = [resolution.at_width(resolution.cv2_rgb(f["path"]), 1920) for f in fr]
+        cp = resolution.crop_policies(m, fr, imgs, ["16", "8", "native"])
+        assert set(cp) == {"16", "8", "native"} and cp["16"]["patches_vs_full"] == 1.0
+        assert cp["8"]["patches_vs_full"] == 0.25 and cp["8"]["sides"] == {8: 8}
+        assert cp["16"]["identity"]["all"] == 1.0 and "| 1920 | 8 |" in resolution.crop_table({1920: cp})
+        big = np.zeros((1080, 1920, 3), np.uint8)
+        assert resolution.crop_side("native", big, [0.70, 0.10, 0.74, 0.16], 0.1) == 112      # 78 px: up to 112
+        assert resolution.crop_side("native", big, [0.10, 0.40, 0.20, 0.60], 0.1) == 224      # 259 px: down to 224
+        assert resolution.crop_side("native", big, [0.10, 0.40, 0.18, 0.55], 0.1) == 196      # 194 px: its own
+
+
+def test_burst_takes_burst_fps_frames_a_second():
+    """[sampling] burst_fps: a burst keeps that many of the stream's frames a second, evenly; at the stream's rate
+    or more (or 0) all of them."""
+    import pipeline
+    frames = [(100.0 + k / 25.0, k) for k in range(175)]                     # 7 s at 25 fps
+    assert len(pipeline.thin_frames(frames, 25.0)) == 175 and len(pipeline.thin_frames(frames, 0)) == 175
+    half = pipeline.thin_frames(frames, 12.5)
+    assert len(half) == 88 and all(abs((b[0] - a[0]) - 0.08) < 1e-6 for a, b in zip(half, half[1:]))
+    assert len(pipeline.thin_frames(frames, 8.0)) == 56

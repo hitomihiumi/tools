@@ -417,6 +417,13 @@ def _run_fused(dets, cfg, co, kind="fused"):
     under the one it was finally joined to)."""
     import mct
     ft = mct.FloorTracker(cfg) if kind == "fused" else mct.TrackletLinker(cfg)
+    bend = cfg["mct"].get("_bend", 0.0)
+    if bend and hasattr(ft, "floor"):              # the barn's case: each camera's floor a little off, unevenly
+        for i, (c, f) in enumerate(sorted(ft.floor.items())):
+            if f is not None:
+                ft.floor[c] = (lambda f, ph: lambda box, pl=0.5: (
+                    lambda p: (p[0] + bend * np.sin(p[0] / 400 + ph), p[1] + bend * np.cos(p[1] / 300 + ph)))(
+                        f(box, pl)))(f, 1.7 * i)
     got, links = {}, set()
     cams = sorted(dets)
     for ts in sorted({t for per in dets.values() for t in per}):
@@ -621,6 +628,27 @@ def variants(args, has_mats, cal=None):
         v += [("fid/link", "fid", "link", dict(r9)),
               ("fid/link-final", "fid", "link-final", dict(r9))]
         v += [(f"fid/link-final@{d:g}", "fid", "link-final", dict(r9, link_dist=d)) for d in args.link_sweep]
+        v += [(f"fid/link-final+vote{x:g}", "fid", "link-final", dict(r9, link_vote=x, link_margin=0.0))
+              for x in (1.5, 2.0, 3.0)]
+        # each camera's floor bent by up to 80 cm, unevenly (the barn's floor mapping, right ~70% of seconds):
+        # joined by most of the time (link_share) against by vote
+        v += [("fid/link-final~bent80", "fid", "link-final", dict(r9, _bend=80.0)),
+              ("fid/link-final~bent80+vote2", "fid", "link-final", dict(r9, _bend=80.0, link_vote=2.0, link_margin=0.0))]
+        # place and look in one number (link_look_cm per unit of the frame ids' cosine distance)
+        v += [(f"fid/link-final+vote2+look{c:g}", "fid", "link-final", dict(r9, link_vote=2.0, link_margin=0.0,
+                                                                            link_look_cm=c)) for c in (100.0, 300.0)]
+        v += [("fid/link-final~bent80+vote2+look300", "fid", "link-final",
+               dict(r9, _bend=80.0, link_vote=2.0, link_margin=0.0, link_look_cm=300.0))]
+        # the look without the vote: the usual rule, place and look in one number
+        v += [("fid/link-final+look300", "fid", "link-final", dict(r9, link_look_cm=300.0)),
+              ("fid/link-final~bent80+look300", "fid", "link-final", dict(r9, _bend=80.0, link_look_cm=300.0))]
+        # evidence summed as log-likelihood, joined by the best one-to-one assignment (link_rule "llr"), with and
+        # without the floor's bend learnt from the pairs joined; on the true floor and on the bent one
+        llr = dict(r9, link_rule="llr")
+        v += [("fid/link-final+llr", "fid", "link-final", dict(llr)),
+              ("fid/link-final+llr+learn", "fid", "link-final", dict(llr, link_learn_offset=True)),
+              ("fid/link-final~bent80+llr", "fid", "link-final", dict(llr, _bend=80.0)),
+              ("fid/link-final~bent80+llr+learn", "fid", "link-final", dict(llr, _bend=80.0, link_learn_offset=True))]
         v += [("fid/link-final-nomargin", "fid", "link-final", dict(r9, link_margin=0.0)),
               ("fid/link-final+contra", "fid", "link-final", dict(r9, link_contra=0.3))]
         if cal and cal.get("late_sim"):                          # the late reacquire (off by default) tried

@@ -303,7 +303,7 @@ def live(args, cfg, models, shared, store, clips):
     bs, every = cfg["sampling"]["burst_seconds"], cfg["sampling"]["burst_every_s"]
     print(f"[stress] live: {n} cameras, tick every {1 / cfg['sampling']['fps']:g} s, burst {bs:g} s every {every:g} s; "
           f"warm-up {args.warmup:g} s, measuring {args.duration:g} s", flush=True)
-    held0 = cpu0 = None
+    held0 = cpu0 = waited0 = None
     last = time.time()
     while time.time() < t_to:
         time.sleep(0.5)
@@ -311,6 +311,8 @@ def live(args, cfg, models, shared, store, clips):
         if held0 is None and now >= t_from:
             with models.gpu.cv:
                 held0 = dict(models.gpu.held)
+                waited0 = dict(models.gpu.waited)
+                models.gpu.wait_max.clear()
             cpu0, wall0 = time.process_time(), now
             frames0 = [src.frames for src in sources]
             if hasattr(models.torch, "cuda") and models.dev.type == "cuda":
@@ -325,6 +327,7 @@ def live(args, cfg, models, shared, store, clips):
                   flush=True)
     with models.gpu.cv:
         held1 = dict(models.gpu.held)
+        waited1, wait_max = dict(models.gpu.waited), dict(models.gpu.wait_max)
     cpu1, wall1 = time.process_time(), time.time()
     frames1 = [src.frames for src in sources]
     # let the bursts due in the window finish (they are counted, not the ones after)
@@ -396,6 +399,11 @@ def live(args, cfg, models, shared, store, clips):
         "ruminating": rum_yes, "cow_bursts": cow_bursts,
         "gpu_busy_share": round(busy_total, 3),
         "gpu_busy_by_kind": {k: round(v, 3) for k, v in sorted(busy.items())},
+        # how long the work waited for the GPU (a tick's parts go first): a tick late while it hardly waited was
+        # held up elsewhere - the Python of the other threads (the GIL), the gallery's lock
+        "gpu_wait_s_a_second_by_kind": {k: round((waited1.get(k, 0) - (waited0 or {}).get(k, 0)) / window, 3)
+                                        for k in sorted(waited1)} if held0 is not None else {},
+        "gpu_wait_max_s_by_kind": {k: round(v, 3) for k, v in sorted(wait_max.items())},
         # GPU-bound estimate with 20% kept free; CPU (decode, crops) may stop it sooner
         "cameras_max_estimate": int(n * 0.8 / busy_total) if busy_total > 0 else None,
         "gpu": gpu.summary(t_from, t_to),
@@ -493,6 +501,8 @@ def markdown(res):
                 f"| cameras one GPU could take (estimate, 20% kept free) | "
                 f"{('at most ' if L['gpu_busy_share'] > 0.9 else '') + str(L['cameras_max_estimate'])} |", "",
                 "GPU busy by part: " + ", ".join(f"{k} {v:.1%}" for k, v in L["gpu_busy_by_kind"].items()), "",
+                "Waiting for the GPU, longest: " + ", ".join(f"{k} {v:.2f} s" for k, v in
+                                                            (L.get("gpu_wait_max_s_by_kind") or {}).items()), "",
                 "| camera | fps in | ticks done | missed | lag p50 / p99, s | cows a tick | bursts | "
                 "burst work p50, s | ready -> done max, s | cows a burst |",
                 "|---|---|---|---|---|---|---|---|---|---|"]

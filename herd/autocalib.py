@@ -18,6 +18,9 @@ not do when the masks cut the shared floor away from one camera) - the boxes of 
   4. the floor plan in about centimetres: the reference camera's floor straightened so that cows are the
      same size near and far (a lying cow's box ~150 cm wide); the link distance from the pairs' spread
 
+  --overlay: barn.toml's floor mapping checked by eye - each pair's pictures laid over each other
+  through the floor (OUT/<b>_on_<a>.jpg, OUT/overlay.html with an opacity slider).
+
   -> OUT/calib.json, OUT/<a>_<b>.jpg (the other camera's cows drawn onto this one's picture: they should
      sit on its cows), and with --apply the cameras' floor_points / distortion and [mct] link in barn.toml.
      OUT/<a>_<b>_moving.jpg, found or not: both pictures, the paths of the cows that walked, the pairs.
@@ -653,20 +656,22 @@ def toml_value(v):
     return json.dumps(v)
 
 
-def apply_config(path, calib, link_dist, shared=()):
+def apply_config(path, calib, link_dist, shared=(), backup=True):
     """barn.toml: the calibrated cameras' floor_points / distortion / aspect, and [mct] link on; the camera
     pairs found to share floor taken out of [mct] disjoint."""
     old_disjoint = load_config(path)["mct"].get("disjoint", [])
     text = open(path, encoding="utf-8").read()
-    shutil.copy(path, path + ".bak")
+    if backup:
+        shutil.copy(path, path + ".bak")
     blocks = re.split(r"(?m)^(?=\[\[cameras\]\])", text)
     out = [blocks[0]]
     for b in blocks[1:]:
         m = re.search(r'(?m)^id\s*=\s*"([^"]+)"', b)
         cam = m.group(1) if m else None
         if cam in calib:
-            b = re.sub(r"(?m)^(floor_points|distortion|aspect)\s*=.*\n", "", b)
-            add = "".join(f"{k} = {toml_value(calib[cam][k])}\n" for k in ("floor_points", "distortion", "aspect"))
+            keys = [k for k in ("floor_points", "distortion", "aspect", "floor_at") if k in calib[cam]]
+            b = re.sub(rf"(?m)^({'|'.join(keys)})\s*=.*\n", "", b)
+            add = "".join(f"{k} = {toml_value(calib[cam][k])}\n" for k in keys)
             b = b.rstrip("\n") + "\n" + add + "\n"
         out.append(b)
     text = "".join(out)
@@ -715,13 +720,20 @@ def main(argv=None, live=None):
     p.add_argument("--at", type=float, default=60.0, help="--pick: the pictures this many s into the recordings")
     p.add_argument("--points", default=None, help="the spots clicked on pick.html (its points.json): the floor "
                    "mapping from them instead of from walking cows")
+    p.add_argument("--overlay", action="store_true", help="check barn.toml's floor mapping by eye: each pair's "
+                   "pictures laid over each other through the floor (OUT/<b>_on_<a>.jpg, OUT/overlay.html) - "
+                   "the pictures the spots were clicked on (OUT/pick), or with --videos the moment --at")
+    p.add_argument("--alpha", type=float, default=0.5, help="--overlay: the other camera's opacity on the jpgs")
     args = p.parse_args(argv)
     from store import Store
     import cv2
     cfg = load_config(args.config)
     ids = [c["id"] for c in cfg["cameras"]]
-    if not args.videos and not args.store and not args.points:
+    if not args.videos and not args.store and not args.points and not args.overlay:
         p.error("--videos (the recordings) or --store (a run's boxes) is needed")
+    picked = os.path.join(args.out, "points.json")
+    if args.overlay and not args.points and os.path.exists(picked):
+        args.points = picked                                   # the spots clicked, drawn on the overlay
     disjoint = {frozenset(x) for x in cfg["mct"].get("disjoint", [])}
     if args.pairs:
         pairs = [tuple(x.split(":")) for x in args.pairs]
@@ -729,6 +741,11 @@ def main(argv=None, live=None):
         pairs = [tuple(k.split(":")) for k in json.load(open(args.points, encoding="utf-8")).get("pairs", {})]
     else:
         pairs = [(a, b) for a, b in itertools.combinations(ids, 2) if frozenset((a, b)) not in disjoint]
+    if args.overlay and not args.pairs:                        # only pairs both calibrated: nothing else to see
+        floor = {c["id"] for c in cfg["cameras"] if c.get("floor_points")}
+        pairs = [(a, b) for a, b in pairs if a in floor and b in floor] or \
+            [(a, b) for a, b in itertools.combinations(ids, 2) if a in floor and b in floor
+             and frozenset((a, b)) not in disjoint]
     for a, b in pairs:
         for x in (a, b):
             if x not in ids:
@@ -752,6 +769,9 @@ def main(argv=None, live=None):
         print(f"[calib] {page}: open it in a browser, click the same floor spots on both pictures of each pair, "
               f"Save (points.json), put it into {args.out} and run again with --points "
               f"{os.path.join(args.out, 'points.json')}")
+        return
+    if args.overlay:
+        overlay(cfg, args.out, pairs, overlay_frames(args.out, videos, pairs, args.at), args.points, args.alpha)
         return
     used = sorted({x for ab in pairs for x in ab})
     if args.points and not args.store and not args.videos:
@@ -858,12 +878,7 @@ def consensus(A, B, wa, ha, thr):
 
 def from_points(path, only, T, aspect, size, out, videos=None):
     """The pairs' floor mappings from the spots clicked on pick.html (the same spot of the floor on both
-    pictures): a homography B -> A; with 7 spots or more each lens's bend too, when it brings the spots
-    clearly closer.
-
-    The spots one mapping agrees on are used; one that disagrees with them (clicked on two different
-    places) is left out and named. Fewer than 5 that agree, or spots along one line (one fence), give no
-    floor: refused."""
+    pictures): fit_spots for each pair, said, and drawn (OUT/<a>_<b>_spots.jpg)."""
     data = json.load(open(path, encoding="utf-8"))
     found = {}
     for key, pts in data.get("pairs", {}).items():
@@ -871,59 +886,77 @@ def from_points(path, only, T, aspect, size, out, videos=None):
         if only and (a, b) not in only:
             continue
         P = np.array(pts, float).reshape(-1, 4)
-        wa, ha = size.get(a, (1920, 1080))
-        thr = 0.025 * wa
-        if len(P) < 5:
-            print(f"[calib] {a}-{b}: {len(P)} spots clicked - 5 at least (7-10 is better); skipped", flush=True)
-            continue
-        fits = {}
-        for kA, kB in itertools.product(K_GRID_POINTS, K_GRID_POINTS) if len(P) >= 7 else [(0.0, 0.0)]:
-            pa = np.c_[undistort(P[:, 0], P[:, 1], kA, aspect[a])]
-            pb = np.c_[undistort(P[:, 2], P[:, 3], kB, aspect[b])]
-            inl, H, e = consensus(pa, pb, wa, ha, thr)
-            fits[(kA, kB)] = (len(inl), float(np.median(e[inl])), inl, H, e)
-        most = max(f[0] for f in fits.values())
-        (kA, kB), (_, med, inl, H, e) = min(((k, f) for k, f in fits.items() if f[0] == most),
-                                            key=lambda kf: kf[1][1])
-        straight = fits[(0.0, 0.0)]
-        if (kA, kB) != (0.0, 0.0) and straight[0] == most and med > 0.8 * straight[1]:
-            (kA, kB), (_, med, inl, H, e) = (0.0, 0.0), straight      # a bent lens only when clearly closer
-        dropped = sorted(set(range(len(P))) - set(inl.tolist()))
-        r = {"H": H, "kA": kA, "kB": kB, "lag": 0, "spots": len(P), "spots_used": len(inl),
-             "spots_left_out": [i + 1 for i in dropped], "spot_error_px": [round(float(x), 1) for x in e]}
-        draw_spots(os.path.join(out, f"{a}_{b}_spots.jpg"), out, a, b, P, e, dropped)
-        if dropped:
-            print(f"[calib] {a}-{b}: spot(s) {', '.join(str(i + 1) for i in dropped)} left out - "
-                  f"{', '.join(f'{min(e[i], 9999):.0f}' for i in dropped)} px from where the others put it: not the "
-                  "same spot on both pictures? (fix on pick.html, save, run again)", flush=True)
-        if len(inl) < 5:
-            print(f"[calib] {a}-{b}: NOT calibrated - no 5 spots agree on one floor (most: {len(inl)}): the same "
-                  f"spot of the floor on both pictures? see {a}_{b}_spots.jpg", flush=True)
-            continue
-        K = P[inl]
-        line = [c for c, j in ((a, 0), (b, 2)) if flatness(K[:, j:j + 2]) < 0.12]
-        if line:
-            print(f"[calib] {a}-{b}: NOT calibrated - the spots lie almost on one line on {', '.join(line)} (along "
-                  "one fence?): a floor needs spots across it too - add some far from that line", flush=True)
-            continue
-        # every spot seen by both cameras is in front of both: the mapping must not put one behind A
-        pb = np.c_[undistort(K[:, 2], K[:, 3], kB, aspect[b])]
-        if len(set(np.sign(np.c_[pb, np.ones(len(pb))] @ H[2]))) > 1:
-            print(f"[calib] {a}-{b}: NOT calibrated - the mapping folds the floor over: check the spots on "
-                  f"{a}_{b}_spots.jpg", flush=True)
-            continue
-        lens = f"lens {a} k={kA}, {b} k={kB}" if len(P) >= 7 else "lenses taken straight (7 spots or more to fit them)"
-        print(f"[calib] {a}-{b}: {len(inl)} of {len(P)} spots agree, within {med:.0f} px (median, on {a}); {lens}",
-              flush=True)
-        if T.get(a) and T.get(b):
-            share, n, chance = agreement(T[a], T[b], H, 0, kA, kB, aspect[a], aspect[b])
-            r.update(share=share, chance=chance, checked=n)
-            print(f"[calib] {a}-{b}: check on the cows - {share:.0%} of {b}'s {n} cow-seconds over {a}'s picture "
-                  f"land on one of {a}'s cows ({chance:.0%} would by chance)", flush=True)
-        found[(a, b)] = r
+        r, notes = fit_spots(a, b, P, size, aspect, T)
+        for n in notes:
+            print(f"[calib] {n}", flush=True)
+        if r is not None and "spot_error_px" in r:
+            draw_spots(os.path.join(out, f"{a}_{b}_spots.jpg"), out, a, b, P, np.array(r["spot_error_px"]),
+                       [i - 1 for i in r["spots_left_out"]])
+        if r is not None and r.get("ok"):
+            found[(a, b)] = r
     if not found:
         sys.exit(f"[calib] no camera pair calibrated from {path} - nothing written")
     return found
+
+
+def fit_spots(a, b, P, size, aspect, T=None):
+    """One pair's floor mapping from its clicked spots P [[uA, vA, uB, vB], ...] (the same spot of the floor
+    on both pictures): a homography B -> A; with 7 spots or more each lens's bend too, when it brings the
+    spots clearly closer. -> (result or None, what to say). result["ok"]: calibrated.
+
+    The spots one mapping agrees on are used; one that disagrees with them (clicked on two different
+    places) is left out and named. Fewer than 5 that agree, or spots along one line (one fence), give no
+    floor: refused."""
+    T = T or {}
+    notes = []
+    wa, ha = size.get(a, (1920, 1080))
+    thr = 0.025 * wa
+    if len(P) < 5:
+        return None, [f"{a}-{b}: {len(P)} spots clicked - 5 at least (7-10 is better)"]
+    fits = {}
+    for kA, kB in itertools.product(K_GRID_POINTS, K_GRID_POINTS) if len(P) >= 7 else [(0.0, 0.0)]:
+        pa = np.c_[undistort(P[:, 0], P[:, 1], kA, aspect[a])]
+        pb = np.c_[undistort(P[:, 2], P[:, 3], kB, aspect[b])]
+        inl, H, e = consensus(pa, pb, wa, ha, thr)
+        fits[(kA, kB)] = (len(inl), float(np.median(e[inl])), inl, H, e)
+    most = max(f[0] for f in fits.values())
+    (kA, kB), (_, med, inl, H, e) = min(((k, f) for k, f in fits.items() if f[0] == most),
+                                        key=lambda kf: kf[1][1])
+    straight = fits[(0.0, 0.0)]
+    if (kA, kB) != (0.0, 0.0) and straight[0] == most and med > 0.8 * straight[1]:
+        (kA, kB), (_, med, inl, H, e) = (0.0, 0.0), straight      # a bent lens only when clearly closer
+    dropped = sorted(set(range(len(P))) - set(inl.tolist()))
+    r = {"H": H, "kA": kA, "kB": kB, "lag": 0, "spots": len(P), "spots_used": len(inl),
+         "spots_left_out": [i + 1 for i in dropped], "spot_error_px": [round(float(x), 1) for x in e],
+         "median_px": round(med, 1), "ok": False}
+    if dropped:
+        notes.append(f"{a}-{b}: spot(s) {', '.join(str(i + 1) for i in dropped)} left out - "
+                     f"{', '.join(f'{min(e[i], 9999):.0f}' for i in dropped)} px from where the others put it: not "
+                     "the same spot on both pictures?")
+    if len(inl) < 5:
+        notes.append(f"{a}-{b}: NOT calibrated - no 5 spots agree on one floor (most: {len(inl)}): the same spot of "
+                     "the floor on both pictures?")
+        return r, notes
+    K = P[inl]
+    line = [c for c, j in ((a, 0), (b, 2)) if flatness(K[:, j:j + 2]) < 0.12]
+    if line:
+        notes.append(f"{a}-{b}: NOT calibrated - the spots lie almost on one line on {', '.join(line)} (along one "
+                     "fence?): a floor needs spots across it too - add some far from that line")
+        return r, notes
+    # every spot seen by both cameras is in front of both: the mapping must not put one behind A
+    pb = np.c_[undistort(K[:, 2], K[:, 3], kB, aspect[b])]
+    if len(set(np.sign(np.c_[pb, np.ones(len(pb))] @ H[2]))) > 1:
+        notes.append(f"{a}-{b}: NOT calibrated - the mapping folds the floor over: check the spots")
+        return r, notes
+    lens = f"lens {a} k={kA}, {b} k={kB}" if len(P) >= 7 else "lenses taken straight (7 spots or more to fit them)"
+    notes.append(f"{a}-{b}: {len(inl)} of {len(P)} spots agree, within {med:.0f} px (median, on {a}); {lens}")
+    if T.get(a) and T.get(b):
+        share, n, chance = agreement(T[a], T[b], H, 0, kA, kB, aspect[a], aspect[b])
+        r.update(share=share, chance=chance, checked=n)
+        notes.append(f"{a}-{b}: check on the cows - {share:.0%} of {b}'s {n} cow-seconds over {a}'s picture land "
+                     f"on one of {a}'s cows ({chance:.0%} would by chance)")
+    r["ok"] = True
+    return r, notes
 
 
 def draw_spots(path, out, a, b, P, err_px, dropped):
@@ -960,6 +993,230 @@ def draw_spots(path, out, a, b, P, err_px, dropped):
     cv2.imwrite(path, img)
     print(f"[calib] {a}-{b}: the spots - {path}", flush=True)
     return path
+
+
+def distort(u, v, k, aspect=16 / 9):
+    """undistort's inverse: where a point of the straightened picture is on the camera's own frame (0-1).
+    The division model's radius ru = rd / (1 + c rd^2) solved for rd (the root that is rd = ru at c = 0);
+    numbers or numpy arrays (nan where no frame point maps there)."""
+    if not k:
+        return u, v
+    x, y = (np.asarray(u, float) - 0.5) * aspect, np.asarray(v, float) - 0.5
+    c = k / (0.25 * aspect * aspect + 0.25)
+    ru = np.hypot(x, y)
+    with np.errstate(invalid="ignore", divide="ignore"):
+        cr = c * ru
+        rd = np.where(np.abs(cr) > 1e-12, (1.0 - np.sqrt(1.0 - 4.0 * cr * ru)) / (2.0 * cr), ru)
+        s = np.where(ru > 1e-12, rd / np.where(ru > 1e-12, ru, 1.0), 1.0)
+    return 0.5 + x * s / aspect, 0.5 + y * s
+
+
+def camera_floor(cam, aspect=None):
+    """A calibrated camera's floor (its floor_points, distortion, aspect from barn.toml - what the run uses):
+    (to_floor, from_floor), each over arrays of 0-1 frame points; from_floor's third value is False where
+    the floor point is behind the camera. None without floor_points."""
+    pts = cam.get("floor_points")
+    if not pts or len(pts) < 4:
+        return None
+    k, ar = cam.get("distortion") or 0.0, cam.get("aspect") or aspect or 16 / 9
+    P = np.asarray(pts, float)
+    uu, vv = undistort(P[:, 0], P[:, 1], k, ar)
+    H = homography(np.c_[uu, vv], P[:, 2:4])                # straightened frame -> floor
+    Hi = np.linalg.inv(H)
+    # the side of the horizon the camera sees: where its own clicked points are
+    front = np.sign(np.median(np.c_[uu, vv, np.ones(len(P))] @ H[2]))
+
+    def to_floor(u, v):
+        a, b = undistort(np.asarray(u, float), np.asarray(v, float), k, ar)
+        q = np.stack([a, b, np.ones_like(a)], -1) @ H.T
+        ok = np.sign(q[..., 2]) == front
+        w = np.where(np.abs(q[..., 2]) < 1e-12, 1e-12, q[..., 2])
+        return q[..., 0] / w, q[..., 1] / w, ok
+
+    def from_floor(X, Y):
+        q = np.stack([np.asarray(X, float), np.asarray(Y, float), np.ones_like(np.asarray(X, float))], -1) @ Hi.T
+        w = np.where(np.abs(q[..., 2]) < 1e-12, 1e-12, q[..., 2])
+        u, v = distort(q[..., 0] / w, q[..., 1] / w, k, ar)
+        return u, v, np.sign(q[..., 2]) == front          # H[2] . (q / w) = 1 / w: the camera's own side
+    return to_floor, from_floor
+
+
+def other_onto(img_a, img_b, fa, fb):
+    """Camera B's picture drawn onto camera A's frame through the floor (A's pixel -> floor -> B's pixel):
+    (warped BGR, valid mask) at A's size. Where the floor goes, B's picture lands on the same floor in A's;
+    off the floor (walls, cows' backs, beyond B's frame) it cannot."""
+    import cv2
+    ha, wa = img_a.shape[:2]
+    hb, wb = img_b.shape[:2]
+    u, v = np.meshgrid((np.arange(wa) + 0.5) / wa, (np.arange(ha) + 0.5) / ha)
+    X, Y, ok_a = fa[0](u, v)
+    ub, vb, ok_b = fb[1](X, Y)
+    mx, my = (ub * wb - 0.5).astype(np.float32), (vb * hb - 0.5).astype(np.float32)
+    valid = ok_a & ok_b & (ub >= 0) & (ub <= 1) & (vb >= 0) & (vb <= 1) & np.isfinite(mx) & np.isfinite(my)
+    mx[~valid], my[~valid] = -1, -1
+    warped = cv2.remap(img_b, mx, my, cv2.INTER_LINEAR, borderMode=cv2.BORDER_CONSTANT, borderValue=0)
+    return warped, valid
+
+
+def _poly_onto(poly, fa, fb, wa, ha, n=40):
+    """A polygon of B's frame (0-1) as drawn on A's (pixels), its edges walked so the lens bend shows."""
+    out = []
+    for (u0, v0), (u1, v1) in zip(poly, poly[1:] + poly[:1]):
+        t = np.linspace(0, 1, n, endpoint=False)
+        X, Y, ok_b = fb[0](u0 + (u1 - u0) * t, v0 + (v1 - v0) * t)
+        ua, va, ok_a = fa[1](X, Y)
+        out += [(float(x * wa), float(y * ha)) if o else None for x, y, o in zip(ua, va, ok_a & ok_b)]
+    return out
+
+
+def overlay_frames(out, videos, pairs, at):
+    """The pictures to lay over each other: with recordings, every camera's at one moment (--at s into the
+    pairs' recordings); else the ones the spots were clicked on (OUT/pick/<cam>_*.jpg, the latest)."""
+    import cv2
+    import glob
+    frames = {}
+    for a, b in pairs:
+        if videos.get(a) and videos.get(b):
+            s = max(videos[a][0][1], videos[b][0][1]) + at
+            for cam in (a, b):
+                if cam not in frames:
+                    frames[cam] = frame_at(videos, cam, s)
+            continue
+        for cam in (a, b):
+            files = sorted(glob.glob(os.path.join(out, "pick", f"{cam}_*.jpg")), key=os.path.getmtime)
+            if cam not in frames and files:
+                frames[cam] = cv2.imread(files[-1])
+    missing = sorted({c for ab in pairs for c in ab if frames.get(c) is None})
+    if missing:
+        print(f"[calib] {', '.join(missing)}: no picture - neither {os.path.join(out, 'pick')} (autocalib --pick) nor "
+              "--videos", flush=True)
+    return frames
+
+
+def overlay(cfg, out, pairs, frames, points=None, alpha=0.5):
+    """The floor mappings of barn.toml checked by eye: for each pair both ways, the other camera's picture laid
+    half-transparent over this one's (OUT/<a>_on_<b>.jpg) - the floor's lines, stalls and spots should line
+    up wherever the two see the same floor (cows' backs and walls are off the floor: they do not); the
+    clicked spots (points.json): a circle where clicked on this picture, a cross where the other picture's
+    click lands, a line between (its length in px). OUT/overlay.html: the same with an opacity slider."""
+    import cv2
+    by_id = {c["id"]: c for c in cfg["cameras"]}
+    os.makedirs(os.path.join(out, "overlay"), exist_ok=True)
+    clicks = {}
+    if points:
+        for key, pts in json.load(open(points, encoding="utf-8")).get("pairs", {}).items():
+            a, b = key.split(":")
+            P = np.array(pts, float).reshape(-1, 4)
+            clicks[(a, b)], clicks[(b, a)] = P, P[:, [2, 3, 0, 1]]
+    page, made = [], []
+    for a, b in pairs:
+        for base, top in ((a, b), (b, a)):
+            img_a, img_b = frames.get(base), frames.get(top)
+            if img_a is None or img_b is None:
+                print(f"[calib] {base}/{top}: no picture - skipped", flush=True)
+                continue
+            fa = camera_floor(by_id[base], img_a.shape[1] / img_a.shape[0])
+            fb = camera_floor(by_id[top], img_b.shape[1] / img_b.shape[0])
+            if fa is None or fb is None:
+                miss = [c for c, f in ((base, fa), (top, fb)) if f is None]
+                print(f"[calib] {base}/{top}: no floor_points for {', '.join(miss)} in the config - nothing to "
+                      "check (autocalib ... --points --apply writes them)", flush=True)
+                break
+            ha, wa = img_a.shape[:2]
+            warped, valid = other_onto(img_a, img_b, fa, fb)
+            share = float(valid.mean())
+            blend = np.where(valid[..., None], (img_a * (1 - alpha) + warped * alpha).astype(np.uint8), (img_a * 0.6).astype(np.uint8))
+            marks = np.zeros_like(img_a)
+            th = max(2, wa // 640)
+            for key, col in ((("mask",), (0, 220, 255)), (("tracking_mask",), (255, 160, 0))):
+                poly = by_id[top].get(key[0])
+                if poly and len(poly) >= 3:
+                    pts = _poly_onto([tuple(p) for p in poly], fa, fb, wa, ha)
+                    for p, q in zip(pts, pts[1:] + pts[:1]):
+                        if p and q and max(abs(p[0]), abs(q[0])) < 4 * wa and max(abs(p[1]), abs(q[1])) < 4 * ha:
+                            cv2.line(marks, tuple(map(int, p)), tuple(map(int, q)), col, th, cv2.LINE_AA)
+            errs = []
+            P = clicks.get((base, top))
+            if P is not None:
+                X, Y, ok_b = fb[0](P[:, 2], P[:, 3])
+                ua, va, ok_a = fa[1](X, Y)
+                for i, (p, x, y, o) in enumerate(zip(P, ua, va, ok_a & ok_b)):
+                    c = (int(p[0] * wa), int(p[1] * ha))
+                    cv2.circle(marks, c, 3 * th + 6, (60, 220, 60), th, cv2.LINE_AA)
+                    label = str(i + 1)
+                    if o and np.isfinite(x) and np.isfinite(y) and abs(x) < 4 and abs(y) < 4:
+                        d = (int(x * wa), int(y * ha))
+                        cv2.line(marks, c, d, (60, 60, 240), th, cv2.LINE_AA)
+                        cv2.drawMarker(marks, d, (60, 60, 240), cv2.MARKER_CROSS, 3 * th + 10, th)
+                        e = float(np.hypot(d[0] - c[0], d[1] - c[1]))
+                        errs.append(e)
+                        label += f" ({e:.0f} px)"
+                    cv2.putText(marks, label, (c[0] + 10, c[1] - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5 * th, (255, 255, 255),
+                                th, cv2.LINE_AA)
+            drawn = marks.any(-1, keepdims=True)
+            shown = np.where(drawn, marks, blend)
+            name = f"{top}_on_{base}"
+            note = (f"{top} over {base}: floor shared on {share:.0%} of {base}'s picture"
+                    + (f"; spots off by {np.median(errs):.0f} px (median)" if errs else ""))
+            cv2.rectangle(shown, (0, 0), (wa, 18 * th + 12), (0, 0, 0), -1)
+            cv2.putText(shown, note, (10, 14 * th + 4), cv2.FONT_HERSHEY_SIMPLEX, 0.55 * th, (255, 255, 255), th,
+                        cv2.LINE_AA)
+            cv2.imwrite(os.path.join(out, f"{name}.jpg"), shown, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            # for the page: this camera's picture, the other's warped onto it (transparent off the floor), marks
+            cv2.imwrite(os.path.join(out, "overlay", f"{name}_base.jpg"), img_a, [cv2.IMWRITE_JPEG_QUALITY, 90])
+            cv2.imwrite(os.path.join(out, "overlay", f"{name}_top.png"),
+                        np.dstack([warped, valid.astype(np.uint8) * 255]))
+            cv2.imwrite(os.path.join(out, "overlay", f"{name}_marks.png"),
+                        np.dstack([marks, drawn[..., 0].astype(np.uint8) * 255]))
+            page.append({"name": name, "note": note, "base": f"overlay/{name}_base.jpg",
+                         "top": f"overlay/{name}_top.png", "marks": f"overlay/{name}_marks.png"})
+            made.append(name)
+            print(f"[calib] {note} - {os.path.join(out, name + '.jpg')}", flush=True)
+    if not page:
+        sys.exit("[calib] nothing to overlay")
+    path = os.path.join(out, "overlay.html")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(OVERLAY.replace("__DATA__", json.dumps(page)))
+    print(f"[calib] {path}: open it in a browser - the slider moves from one camera's picture to the other's",
+          flush=True)
+    return made
+
+
+OVERLAY = """<!doctype html><html><head><meta charset="utf-8"><title>Floor overlay</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+body{font:14px system-ui,sans-serif;margin:16px;background:#111;color:#eee}
+h2{font-size:16px;margin:24px 0 6px}
+.v{position:relative;display:inline-block;max-width:100%}
+.v img{display:block;max-width:100%}
+.v img.top,.v img.marks{position:absolute;left:0;top:0;width:100%;height:100%}
+label{margin-right:16px}
+p{color:#aaa;max-width:70em}
+</style></head><body>
+<p>Each picture: one camera, the other camera's picture carried over the floor onto it (only where both see the
+floor). Where the mapping is right, the floor's lines, stalls, drinkers' feet and the clicked spots line up when
+the slider moves; cows' backs, walls and posts stand above the floor and never do. Circles: spots clicked on this
+picture; crosses: where the other picture's clicks land; yellow / blue: the other camera's mask / tracking_mask.</p>
+<div id="all"></div>
+<script>
+const data = __DATA__;
+const all = document.getElementById('all');
+for (const d of data) {
+  const h = document.createElement('h2'); h.textContent = d.note; all.appendChild(h);
+  const ctl = document.createElement('div');
+  ctl.innerHTML = '<label>other camera <input type="range" min="0" max="100" value="50"> <span>50%</span></label>' +
+                  '<label><input type="checkbox" checked> spots and masks</label>';
+  all.appendChild(ctl);
+  const v = document.createElement('div'); v.className = 'v';
+  v.innerHTML = `<img src="${d.base}"><img class="top" src="${d.top}"><img class="marks" src="${d.marks}">`;
+  all.appendChild(v);
+  const [r, c] = ctl.querySelectorAll('input'), s = ctl.querySelector('span');
+  const top = v.querySelector('.top'), marks = v.querySelector('.marks');
+  const set = () => { top.style.opacity = r.value / 100; s.textContent = r.value + '%'; };
+  r.addEventListener('input', set); set();
+  c.addEventListener('change', () => { marks.style.display = c.checked ? '' : 'none'; });
+}
+</script></body></html>"""
 
 
 def components(found):
@@ -1010,18 +1267,29 @@ def cow_spread(TA, TB, MA, MB, kA, kB, arA, arB, lag):
     return out
 
 
-def finish(args, cfg, found, T, videos, aspect):
-    """One floor plan per group of cameras that share floor (about cm), the link distance, the pictures,
-    calib.json and, with --apply, barn.toml."""
+def floor_plan(found, T, aspect, taken=()):
+    """The pairs found -> one floor plan per group of cameras that share floor (about cm, from the cows' box
+    sizes when T has them), each group placed clear of the others and of `taken` (x ranges [lo, hi] of the
+    plan other cameras already use) -> ({camera: floor_points, distortion, aspect}, link_dist, references)."""
     lens = {}
     for (a, b), r in found.items():
         lens.setdefault(a, r["kA"]), lens.setdefault(b, r["kB"])
-    plan, refs = {}, []
-    for g, (ref, to_ref) in enumerate(components(found)):
+    plan, refs, used = {}, [], [tuple(x) for x in taken]
+    for ref, to_ref in components(found):
         R = straighten(T.get(ref) or {}, lens[ref], aspect[ref])
-        shift = np.array([[1, 0, g * GROUP_APART], [0, 1, 0], [0, 0, 1.0]])
+        shift = 0.0
+        while True:                                           # the next free stretch of the plan
+            S = np.array([[1, 0, shift], [0, 1, 0], [0, 0, 1.0]])
+            xs = [apply_h(S @ R @ Hc, np.array([undistort(u, v, lens[c], aspect[c]) for u, v in
+                                                grid_points(((0.05, 0.3), (0.95, 0.95)))]))[:, 0]
+                  for c, Hc in to_ref.items()]
+            lo, hi = float(min(x.min() for x in xs)), float(max(x.max() for x in xs))
+            if not any(lo < b_ + GROUP_APART / 2 and a_ - GROUP_APART / 2 < hi for a_, b_ in used):
+                break
+            shift += GROUP_APART
         for cam, Hc in to_ref.items():
-            plan[cam] = shift @ R @ Hc
+            plan[cam] = S @ R @ Hc
+        used.append((lo, hi))
         refs.append(ref)
     spread = []
     for (a, b), r in found.items():
@@ -1040,6 +1308,13 @@ def finish(args, cfg, found, T, videos, aspect):
             q = apply_h(M, np.array([undistort(u, v, k, ar)]))[0]
             fp.append([round(float(u), 4), round(float(v), 4), round(float(q[0]), 1), round(float(q[1]), 1)])
         calib[cam] = {"floor_points": fp, "distortion": k, "aspect": round(ar, 4)}
+    return calib, link, refs
+
+
+def finish(args, cfg, found, T, videos, aspect):
+    """One floor plan per group of cameras that share floor (about cm), the link distance, the pictures,
+    calib.json and, with --apply, barn.toml."""
+    calib, link, refs = floor_plan(found, T, aspect)
     pics = []
     for (a, b), r in found.items():
         pic = draw(os.path.join(args.out, f"{a}_{b}.jpg"), videos, a, b, T.get(a) or {}, T.get(b) or {}, r["H"],

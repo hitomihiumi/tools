@@ -70,9 +70,12 @@ docker/data on your computer is /data here: the config, the recordings, everythi
   zones page --config /data/barn.toml --videos /data/rec --cameras cam1 cam2 cam3 cam4 --out /data/zones
                                  a still of every camera -> zones.html: draw masks / excluded zones
   zones apply --config /data/barn.toml --cameras /data/cameras.toml   the drawn zones into barn.toml
+  studio --config /data/barn.toml --videos /data/rec_fixed   (docker compose run --rm -p 8765:8765 herd ...)
+                                 zones, floor calibration and its check in one page, saved to barn.toml:
+                                 http://localhost:8765
   show-zone --config /data/barn.toml --camera cam1 --image /data/cam1.jpg   a camera's zone drawn
-  record --config /data/barn.toml --out /data/rec --minutes 60
-                                 every camera at once -> /data/rec/<camera>_<time>.mp4
+  record --config /data/barn.toml --out /data/rec --minutes 60 --fps 5
+                                 every camera at once -> /data/rec/<camera>_<time>.mkv (--fps: H.264 at that rate)
   fix-videos --videos /data/rec --out /data/rec_fixed
                                  damaged recordings (broken metadata, decoder errors) -> clean .mp4
   barn video --config /data/barn.toml --videos /data/rec --out /data/barn_video
@@ -88,6 +91,9 @@ docker/data on your computer is /data here: the config, the recordings, everythi
                                  cameras sharing floor calibrated by the cows moving in both ([mct] link)
   autocalib ... --pick           no cows walking: the same floor spots clicked on both pictures
                                  (calib/pick.html), then autocalib ... --points /data/calib/points.json
+  autocalib --config /data/barn.toml --out /data/calib --overlay
+                                 the calibration checked by eye: each camera's picture laid over the
+                                 other's through the floor (calib/overlay.html, a slider)
   check --config /data/barn.toml   the models on your labels: the detector on herd_det_barn_*.tgz, the
                                  identity model on herd_barn_ids_*.tgz (the newest in /data)
   run --config /data/barn.toml   the barn live (better: docker compose --profile live up -d barn)

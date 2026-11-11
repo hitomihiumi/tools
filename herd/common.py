@@ -33,15 +33,26 @@ STATES = ("lying", "standing", "feeding", "drinking", "ruminating", "idle")
 
 DEFAULTS = {
     "farm": {"timezone_offset_hours": 0, "migration_weekday": 1, "migration_hour": 10, "nightly_hour": 2},
-    "sampling": {"fps": 1.0, "burst_every_s": 60, "burst_seconds": 7.0, "burst_fps": 25.0,
+    # track_fps > fps: the detector and the tracker on frames between the seconds too (a walking cow keeps
+    # her track); what is written stays once a second
+    "sampling": {"fps": 1.0, "track_fps": 1.0, "burst_every_s": 60, "burst_seconds": 7.0, "burst_fps": 25.0,
                  "burst_detect_fps": 5.0, "frame_width": 1920},   # Full HD: far cows keep their pixels
     "model": {"checkpoint": "", "encoder": "facebook/dinov2-small", "crop": 224, "grid": 2, "rumination": "",
               "identity": ""},
     "detector": {"weights": "", "threshold": None, "tiles": None},   # None: as the detector was trained
     # still_*: a cow lost is waited for still_s at the same place, still_long_s when she had not moved for
     # still_for_s before (as [mct])
+    # kalman: a track's box is matched where its speed puts it now (common.BoxKalman), not where it was last.
+    # low_score > 0 (under [detector] threshold): ByteTrack's second round - boxes the detector is unsure of
+    # (low_score <= score < threshold) only continue a track the camera had a moment ago (IoU low_iou with
+    # where it is expected), or a cow lying still at her place; they never start a track (mct_sim.py --detector)
+    # inside_low > 0 (e.g. 0.8): a box at least that much inside a bigger box of the same frame is taken as unsure
+    # too - a piece of a cow (her head, her back half) where standing cows crowd, which started tracks of its own
+    # and took her neighbours' (the barn's cam1, a row of cows at the fence: a labelled cow on her own track
+    # 42% -> 60% of the time); a cow half hidden behind another keeps the track that expects her
     "tracker": {"iou": 0.3, "max_age_s": 5, "still_s": 60.0, "still_long_s": 300.0, "still_iou": 0.5,
-                "still_contain": 0.8, "still_for_s": 30.0, "still_moved": 0.3},
+                "still_contain": 0.8, "still_for_s": 30.0, "still_moved": 0.3,
+                "kalman": False, "low_score": 0.0, "low_iou": 0.5, "inside_low": 0.0},
     "identity": {"prototypes_per_cow": 6, "history_days": 7, "max_error": 0.01,
                  "new_cow_similarity": 0.55, "new_cow_min_bursts": 20, "retire_after_hours": 48,
                  # the herd's size (0: no limit): at it, no new ids are made - unknown bursts wait in the pool
@@ -56,7 +67,10 @@ DEFAULTS = {
                  "cannot_link_min_s": 5, "cannot_link_max_iou": 0.3,
                  # tracks two cameras count (their masks, which share no floor) at the same second this many
                  # seconds: two cows (0: off - when masks were drawn overlapping)
-                 "counted_apart_s": 10},
+                 "counted_apart_s": 10,
+                 # a confirmed burst's crop kept as the cow's face per camera, one each face_every_s, the last
+                 # face_keep (gallery/faces/): what a person compares in herd.py merges page
+                 "face_every_s": 600.0, "face_keep": 6},
     "lameness": {"enabled": False},
     "alerts": {"baseline_days": 7, "min_baseline_days": 3, "min_observed_minutes": 120,
                "mad_z": 3.0, "rumination_drop": 0.20, "lying_directions": ["low", "high"],
@@ -109,12 +123,104 @@ DEFAULTS = {
             # MmCows with the identity model (frame-against-frame, calibrated): link_dist 160 against 120 -
             # IDF1 over all cameras 0.496 -> 0.540, purity 72 -> 77%, wrong joins 2095 -> 1682
             "link_dist": 160.0, "link_min_s": 5, "link_share": 0.6,
+            # link_vote > 0: by vote instead of link_share - a pair is joined once its seconds together are
+            # link_vote times those of either track with any other (and at least link_min_s, and link_vote_share
+            # of the seconds both were seen): an imperfect floor mapping (the barn's cam1/cam2, right in ~70% of
+            # the seconds) still puts the right pair together most often (crosscam: ~95% of cows), never 60%
+            "link_vote": 0.0, "link_vote_share": 0.15,
+            # link_look_cm > 0: the look counts too - two cows' floor distance plus link_look_cm times their
+            # frame ids' cosine distance (1 - cos): place, then look, in one number (0: place alone)
+            "link_look_cm": 0.0,
+            # link_rule "llr" (mct_sim.py): instead of counting seconds near, each second both are seen adds the
+            # log-likelihood that two tracks are one cow from their floor distance - one cow's two points
+            # link_sigma apart (0: link_dist / 2.5), link_wrong of the seconds anywhere; two cows anywhere within
+            # link_spread (0: 4 x link_dist) - a near second counts for, a far one against; joined at link_llr
+            # when the two cameras' tracks matched one to one (best assignment) keep the pair and forbidding it
+            # costs link_llr_margin - on the evidence fading with link_window_s (s: a cow's new track is not
+            # outweighed by her neighbour's hours; the night's cow_merges takes the whole sums).
+            # link_learn_offset: the floor's bend between two cameras learnt from the pairs joined (median per
+            # link_offset_cell, 0: 2 x link_dist; the whole pair's while a cell has under link_offset_min)
+            "link_rule": "near", "link_sigma": 0.0, "link_wrong": 0.3, "link_spread": 0.0, "link_llr": 40.0,
+            "link_llr_margin": 20.0, "link_window_s": 120.0, "link_learn_offset": False, "link_offset_cell": 0.0,
+            "link_offset_min": 30,
+            # link_px > 0 (e.g. 8): each floor point its own uncertainty - link_px pixels (of a 1920 x 1080 frame)
+            # plus link_px_sigma of the box's size in the picture, through the floor mapping's derivative there
+            # (cm near the camera, metres far along its view), plus link_sigma's (then smaller: the calibration's
+            # floor, e.g. 30); pairs compared by Mahalanobis distance. link_learn_spread: per link_offset_cell the
+            # joined pairs' own spread and shift, once link_offset_min of them
+            "link_px": 0.0, "link_px_sigma": 0.0, "link_learn_spread": False,
+            # with link_rule "llr", nightly: one cow under two names (each camera's gallery naming her side) made
+            # one when the evidence of all their tracks together reaches cow_merge_llr, cow_merge_margin ahead of
+            # every rival (pipeline.merge_by_place, mct.cow_merges; 0: off)
+            "cow_merge_llr": 200.0, "cow_merge_margin": 100.0,
+            # below that, down to cow_review_llr / cow_review_margin: a person is asked (herd.py merges page)
+            "cow_review_llr": 60.0, "cow_review_margin": 30.0,
+            # link mode, neighbours with no floor mapping (a narrow strip along a fence): a cow one camera sees
+            # beyond its mask (tracking_mask) joined to the other's counted cow by look - mean cos of frame
+            # ids over look_min_s s at least look_min_sim, look_margin above the next cow
+            # (barn, 8 min: 0.5 / 0.05 / 10 s joined two different cows - the identity model alone is weak)
+            "look_min_s": 30, "look_min_sim": 0.6, "look_margin": 0.1,
+            # a joined cow counted by two cameras at once (each in its own mask) for unlink_s s: two cows -
+            # the later track is taken out of the join (barn: a join by look whose cam4 track went on to
+            # another cow, counted on both cameras 372 s)
+            "unlink_s": 10,
             # strict joining (off at 0): the next cow link_margin further; no join of two groups holding
             # tracks seen together link_contra_s seconds but near in less than link_contra of them
             # MmCows: link_margin 50 halved the wrong joins (2330 -> 1309) at the same IDF1 (0.498);
             # link_contra barely helped and with the margin cost IDF1 - off
             "link_margin": 50.0, "link_contra_s": 10, "link_contra": 0.0,
-            "body_height_lying": 55.0, "body_height_standing": 90.0},
+            # link_rule "llr", link_strayed > 0: a join refused only because the other group holds a track of the
+            # same camera that lived beside the newcomer - and that track's recent evidence with its group's other
+            # cameras is under -link_strayed (it went on with another cow: a swap) - takes that track out of its
+            # group, and the newcomer in (else one swap kept a cow apart for good). The barn's three trials of
+            # 23 Oct relinked: IDF1 +1.3-2.0, a cow on both cameras under one name 54-62% -> 59-70% (at 10;
+            # 20 alike, 40 worse); mct_sim 0.683 -> 0.688. 0: off
+            "link_strayed": 10.0,
+            # link_rival (llr, > 0): ... or whose evidence with its group's other cameras, summed over their lives, is
+            # link_rival under the newcomer's (and a second together at least half as good as the newcomer's): a join
+            # made early that the evidence since turned against (the barn's cows 6 and 9 crossed for 10 minutes:
+            # -33 against 1518 and 1389), a short track gone off with another cow. The barn's four trials of 23 Oct
+            # relinked: IDF1 67.8 -> 68.2, 72.5 -> 74.0, 73.1 -> 77.7, 71.9 -> 76.1%; mct_sim IDF1 alike
+            # (0.688 -> 0.692), a cow on both cameras one track 73 -> 79%, but two cows on one track 386 -> 553
+            # seconds: check it on a recording of your own. 0: off
+            "link_rival": 200.0,
+            # link_overlap_s (llr): two tracks of one camera alive at the same time for at most this long, the one begun
+            # first ended (gone 10 s) before the other: a handing over, one cow - her box split from a neighbour's, her
+            # old track lingering on the rest a moment (the barn's cow 19: 31 s, then her cameras apart for good).
+            # Any group holding two tracks of one camera seen together is taken apart (the weaker one leaves). The
+            # barn's four trials relinked: IDF1 68.2 / 74.0 / 77.7 -> 79.1 / 77.5 -> 78.9% (120 alike). 0: off
+            "link_overlap_s": 60.0,
+            # link_cross_* (llr): a joined track chooses its box with its other camera's word - where its joined track
+            # there sees the cow now (the pair's own offset over the last minute taken off), in sigmas of
+            # link_cross_sigma (0: link_sigma, else link_dist / 2.5). link_cross_w: a bonus of up to it for a box right
+            # there; link_cross_confirm: a box taken other than by overlap (at her place when lost - still_s - taken
+            # back, an unsure box) only if her other camera sees her within that many sigmas, and no box another
+            # joined cow's other camera says is hers; link_cross_veto (0: off): no box at all farther. The barn's
+            # 19 Oct: three cows side by side swapped tracks on cam2 (one walked in front of another) while cam1 saw
+            # each where she was - played again, none swapped; a cow on her own track cam2 88 -> 92%, cam1 of 23 Oct
+            # 56 -> 68%, a cow on both cameras in her one group 66 -> 68% / 51 -> 59%. The veto lost on 23 Oct
+            # (cameras' floors farther apart there): off
+            "link_cross_w": 0.2, "link_cross_confirm": 2.0, "link_cross_veto": 0.0, "link_cross_sigma": 0.0,
+            # walker_size (with [tracker] kalman): a track still for still_for_s, its box one size the last minute
+            # (within walker_stable), whose box this second is walker_size taller or shorter, while a track lost
+            # walker_s ago at most was walking (walker_speed box heights a second) and its speed puts it on that box
+            # better than the still cow's own place, at a size nearer its own: the box goes back to the walker, the
+            # still track waits at its cow's place (still_s, still_long_s). 23 Oct replayed: cow 13 on her own track
+            # 20 -> 39 of 42 moments, cow 23 6 -> 22 of 43; nothing else changed, 19 Oct unchanged. 0: off
+            "walker_size": 0.2, "walker_s": 5.0, "walker_speed": 0.15, "walker_stable": 0.05,
+            # count_holes (link): a cow outside her camera's mask that no camera counts where she is - two masks'
+            # edges, drawn on two pictures, that do not meet on the floor - is counted by the camera tracking her:
+            # joined to the other camera's track, by the one whose box of her is bigger when both are outside their
+            # masks; not joined, when the other camera has no box within count_dist of her in its mask (0: 2.5 x
+            # link_dist - her two points may lie 2-3 m apart where both cameras see far). Floor only her camera
+            # tracks, left out of its mask, stays uncounted. 23 Oct replayed with the barn's masks: your cows counted
+            # by exactly one camera 66 -> 78% (by none 286 -> 169 of 859 cow-moments, by both 2 -> 23)
+            "count_holes": True, "count_dist": 0.0, "count_cell": 100.0,
+            "body_height_lying": 55.0, "body_height_standing": 90.0,
+            # the cameras' clocks from cows walking on two of them (TrackletLinker.clocks; said at the end of a run):
+            # the shift of one's floor path, within lag_max_s, that lays it best on the other's over lag_window_s.
+            # A camera's own [[cameras]] time_offset_s (s, default 0) moves its frames by it
+            "lag_window_s": 20.0, "lag_max_s": 3.0},
     "cameras": [],
 }
 
@@ -142,6 +248,53 @@ def load_config(path=None):
 
 
 # ---------------------------------------------------------------- geometry
+
+class BoxKalman:
+    """A box's centre and size and how fast they change (the constant-velocity filter of SORT / ByteTrack, frame
+    units): where a walking cow's box will be at the next frame, so a cow that moved more than her box in a
+    second is still matched. The noise scales with the box's height; a lying cow's speed stays ~0. Tuned for a
+    frame a second, not ByteTrack's 30: a cow's speed may change by a good part of her box from one to the next."""
+
+    W_POS, W_VEL = 1 / 20, 1 / 5
+
+    def __init__(self, box, ts):
+        import numpy as np
+        cx, cy, w, h = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2, box[2] - box[0], box[3] - box[1]
+        self.x = np.array([cx, cy, w, h, 0.0, 0.0, 0.0, 0.0])
+        p, v = 2 * self.W_POS * h, 2 * self.W_VEL * h
+        self.P = np.diag(np.square([p, p, p, p, v, v, v, v]))
+        self.t = ts
+
+    def _step(self, ts):
+        import numpy as np
+        dt = max(0.0, ts - self.t)
+        F = np.eye(8)
+        F[:4, 4:] = dt * np.eye(4)
+        h = max(self.x[3], 1e-3)
+        q = np.square([self.W_POS * h] * 4 + [self.W_VEL * h] * 4) * max(dt, 1e-3)
+        return F @ self.x, F @ self.P @ F.T + np.diag(q)
+
+    @staticmethod
+    def _box(x):
+        w, h = max(x[2], 1e-4), max(x[3], 1e-4)
+        return [x[0] - w / 2, x[1] - h / 2, x[0] + w / 2, x[1] + h / 2]
+
+    def predict(self, ts):
+        """The box expected at ts (the filter itself unchanged)."""
+        return self._box(self._step(ts)[0])
+
+    def update(self, ts, box):
+        import numpy as np
+        x, P = self._step(ts)
+        z = np.array([(box[0] + box[2]) / 2, (box[1] + box[3]) / 2, box[2] - box[0], box[3] - box[1]])
+        H = np.eye(4, 8)
+        R = np.diag(np.square([self.W_POS * max(z[3], 1e-3)] * 4))
+        S = H @ P @ H.T + R
+        K = P @ H.T @ np.linalg.inv(S)
+        self.x = x + K @ (z - H @ x)
+        self.P = (np.eye(8) - K @ H) @ P
+        self.t = ts
+
 
 def iou(a, b):
     iw = max(0.0, min(a[2], b[2]) - max(a[0], b[0]))
@@ -251,7 +404,9 @@ def floor_mapper(cam, mct):
     back to the plane at the cow's body height - body_height_lying / _standing, mixed by p(lying) -
     since a lying cow's centre is much lower than a standing one's. floor_points [[u, v, X, Y], ...]
     (>= 4, u v in 0-1 of the frame, X Y measured on the floor): a floor homography, applied to the
-    box's bottom centre (where a cow touches the floor, as seen from above-and-aside)."""
+    box's bottom centre (where a cow touches the floor, as seen from above-and-aside) - or, with
+    floor_at = "centre", to the box's centre (herd.py crosscam: two cameras facing each other see a cow's
+    two sides, whose bottoms lie apart; their centres agree better)."""
     import numpy as np
     if cam.get("proj_mat"):
         P = np.asarray(cam["proj_mat"], float).reshape(3, 4)
@@ -269,9 +424,10 @@ def floor_mapper(cam, mct):
         k, ar = cam.get("distortion") or 0.0, cam.get("aspect") or 16 / 9      # herd.py autocalib writes both
         und = (lambda u, v: undistort(u, v, k, ar)) if k else (lambda u, v: (u, v))
         Hinv = homography([und(u, v) for u, v, _, _ in pts], [(x, y) for _, _, x, y in pts])
+        at = 1.0 if cam.get("floor_at", "bottom") == "bottom" else 0.5      # how far down the box
 
         def g(box, p_lying=0.5):
-            q = Hinv @ np.array([*und((box[0] + box[2]) / 2, box[3]), 1.0])
+            q = Hinv @ np.array([*und((box[0] + box[2]) / 2, box[1] + at * (box[3] - box[1])), 1.0])
             return (float(q[0] / q[2]), float(q[1] / q[2]))
         return g
     return None
