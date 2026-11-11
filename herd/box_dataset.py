@@ -743,7 +743,9 @@ this camera's frames, forwards and backwards, as long as the cow's box clearly c
 a typed id is never overwritten, and fixing a blue one makes it typed). <b>What she does</b> (to check and teach posture and
 activity): select a box, <kbd>1</kbd> standing, <kbd>2</kbd> lying; <kbd>3</kbd> feeding, <kbd>4</kbd> drinking, <kbd>5</kbd>
 neither, <kbd>6</kbd> ruminating (chewing the cud); <kbd>0</kbd> clears both; <kbd>C</kbd> takes them, for each box with a
-cow id, from her box on the other cameras' frames of the same moment (within 2 s; only what is missing, never over yours) - once a box has both the next box missing one is selected. <kbd>P</kbd> also takes posture
+cow id, from her box on the other cameras' frames of the same moment (within 2 s; only what is missing, never over yours);
+what you set on a box with a cow id is set on her other cameras' boxes of that moment too, over what they had ("set on her
+other cameras too") - once a box has both the next box missing one is selected. <kbd>P</kbd> also takes posture
 and activity from the frame before for boxes in the same place (check them).</p>
 <div class="bar">
 <button id="prev">&larr;</button><span id="pos"></span><button id="next">&rarr;</button>
@@ -768,6 +770,7 @@ and activity from the frame before for boxes in the same place (check them).</p>
 <button id="attclear" title="0">clear <kbd>0</kbd></button>
 <button id="attcams" title="for boxes with a cow id: her posture / activity from the other cameras' frames of the same moment (C)">from other cameras (C)</button>
 <button id="attcamsall" title="the same on every frame">... on all frames</button>
+<label title="a posture / activity you set goes to this cow (same id) on the other cameras' frames of the same moment (within 2 s), over what they had"><input type="checkbox" id="attsync" checked> set on her other cameras too</label>
 <span class="mute">select a box first; pressed again, a choice is taken back</span></div>
 <datalist id="ids"></datalist>
 <div class="bar"><span id="info"></span><span id="status"></span><span class="mute" id="stat"></span></div>
@@ -898,11 +901,31 @@ function setAtt(k, v) {            // k: posture | activity; v: a value, or "" t
   boxes[sel] = pack(boxes[sel], idOf(boxes[sel]), autoOf(boxes[sel]), a);
   edited();
   const now = attOf(boxes[sel]) || {};
+  const synced = $("attsync").checked ? syncOtherCams(idOf(boxes[sel]), k ? [k] : ["posture", "activity"], now) : 0;
+  if (synced) $("info").textContent = `${frame().cam}  ${frame().time}  - set on her other cameras too: ${synced} box(es)`;
   if (k && now.posture && now.activity && !(was.posture && was.activity)) {   // this one done: the next missing one
     const order_ = boxes.map((b, i) => [i, b]).sort((p, q) => p[1][0] - q[1][0]);
     const nx = order_.find(([i, b]) => i !== sel && !((attOf(b) || {}).posture && (attOf(b) || {}).activity));
     if (nx) { sel = nx[0]; draw(); }
   }
+}
+function syncOtherCams(id, keys, now) {   // this cow (id) on the other cameras' frames of this moment: keys as here
+  const f = frame(); if (!f || !id) return 0;
+  let n = 0;
+  DATA.frames.filter(g => g.cam !== f.cam && Math.abs(g.ts - f.ts) <= 2 && labels[g.file]).forEach(g => {
+    let changed = false;
+    const bs = (labels[g.file].boxes || []).map(b => {
+      if (idOf(b) !== id) return b;
+      const a = Object.assign({}, attOf(b) || {}), was = JSON.stringify(a);
+      keys.forEach(k => { if (now[k]) a[k] = now[k]; else delete a[k]; });
+      if (JSON.stringify(a) === was) return b;
+      changed = true; n++;
+      return pack(b, idOf(b), autoOf(b), a);
+    });
+    if (changed) labels[g.file] = Object.assign({}, labels[g.file], {boxes: bs.map(rnd)});
+  });
+  if (n) store();
+  return n;
 }
 function knownIds() {
   const n = {};
