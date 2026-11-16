@@ -408,17 +408,22 @@ def floor_mapper(cam, mct):
     (>= 4, u v in 0-1 of the frame, X Y measured on the floor): a floor homography, applied to the
     box's bottom centre (where a cow touches the floor, as seen from above-and-aside) - or, with
     floor_at = "centre", to the box's centre (herd.py crosscam: two cameras facing each other see a cow's
-    two sides, whose bottoms lie apart; their centres agree better)."""
+    two sides, whose bottoms lie apart; their centres agree better).
+    A proj_mat with `distortion` (herd.py's corner-camera fit) maps onto the straightened frame: the box centre
+    is straightened first (undistort, the frame's `aspect`), as floor_points' are."""
     import numpy as np
     if cam.get("proj_mat"):
         P = np.asarray(cam["proj_mat"], float).reshape(3, 4)
         w, h = cam.get("proj_size") or (1.0, 1.0)
         lo, hi = mct["body_height_lying"], mct["body_height_standing"]
+        k, ar = cam.get("distortion") or 0.0, cam.get("aspect") or 16 / 9
+        und = (lambda u, v: undistort(u, v, k, ar)) if k else (lambda u, v: (u, v))
 
         def f(box, p_lying=0.5):
             z = p_lying * lo + (1 - p_lying) * hi
             H = np.stack([P[:, 0], P[:, 1], P[:, 2] * z + P[:, 3]], 1)
-            q = np.linalg.solve(H, [(box[0] + box[2]) / 2 * w, (box[1] + box[3]) / 2 * h, 1.0])
+            u, v = und((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+            q = np.linalg.solve(H, [u * w, v * h, 1.0])
             return (float(q[0] / q[2]), float(q[1] / q[2]))
         return f
     pts = cam.get("floor_points")
