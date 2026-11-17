@@ -178,7 +178,10 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         if lab.get("status") != "done" or not f or f["cam"] not in cams:
             continue
         cam = f["cam"]
-        f = dict(f, ts=f["ts"] + shift + float(cams[cam].get("time_offset_s") or 0.0))   # the run's clock for it
+        # your frames of one moment carry one file time on every camera; a camera's time_offset_s moves only where its
+        # boxes are looked up in this run (the run's clock) - the moments of two cameras are still paired by file time
+        at = f["ts"] + shift
+        f = dict(f, ts=at + float(cams[cam].get("time_offset_s") or 0.0))   # the run's clock for it
         named = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
                  and str(b[4]).strip().lower() != "x"]
         rows = store.query("SELECT track, ts, x1, y1, x2, y2, posture, activity FROM seconds WHERE cam = ? AND ts "
@@ -218,7 +221,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
                  or (in_zone(t[0], cams[cam], w_, h_, tracking=True) and any(iou(t[0], q[0]) >= max(min_iou, 0.5) for q in pred))]
         for t in named:                            # who counts each of your cows: none of the cameras?
             if in_zone(t[0], cams[cam], w_, h_, tracking=True):
-                counted_by[(t[1], f["ts"])].append(any(iou(t[0], q[0]) >= min_iou for q in pred))
+                counted_by[(t[1], at)].append(any(iou(t[0], q[0]) >= min_iou for q in pred))
         view.append({"cam": cam, "ts": f["ts"], "file": file, "w": f.get("w", 1920), "h": f.get("h", 1080),
                      "mine": [[*map(float, b), i, (b, i) in truth] for b, i in named],   # [.., scored: in its mask]
                      "its": [[*map(float, r[2:6]), tm.get(r[0]), r[0], roots.get(r[0], r[0])] for r in rows if r[1] == sec],
@@ -229,11 +232,11 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         n[(cam, "found")] += len(hit)
         n[(cam, "found_with_a_cow")] += sum(1 for _, j in hit if pred[j][1])
         for i, j in hit:
-            seen_track[truth[i][1]].append((cam, f["ts"], pred[j][2], pred[j][1]))
+            seen_track[truth[i][1]].append((cam, at, pred[j][2], pred[j][1]))
             if pred[j][1]:
                 co[(truth[i][1], pred[j][1])] += 1
                 cam_co[cam][(truth[i][1], pred[j][1])] += 1
-                seen_as[truth[i][1]].append((cam, f["ts"], pred[j][1]))
+                seen_as[truth[i][1]].append((cam, at, pred[j][1]))
     allc = sorted({c for c, _ in n})
     tot = lambda what: sum(n[(c, what)] for c in allc)
     out = {"all": idf1(co, tot("your_boxes"), tot("its_named_boxes")), "cameras": {}}

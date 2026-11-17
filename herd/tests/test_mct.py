@@ -2020,6 +2020,35 @@ def test_trial_scores_a_cow_counted_outside_the_mask_and_says_who_counted_none()
         assert sc["counted_by_none"] == {"moments": 9, "none": 3, "cows": {"9": 3}}
 
 
+def test_trial_pairs_two_cameras_frames_by_their_file_time_whatever_the_time_offset():
+    """A camera with time_offset_s 2.8: its boxes are looked up 2.8 s later in the run, but your frames of one moment
+    (one file time on both cameras) are still one moment of the cow on two cameras."""
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        st = os.path.join(d, "s.sqlite")
+        s = Store(st)
+        s.seconds([("cam1", "a", float(t), 0.1, 0.4, 0.3, 0.6, "standing", "none", 0.1) for t in range(100, 116)] +
+                  [("cam2", "b", float(t), 0.5, 0.4, 0.7, 0.6, "standing", "none", 0.1) for t in range(100, 116)])
+        for cam, tr in (("cam1", "a"), ("cam2", "b")):
+            for k in range(3):
+                s.burst((cam, tr, 101.0 + k, "confirmed", "P1", 0.9, 0.2, 0.9, 0.1, "standing", "none", None, 0.5, 100))
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"{c}/{t}.jpg", "cam": c, "ts": float(t), "w": 1920, "h": 1080}
+                  for c in ("cam1", "cam2") for t in (100, 105, 110)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        box = {"cam1": [0.1, 0.4, 0.3, 0.6, "4"], "cam2": [0.5, 0.4, 0.7, 0.6, "4"]}
+        labels = os.path.join(d, "labels.json")
+        json.dump({"frames": {f["file"]: {"boxes": [box[f["cam"]]], "status": "done"} for f in frames}}, open(labels, "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1"}, {"id": "cam2", "time_offset_s": 2.8}]
+        sc = trial.score(st, cfg, boxes, labels)
+        assert sc["all"]["found_with_a_cow"] == 6
+        assert sc["cross_camera"]["moments"] == 3 and sc["cross_camera"]["moments_same_cow"] == 3
+        assert sc["cross_camera_moments"]["moments"] == 3 and sc["cross_camera_moments"]["same_cow"] == 3
+
+
 def test_trial_scores_the_posture_and_activity_you_gave_boxes():
     """The box page's posture / activity (a box's 7th field, with or without a cow id) against what the camera wrote
     at that second: right of found, the confusion, per camera; a box of yours it did not find is said apart."""
