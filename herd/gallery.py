@@ -249,11 +249,16 @@ class Gallery:
                 self.cows[c]["prototypes"] = spherical_kmeans(X, k).astype(np.float32)
         self.pool = [p for p in self.pool if p["ts"] >= keep_after]
 
-    def enroll(self, now, cannot_link=None):
+    def enroll(self, now, cannot_link=None, together=None):
         """Group the unknown pool into new cows. Bursts of one track are one cow, so tracks are grouped:
         average-linkage agglomeration of their mean fingerprints, where two groups never merge if any
         track of one was seen at the same time as any track of the other (cannot_link: two cows). The
-        groups seen often enough become cows - unless the herd is full (max_cows), then they wait."""
+        groups seen often enough become cows - unless the herd is full (max_cows), then they wait.
+
+        together: pairs of tracks of one cow whatever they look like - two cameras' tracks joined by where she
+        stood ([mct] link: store.track_roots). They are grouped first, unless that would put two tracks seen at
+        once by one camera together: cameras in the pen's corners see a cow's head, side and tail, and by look
+        alone each side became a cow of its own (13 cows -> 33 groups, max_cows keeping some cows twice)."""
         if not self.pool:
             return []
         cannot_link = cannot_link or set()
@@ -273,6 +278,26 @@ class Gallery:
                 if (min(ta, tb), max(ta, tb)) in cannot_link:
                     apart[a, b] = apart[b, a] = True
         members = {k: [k] for k in range(n)}
+
+        def join(a, b):                                     # cluster b into cluster a
+            members[a] += members.pop(b)
+            sim_sum[a, :] += sim_sum[b, :]
+            sim_sum[:, a] += sim_sum[:, b]
+            size[a] += size[b]
+            apart[a, :] |= apart[b, :]
+            apart[:, a] |= apart[:, b]
+        if together:                                        # one cow by where she stood: first
+            at = {u[0]: k for k, u in enumerate(units)}
+            home = list(range(n))                           # unit -> its cluster
+            for ta, tb in together:
+                if ta not in at or tb not in at:
+                    continue
+                a, b = home[at[ta]], home[at[tb]]
+                if a == b or apart[a, b]:
+                    continue
+                a, b = min(a, b), max(a, b)
+                join(a, b)
+                home = [a if h == b else h for h in home]
         thr = self.cfg["new_cow_similarity"]
         while len(members) > 1:
             keys = list(members)
@@ -286,13 +311,7 @@ class Gallery:
                         best, pair = v, (a, b)
             if pair is None:
                 break
-            a, b = pair                                     # b into a
-            members[a] += members.pop(b)
-            sim_sum[a, :] += sim_sum[b, :]
-            sim_sum[:, a] += sim_sum[:, b]
-            size[a] += size[b]
-            apart[a, :] |= apart[b, :]
-            apart[:, a] |= apart[:, b]
+            join(*pair)
         groups = sorted(members.values(), key=lambda m: -sum(len(units[k][2]) for k in m))
         day = dt.datetime.fromtimestamp(now, dt.timezone.utc).strftime("%Y%m%d")
         made = []
@@ -329,11 +348,11 @@ class Gallery:
         self.history[into] = sorted(self.history.get(into, []) + self.history.pop(old, []), key=lambda h: h[0])
         return True
 
-    def nightly(self, now, cannot_link=None):
-        """retire -> rebuild -> enroll; returns what changed, for the log."""
+    def nightly(self, now, cannot_link=None, together=None):
+        """retire -> rebuild -> enroll (together: tracks joined across cameras, one cow); returns what changed."""
         gone = self.retire(now)
         self.rebuild(now)
-        made = self.enroll(now, cannot_link)
+        made = self.enroll(now, cannot_link, together)
         self.save()
         return {"retired": gone, "enrolled": made, "held_back_herd_full": getattr(self, "held_back", 0),
                 "cows": len(self.cows), "pool": len(self.pool)}

@@ -1101,7 +1101,8 @@ def main(argv=None):
     apply_thresholds(first, getattr(models, "id_thresholds", {}) or {}, DEFAULTS, None)
     g = gallery_mod.Gallery(folder, first, abstain)
     last = max(ts for _, _, ts in recs) + 3600
-    res = g.nightly(last, Store(os.path.join(out, "pass1", "herd.sqlite")).cannot_link_pairs())
+    s1 = Store(os.path.join(out, "pass1", "herd.sqlite"))
+    res = g.nightly(last, s1.cannot_link_pairs(), together=list(s1.track_roots().items()))   # joined: one cow
     print(f"[trial] the night: {len(res['enrolled'])} cows enrolled ({res['pool']} bursts left unknown"
           + (f"; {res['held_back_herd_full']} more held back: max_cows reached" if res.get("held_back_herd_full") else "")
           + ")", flush=True)

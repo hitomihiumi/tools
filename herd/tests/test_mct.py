@@ -85,6 +85,32 @@ def test_enroll_never_merges_cows_seen_together():
         assert sizes == [6, 12]
 
 
+def test_enroll_makes_one_cow_of_tracks_joined_across_cameras():
+    """A cow's head on one camera and her tail on another look nothing alike: by look two cows, but the two
+    cameras' tracks joined by where she stood are one cow - unless one camera saw both tracks at once."""
+    rng = np.random.default_rng(3)
+    head, tail, other = (_unit(rng.normal(size=32)) for _ in range(3))
+    with tempfile.TemporaryDirectory() as d:
+        def pool(gal):
+            for k in range(6):
+                gal.pool.append({"ts": k, "track": "cam1-a", "fp": _near(head, rng, 0.02)})
+                gal.pool.append({"ts": k, "track": "cam3-b", "fp": _near(tail, rng, 0.02)})
+                gal.pool.append({"ts": k, "track": "cam1-c", "fp": _near(other, rng, 0.02)})
+        gal = _gallery(d, {}, new_cow_min_bursts=4)
+        pool(gal)
+        assert len(gal.enroll(100.0)) == 3                                     # by look alone: three cows
+        gal = _gallery(os.path.join(d, "2"), {}, new_cow_min_bursts=4, max_cows=2)
+        pool(gal)
+        made = gal.enroll(100.0, together=[("cam3-b", "cam1-a")])
+        assert len(made) == 2 and sorted(len(gal.history[c]) for c in made) == [6, 12]   # head and tail one cow
+        # a join of two tracks one camera saw at once is not taken: two cows
+        gal = _gallery(os.path.join(d, "3"), {}, new_cow_min_bursts=4)
+        pool(gal)
+        made = gal.enroll(100.0, cannot_link={("cam1-a", "cam1-c")},
+                          together=[("cam1-a", "cam3-b"), ("cam1-c", "cam3-b")])
+        assert sorted(len(gal.history[c]) for c in made) == [6, 12]
+
+
 def test_enroll_holds_back_when_the_herd_is_full():
     rng = np.random.default_rng(2)
     with tempfile.TemporaryDirectory() as d:
