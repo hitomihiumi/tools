@@ -70,6 +70,10 @@ DEFAULTS = {
                  # tracks two cameras count (their masks, which share no floor) at the same second this many
                  # seconds: two cows (0: off - when masks were drawn overlapping)
                  "counted_apart_s": 10,
+                 # the night's new cows: tracks the linker joined across cameras grouped as one cow first. Off: on
+                 # the 09 Nov barn (4 corner cameras, place joins ~half of them two neighbours) it mixed cows
+                 # (second half IDF1 60 -> 51)
+                 "enroll_joined": False,
                  # a confirmed burst's crop kept as the cow's face per camera, one each face_every_s, the last
                  # face_keep (gallery/faces/): what a person compares in herd.py merges page
                  "face_every_s": 600.0, "face_keep": 6},

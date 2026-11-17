@@ -1102,7 +1102,8 @@ def main(argv=None):
     g = gallery_mod.Gallery(folder, first, abstain)
     last = max(ts for _, _, ts in recs) + 3600
     s1 = Store(os.path.join(out, "pass1", "herd.sqlite"))
-    res = g.nightly(last, s1.cannot_link_pairs(), together=list(s1.track_roots().items()))   # joined: one cow
+    together = list(s1.track_roots().items()) if first["identity"].get("enroll_joined") else None
+    res = g.nightly(last, s1.cannot_link_pairs(), together=together)
     print(f"[trial] the night: {len(res['enrolled'])} cows enrolled ({res['pool']} bursts left unknown"
           + (f"; {res['held_back_herd_full']} more held back: max_cows reached" if res.get("held_back_herd_full") else "")
           + ")", flush=True)

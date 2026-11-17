@@ -881,7 +881,8 @@ class SharedGallery:
             self.store.event(ts, "change-over", "weekly cow change-over started")
         if ts >= self.next_nightly:
             merged = merge_by_place(self.g, self.store, self.cfg, ts)
-            together = list(self.store.track_roots().items()) if hasattr(self.store, "track_roots") else None
+            together = list(self.store.track_roots().items()) \
+                if self.cfg["identity"].get("enroll_joined") and hasattr(self.store, "track_roots") else None
             res = self.g.nightly(ts, self.cannot_link, together)        # tracks joined across cameras: one cow
             if merged:
                 res["merged_by_place"] = merged

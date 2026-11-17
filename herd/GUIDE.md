@@ -283,12 +283,11 @@ every cow:
 
 On the first start the gallery is empty and enrols the whole herd this way. Every
 night the centres are rebuilt from confirmed bursts only, so a mistake is not learnt.
-Tracks of two cameras joined by where the cow stood (`[mct] mode = "link"`) are grouped
-first, as one cow whatever they look like - unless one camera saw two of them at once
-(`cannot_link`). Cameras in a pen's four corners see a cow's head, side and tail: by look
-alone each side became a cow of its own (the 09 Nov barn: 13 cows -> 33 groups, with
-`max_cows = 13` some cows enrolled twice and others never; 58% of the named bursts were
-their name's cow, against 99% on the old two cameras).
+`[identity] enroll_joined = true` groups tracks of two cameras joined by where the cow
+stood (`[mct] mode = "link"`) first, as one cow whatever they look like - unless one camera
+saw two of them at once (`cannot_link`). Off by default: on the 09 Nov barn (four corner
+cameras, 13 cows, 33 groups by look) the place joins were about half two neighbours, and it
+mixed cows in the gallery (second half IDF1 60% -> 51%).
 From Tuesday 10:00 the gallery expects new cows and retires those not seen for 48 h
 after it. `names.json` (optional) maps the names to ear tags in reports.
 
