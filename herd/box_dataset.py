@@ -74,6 +74,31 @@ def plan_times(recs, every, max_n):
     return out
 
 
+def same_moments(index, of, cams, barn_clock=False):
+    """--moments-of: the moments of these cameras' frames already cut -> sorted [ts]: their files' time (as trial
+    pairs two cameras' frames), or with barn_clock on the barn's one clock (each camera's time_offset_s added)."""
+    off = lambda c: float(cams.get(c, {}).get("time_offset_s") or 0.0) if barn_clock else 0.0
+    return sorted({round(f["ts"] + off(f["cam"]), 3) for f in index["frames"] if f["cam"] in of})
+
+
+def moments_plan(recs, moments, index, cam, offset, near=0.6):
+    """[(path, start ts, fps, n frames)] of one camera -> [(path, frame index, its file time)] at those moments
+    (its file time = the moment - offset: its time_offset_s on the barn's clock, else 0), but those it has a frame
+    within `near` s of already."""
+    have = [f["ts"] for f in index["frames"] if f["cam"] == cam]
+    out = []
+    for m in moments:
+        ts = m - offset
+        if any(abs(ts - h) <= near for h in have):
+            continue
+        for path, start, fps, n in recs:
+            i = int(round((ts - start) * fps))
+            if 0 <= i < n:
+                out.append((path, i, start + i / fps))
+                break
+    return out
+
+
 def changed(a, b, min_change):
     """Two small grey thumbnails differ by more than min_change (0-255, mean) - a frame worth labelling."""
     return b is None or float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean()) >= min_change
@@ -169,9 +194,15 @@ def cmd_frames(args):
         by_cam[cam].append((path, ts) + info)
     if args.cameras and args.again:
         recut(index, out, by_cam, cams, width, set(args.cameras))
+    moments = same_moments(index, args.moments_of, cams, args.barn_clock) if args.moments_of else None
     for cam, rs in sorted(by_cam.items()):
         c = cams[cam]
-        plan = plan_times(rs, args.every, args.max)
+        if moments is not None:
+            if cam in args.moments_of:
+                continue
+            plan = moments_plan(rs, moments, index, cam, float(c.get("time_offset_s") or 0.0) if args.barn_clock else 0.0)
+        else:
+            plan = plan_times(rs, args.every, args.max)
         folder = os.path.join(out, "frames", cam)
         os.makedirs(folder, exist_ok=True)
         kept, last, cap, cap_path = 0, None, None, None
@@ -189,7 +220,7 @@ def cmd_frames(args):
             if img is None:
                 continue
             small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY), (64, 36), interpolation=cv2.INTER_AREA)
-            if not changed(small, last, args.min_change):
+            if moments is None and not changed(small, last, args.min_change):   # the other cameras' moments: all of them
                 continue
             last = small
             Image.fromarray(img).save(os.path.join(out, rel), quality=92)
@@ -1197,6 +1228,12 @@ def main(argv=None):
     f.add_argument("--min-change", type=float, default=3.0, help="a frame this little changed (0-255) is skipped")
     f.add_argument("--detector", default=None, help="a best/ folder (default: the config's); none: no first guess")
     f.add_argument("--cameras", nargs="*", default=None, help="only these cameras")
+    f.add_argument("--moments-of", nargs="+", default=None,
+                   help="cut the other cameras (or --cameras) at the moments these cameras' frames were cut, at the "
+                        "same file time, where they have no frame yet: the same moment on every camera")
+    f.add_argument("--barn-clock", action="store_true",
+                   help="--moments-of on the barn's clock: each camera's time_offset_s taken into account (the same "
+                        "instant, not the same file time)")
     f.add_argument("--again", action="store_true", help="with --cameras: their frames already cut are cut again "
                    "with the zone as the config has it now (an exclude zone changed) and looked at again")
     g = sub.add_parser("page", help="the labelling page again (after a code update, or with a labels.json)")

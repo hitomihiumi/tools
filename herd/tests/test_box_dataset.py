@@ -445,6 +445,37 @@ def test_fix_videos_command():
     assert "copy" in cp and "libx264" not in cp
 
 
+def test_frames_cut_at_another_cameras_moments_on_the_barns_clock():
+    """--moments-of cam1 --cameras cam2: cam2 cut at cam1's moments (where its recording has them) - at the same
+    file time, or with --barn-clock its own time_offset_s taken off (the same instant of the barn)."""
+    import box_dataset
+    with tempfile.TemporaryDirectory() as d:
+        cfg, rec = _setup(d)
+        out = os.path.join(d, "boxes")
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--every", "10", "--detector", "none"])
+        before = json.load(open(os.path.join(out, "frames.json")))["frames"]
+        c1 = sorted(f["ts"] for f in before if f["cam"] == "cam1")
+        text = open(cfg).read()
+        open(cfg, "w").write(text.replace('id = "cam2"', 'id = "cam2"\ntime_offset_s = 2.0', 1))
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--moments-of", "cam1",
+                          "--cameras", "cam2", "--detector", "none", "--barn-clock"])
+        fr = json.load(open(os.path.join(out, "frames.json")))["frames"]
+        new = sorted(f["ts"] for f in fr if f["cam"] == "cam2" and f["file"] not in {b["file"] for b in before})
+        # cam2's recording runs 06:00:10-06:01:10: cam1's moments 06:00:15 ... 06:00:55, 2 s earlier on cam2's clock
+        want = [t - 2.0 for t in c1 if c1[0] + 5 <= t <= c1[0] + 55]
+        assert len(new) == len(want) == 5 and max(abs(a - b) for a, b in zip(new, want)) < 0.21
+        assert {f["file"] for f in before} <= {f["file"] for f in fr}                 # nothing cut before is lost
+        # again: nothing more to cut (each moment has its frame now)
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--moments-of", "cam1",
+                          "--cameras", "cam2", "--detector", "none", "--barn-clock"])
+        assert len(json.load(open(os.path.join(out, "frames.json")))["frames"]) == len(fr)
+        # at the same file time (the default): cam1's moments cam2 has no frame at - 06:00:15 ... 06:00:55 are taken
+        # by its own frames every 10 s already (06:00:15, 25, ...), so nothing new
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--moments-of", "cam1",
+                          "--cameras", "cam2", "--detector", "none"])
+        assert len(json.load(open(os.path.join(out, "frames.json")))["frames"]) == len(fr)
+
+
 def test_one_camera_cut_again_after_its_zone_changed():
     import box_dataset
     with tempfile.TemporaryDirectory() as d:
