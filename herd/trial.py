@@ -960,6 +960,47 @@ def overlap(cfg):
     return cfg
 
 
+def tracks_of_labels(store, cfg, boxes_dir, labels_path, min_iou=0.3, max_dt=0.6):
+    """Your boxes with cow ids against a pass's tracks at the same camera and second -> ({track: your id} where at
+    least two of your boxes fall on the track and two thirds of them say one id, the last of your frames' time on
+    the run's clock). The gallery's names then are yours: --seed-labels."""
+    from box_dataset import read_labels
+    frames = {f["file"]: f for f in json.load(open(os.path.join(boxes_dir, "frames.json"), encoding="utf-8"))["frames"]}
+    cams = {c["id"]: c for c in cfg["cameras"]}
+    votes = collections.defaultdict(collections.Counter)
+    last = None
+    for file, lab in read_labels(labels_path).items():
+        f = frames.get(file)
+        if not f or f["cam"] not in cams or lab.get("status") == "skip":
+            continue
+        ts = f["ts"] + float(cams[f["cam"]].get("time_offset_s") or 0.0)
+        last = ts if last is None else max(last, ts)
+        rows = store.query("SELECT track, ts, x1, y1, x2, y2 FROM seconds WHERE cam = ? AND ts BETWEEN ? AND ?",
+                           (f["cam"], ts - max_dt, ts + max_dt))
+        if not rows:
+            continue
+        sec = min({r[1] for r in rows}, key=lambda t: abs(t - ts))
+        rows = [r for r in rows if r[1] == sec]
+        named = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
+                 and str(b[4]).strip().lower() != "x"]
+        for i, j in match([b for b, _ in named], [list(r[2:6]) for r in rows], min_iou):
+            votes[rows[j][0]][named[i][1]] += 1
+    # a burst's track is the one its camera's track was joined to then ([mct] link: the root) - those named too,
+    # by all their tracks' boxes together (a join of two of your cows has no two-thirds majority: left out)
+    roots = store.track_roots() if hasattr(store, "track_roots") else {}
+    by_root = collections.defaultdict(collections.Counter)
+    for track, v in votes.items():
+        if track in roots:
+            by_root[roots[track]].update(v)
+    out = {}
+    for group in (votes, by_root):
+        for track, v in group.items():
+            cow, n = v.most_common(1)[0]
+            if n >= 2 and n >= 2 / 3 * sum(v.values()):
+                out.setdefault(track, cow)
+    return out, last
+
+
 def relink(cfg, out):
     """--relink: the second pass's store copied to OUT/relink/ (and its gallery), its cross-camera joins, evidence,
     the night's merges and the questions to a person cleared, and each second of it played again through
@@ -1036,6 +1077,10 @@ def main(argv=None):
                    "this config's [mct] and floor_points (each camera's tracks as they were: minutes, no GPU) -> "
                    "OUT/relink/; scored with --boxes and --labels")
     p.add_argument("--cameras", nargs="*", default=None, help="score these cameras only (one id across them)")
+    p.add_argument("--seed-labels", default=None,
+                   help="labels.json (with --boxes) whose cow ids name the gallery after the first pass: each id a cow "
+                        "made of the first pass's bursts of the tracks your boxes fall on, up to your last frame there "
+                        "(score the second pass on frames after it: a cow met once, as at a barn's start)")
     p.add_argument("--overlap", action="store_true",
                    help="an experiment: every camera counts its whole tracking_mask (masks share floor) and a cow "
                         "counted by two cameras at once may be one cow - does one cow get one id on both? "
@@ -1102,6 +1147,13 @@ def main(argv=None):
     g = gallery_mod.Gallery(folder, first, abstain)
     last = max(ts for _, _, ts in recs) + 3600
     s1 = Store(os.path.join(out, "pass1", "herd.sqlite"))
+    if args.seed_labels:
+        if not args.boxes:
+            p.error("--seed-labels needs --boxes (the frames your labels are on)")
+        named, until = tracks_of_labels(s1, cfg, args.boxes, args.seed_labels)
+        seeded = g.enroll_named(last, named, until)
+        print(f"[trial] the gallery named from {args.seed_labels}: {len(seeded)} cows ({', '.join(seeded)}) from the "
+              f"first pass's bursts of {len(named)} tracks, up to your last frame there", flush=True)
     together = list(s1.track_roots().items()) if first["identity"].get("enroll_joined") else None
     res = g.nightly(last, s1.cannot_link_pairs(), together=together)
     print(f"[trial] the night: {len(res['enrolled'])} cows enrolled ({res['pool']} bursts left unknown"

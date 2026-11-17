@@ -26,6 +26,7 @@ the reports; nothing depends on it.
 
 from __future__ import annotations
 
+import collections
 import datetime as dt
 import json
 import os
@@ -335,6 +336,31 @@ class Gallery:
             made.append(cid)
             used = {id(p) for p in bursts}
             self.pool = [p for p in self.pool if id(p) not in used]
+        return made
+
+    def enroll_named(self, now, named, until=None, min_bursts=3):
+        """Cows a person named (the box page's ids: herd.py trial --seed-labels): named {track: cow id} -> each id a
+        cow made of the pool's bursts of its tracks (up to `until`, when given), whatever they look like - every
+        side of her the cameras saw. An id already in the gallery gets them added. -> the ids made or grown."""
+        by_cow = collections.defaultdict(list)
+        for p in self.pool:
+            cow = named.get(p["track"])
+            if cow is not None and (until is None or p["ts"] <= until):
+                by_cow[cow].append(p)
+        made = []
+        for cow, bursts in sorted(by_cow.items()):
+            if len(bursts) < min_bursts:
+                continue
+            hist = self.history.get(cow, []) + [(p["ts"], p["fp"]) for p in bursts]
+            X = np.stack([f for _, f in hist])
+            k = min(self.cfg["prototypes_per_cow"], max(1, len(hist) // 5))
+            prev = self.cows.get(cow, {})
+            self.cows[cow] = {"prototypes": spherical_kmeans(X, k).astype(np.float32),
+                              "created": prev.get("created", now), "last_seen": max(t for t, _ in hist)}
+            self.history[cow] = hist
+            used = {id(p) for p in bursts}
+            self.pool = [p for p in self.pool if id(p) not in used]
+            made.append(cow)
         return made
 
     def merge(self, old, into):

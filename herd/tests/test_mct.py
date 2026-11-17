@@ -111,6 +111,40 @@ def test_enroll_makes_one_cow_of_tracks_joined_across_cameras():
         assert sorted(len(gal.history[c]) for c in made) == [6, 12]
 
 
+def test_gallery_named_from_your_labels():
+    """--seed-labels: the tracks your boxes fall on name the gallery - each of your ids a cow of all her tracks'
+    bursts (head on one camera, tail on another), only bursts up to your last frame; the others stay in the pool."""
+    import trial
+    from store import Store
+    rng = np.random.default_rng(4)
+    head, tail, other = (_unit(rng.normal(size=32)) for _ in range(3))
+    with tempfile.TemporaryDirectory() as d:
+        st = Store(os.path.join(d, "s.sqlite"))
+        st.seconds([("cam1", "a", float(t), 0.1, 0.4, 0.3, 0.6, "standing", "none", 0.1) for t in range(100, 200)] +
+                   [("cam3", "b", float(t), 0.5, 0.4, 0.7, 0.6, "standing", "none", 0.1) for t in range(100, 200)] +
+                   [("cam1", "c", float(t), 0.6, 0.1, 0.8, 0.3, "standing", "none", 0.1) for t in range(100, 200)])
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"{c}/{t}.jpg", "cam": c, "ts": float(t)} for c in ("cam1", "cam3") for t in (110, 120, 130)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        lab = {"cam1": [[0.1, 0.4, 0.3, 0.6, "7"]], "cam3": [[0.5, 0.4, 0.7, 0.6, "7"]]}
+        lp = os.path.join(d, "labels.json")
+        json.dump({"frames": {f["file"]: {"status": "done", "boxes": lab[f["cam"]]} for f in frames}}, open(lp, "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1"}, {"id": "cam3"}]
+        named, until = trial.tracks_of_labels(st, cfg, boxes, lp)
+        assert named == {"a": "7", "b": "7"} and until == 130.0
+        gal = _gallery(d, {}, new_cow_min_bursts=4)
+        for k in range(10):
+            gal.pool.append({"ts": 100.0 + 10 * k, "track": "a", "fp": _near(head, rng, 0.02)})
+            gal.pool.append({"ts": 100.0 + 10 * k, "track": "b", "fp": _near(tail, rng, 0.02)})
+            gal.pool.append({"ts": 100.0 + 10 * k, "track": "c", "fp": _near(other, rng, 0.02)})
+        assert gal.enroll_named(300.0, named, until) == ["7"]
+        assert len(gal.history["7"]) == 8                                      # 4 bursts each up to 130 s
+        assert gal.match(_near(tail, rng, 0.02), 0.5, 0.5, 0.05)["cow"] in ("7", None)
+        assert sorted({p["track"] for p in gal.pool}) == ["a", "b", "c"]       # after 130 s, and c, wait
+
+
 def test_enroll_holds_back_when_the_herd_is_full():
     rng = np.random.default_rng(2)
     with tempfile.TemporaryDirectory() as d:
