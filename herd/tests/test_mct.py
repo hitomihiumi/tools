@@ -2269,6 +2269,14 @@ def test_collect_groups_two_cameras_cows_by_place_and_names_one_cow_at_a_time():
         assert names == {"c1-a": "A", "c2-a": "A", "c1-b": "B", "c2-b": "B"}
         collect.write(s, groups, names)
         assert report.track_map(s) == names and len(s.track_roots()) == 2           # the reports follow
+        # the encoder's vectors kept (burst_fp.frames): two cameras' tracks of one cow alike - the same groups
+        rng = np.random.default_rng(5)
+        look = {"a": rng.normal(size=16), "b": rng.normal(size=16)}
+        for tr in ("c1-a", "c2-a", "c1-b", "c2-b"):
+            s.burst_fp("cam1" if tr.startswith("c1") else "cam2", tr, 100.0, np.zeros(8),
+                       frames=look[tr[-1]] + 0.05 * rng.normal(size=16))
+        assert sorted(sorted(g) for g in collect.collect(s, cfg)[0]) == [["c1-a", "c2-a"], ["c1-b", "c2-b"]]
+        assert set(collect.looks(s, {t: "cam1" if t.startswith("c1") else "cam2" for t in ("c1-a", "c2-a", "c1-b", "c2-b")})) == set(("c1-a", "c2-a", "c1-b", "c2-b"))
 
 
 def test_store_keeps_burst_fingerprints():

@@ -13,7 +13,8 @@ collector looks at the whole stretch:
      Seen far apart in cannot_share of cannot_min seconds or more: never one cow;
   3. one camera's tracks seen at once (over_s): never one cow; one beginning within seq_gap s of another's end,
      seq_dist cm from it: likely her (seq_w);
-  4. two tracks whose bursts' names agree (or not): name_w;
+  4. two tracks whose bursts' names agree (or not): name_w; two cameras' tracks that look alike (the encoder's own
+     vectors, burst_fp.frames, when the store keeps them): look_w;
   5. groups merged, the strongest sum first, never across a "never" - until no sum reaches merge_min;
   6. names: each group's bursts' votes (confirmed), the most voted group-name first, a name never to two groups one
      camera saw at the same time (one cow, one name, at a time) - the 2/3 majority of report.track_map left
@@ -43,7 +44,8 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import floor_mapper, load_config  # noqa: E402
 
 PARAMS = dict(min_len=15, near=120.0, far=300.0, margin=50.0, cannot_share=0.5, cannot_min=5, neg_w=1.0,
-              seq_gap=30.0, seq_dist=120.0, seq_w=4.0, name_w=1.0, merge_min=1.0, over_s=3, name_overlap_s=5)
+              seq_gap=30.0, seq_dist=120.0, seq_w=4.0, name_w=1.0, merge_min=1.0, over_s=3, name_overlap_s=5,
+              look_w=3.0)
 
 
 def load(store, cfg):
@@ -64,6 +66,42 @@ def load(store, cfg):
                                   "GROUP BY track, cow"):
         votes[tr][cow] += n
     return rows, cam_of, votes
+
+
+def looks(store, cam_of):
+    """{track: its look} - the mean of its bursts' encoder vectors (burst_fp.frames: [store] keep_fingerprints), the
+    camera's own mean taken off, unit length; {} when the store keeps none."""
+    if not hasattr(store, "burst_fps"):
+        return {}
+    per = collections.defaultdict(list)
+    for _, t, _, _, _, fr in store.burst_fps(frames=True):
+        if fr is not None and t in cam_of:
+            per[t].append(fr)
+    if not per:
+        return {}
+    cam_mean = {}
+    for c in set(cam_of[t] for t in per):
+        cam_mean[c] = np.mean([v for t, vs in per.items() if cam_of[t] == c for v in vs], 0)
+    out = {}
+    for t, vs in per.items():
+        v = np.mean(vs, 0) - cam_mean[cam_of[t]]
+        out[t] = v / max(float(np.linalg.norm(v)), 1e-9)
+    return out
+
+
+def add_looks(A, long, cam_of, look, w):
+    """Two cameras' tracks that look alike (their looks' cosine, as standard scores over all such pairs): w each.
+    The 09 Nov barn: DINOv2's vectors tell a cow on another camera 27-33% of the time (chance 15%) - too little to
+    name by, a little evidence for the groups (IDF1 48.3 -> 50.2). One camera's own tracks: none (neighbours at the
+    feed rail share their crops)."""
+    ts = [t for t in long if t in look]
+    pairs = [(a, b) for i, a in enumerate(ts) for b in ts[i + 1:] if cam_of[a] != cam_of[b]]
+    if not pairs or not w:
+        return
+    sims = np.array([float(look[a] @ look[b]) for a, b in pairs])
+    z = (sims - sims.mean()) / max(float(sims.std()), 1e-9)
+    for (a, b), v in zip(pairs, z):
+        A[(a, b) if a < b else (b, a)] += w * float(v)
 
 
 def affinities(rows, cam_of, votes, p):
@@ -171,6 +209,7 @@ def collect(store, cfg, **params):
     p = dict(PARAMS, **params)
     rows, cam_of, votes = load(store, cfg)
     long, A, never = affinities(rows, cam_of, votes, p)
+    add_looks(A, long, cam_of, looks(store, cam_of), p["look_w"])
     groups = cluster(long, A, never, p)
     keep = set(long)
     return groups, name(groups, rows, cam_of, votes, [t for t in rows if t not in keep], p)

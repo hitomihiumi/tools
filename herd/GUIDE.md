@@ -393,7 +393,9 @@ camera's track going on as another, never two tracks one camera saw at once, the
 group named by its bursts' votes, one name to one cow at a time. Written as `track_links` and `track_names`
 (`report.track_map` reads them first). The 09 Nov barn (4 corner cameras, 13 cows, 30 min): IDF1 over all cameras
 46.1% -> 52.4%, its second half 54.4% -> 65.0%; on the five other runs of that recording +2 to +9 over all cameras
-(wrong names 1372 -> 690 boxes; unnamed 333 -> 920: a group it is not sure of keeps no name).
+(wrong names 1372 -> 690 boxes; unnamed 333 -> 920: a group it is not sure of keeps no name). With the encoder's
+vectors kept (`[store] keep_fingerprints`, on in a trial) two cameras' tracks that look alike count a little
+(`look_w`): 48.3% -> 49.9%, second half 57.0% -> 59.3% on a run that kept them.
 
 **By look alone, cows are not passed between cameras.** MmCows (60 min, 4 cameras):
 a cow seen by two cameras at once got one track in 0.1–1.4% of the cases, and every
