@@ -2277,6 +2277,8 @@ def test_store_keeps_burst_fingerprints():
     with tempfile.TemporaryDirectory() as d:
         s = Store(os.path.join(d, "s.sqlite"))
         v = np.linspace(-1, 1, 256).astype(np.float32)
-        s.burst_fp("cam1", "t1", 100.0, v, 0.7)
+        s.burst_fp("cam1", "t1", 100.0, v, 0.7, frames=v[:64])
         (cam, tr, ts, q, f), = s.burst_fps()
         assert (cam, tr, ts, q) == ("cam1", "t1", 100.0, 0.7) and f.dtype == np.float32 and np.abs(f - v).max() < 1e-3
+        (_, _, _, _, f, fr), = s.burst_fps(frames=True)
+        assert fr.shape == (64,) and np.abs(fr - v[:64]).max() < 1e-3

@@ -46,7 +46,7 @@ CREATE TABLE IF NOT EXISTS cannot_link (track_a TEXT, track_b TEXT, ts REAL, PRI
 CREATE TABLE IF NOT EXISTS cow_aliases (old_cow TEXT PRIMARY KEY, canonical_cow TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS track_links (ts REAL, track TEXT PRIMARY KEY, joined_to TEXT);
 CREATE TABLE IF NOT EXISTS track_names (track TEXT PRIMARY KEY, cow TEXT, ts REAL);
-CREATE TABLE IF NOT EXISTS burst_fp (cam TEXT, track TEXT, ts REAL, quality REAL, fp BLOB);
+CREATE TABLE IF NOT EXISTS burst_fp (cam TEXT, track TEXT, ts REAL, quality REAL, fp BLOB, frames BLOB);
 CREATE TABLE IF NOT EXISTS track_evidence (track_a TEXT, track_b TEXT, llr REAL, seconds INTEGER, ts REAL,
                                            PRIMARY KEY (track_a, track_b));
 CREATE TABLE IF NOT EXISTS merge_reviews (old_cow TEXT, into_cow TEXT, llr REAL, margin REAL, ts REAL, state TEXT,
@@ -76,18 +76,29 @@ class Store:
             self.db.executemany("INSERT INTO seconds VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
             self.db.commit()
 
-    def burst_fp(self, cam, track, ts, fingerprint, quality=None):
-        """A burst's fingerprint kept ([store] keep_fingerprints; trial keeps them): float16, its own table."""
+    def burst_fp(self, cam, track, ts, fingerprint, quality=None, frames=None):
+        """A burst's fingerprint kept ([store] keep_fingerprints; trial keeps them), and the mean of its frames'
+        encoder vectors (frames): float16, a table of their own."""
         import numpy as np
         blob = np.asarray(fingerprint, np.float16).tobytes()
+        fr = None if frames is None else np.asarray(frames, np.float16).tobytes()
         with self.lock:
-            self.db.execute("INSERT INTO burst_fp VALUES (?,?,?,?,?)", (cam, track, ts, quality, blob))
+            cols = [r[1] for r in self.db.execute("PRAGMA table_info(burst_fp)")]
+            if "frames" not in cols:                        # a store made before the column
+                self.db.execute("ALTER TABLE burst_fp ADD COLUMN frames BLOB")
+            self.db.execute("INSERT INTO burst_fp (cam, track, ts, quality, fp, frames) VALUES (?,?,?,?,?,?)",
+                            (cam, track, ts, quality, blob, fr))
             self.db.commit()
 
-    def burst_fps(self):
-        """-> [(cam, track, ts, quality, fingerprint float32)]."""
+    def burst_fps(self, frames=False):
+        """-> [(cam, track, ts, quality, fingerprint float32)] - with frames, the frames' mean vector (or None) too."""
         import numpy as np
-        return [(c, t, ts, q, np.frombuffer(b, np.float16).astype(np.float32))
+        f32 = lambda b: None if b is None else np.frombuffer(b, np.float16).astype(np.float32)
+        cols = [r[1] for r in self.query("PRAGMA table_info(burst_fp)")]
+        if frames and "frames" in cols:
+            return [(c, t, ts, q, f32(b), f32(fr))
+                    for c, t, ts, q, b, fr in self.query("SELECT cam, track, ts, quality, fp, frames FROM burst_fp")]
+        return [(c, t, ts, q, f32(b)) + ((None,) if frames else ())
                 for c, t, ts, q, b in self.query("SELECT cam, track, ts, quality, fp FROM burst_fp")]
 
     def burst(self, row):

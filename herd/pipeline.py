@@ -386,6 +386,11 @@ def cpu_pool():
     return _CROP_POOL
 
 
+def torch_index(mask):
+    """A numpy bool mask as an index of a torch tensor's first dimension (a list of positions)."""
+    return [int(i) for i in np.flatnonzero(mask)]
+
+
 def thin_frames(frames, fps):
     """[(ts, img)] -> at most fps of them a second, evenly ([sampling] burst_fps: a burst's frames - each a crop a
     cow, encoded - fewer than the stream's 25; 0, or a stream slower than that: all)."""
@@ -683,6 +688,10 @@ class Camera:
             t = time.perf_counter()
             out = self.models.burst(feats, rel, valid, boxes, motion)
             part["temporal"] += time.perf_counter() - t
+            if self.cfg["store"].get("keep_fingerprints"):        # the encoder's own vectors too (DINOv2), averaged
+                keep = valid if valid.any() else np.ones(len(valid), bool)
+                out["frames_mean"] = feats.float()[torch_index(keep)].mean(0).cpu().numpy() \
+                    if hasattr(feats, "float") else np.asarray(feats, np.float32)[keep].mean(0)
             area = float(np.mean([(b[2] - b[0]) * (b[3] - b[1]) for b in ch.values()]))
             # kept until the burst's decision: only what the training cache needs, not every crop
             keep_feats = feats.float().cpu().numpy() if self.cache is not None else None
@@ -706,7 +715,7 @@ class Camera:
                               out["activity"], out["lameness"], out["quality_max"], int(valid.sum()),
                               int(out["ruminating"])))
             if self.cfg["store"].get("keep_fingerprints") and hasattr(self.store, "burst_fp"):
-                self.store.burst_fp(self.id, own, t0, out["fingerprint"], out.get("quality_max"))
+                self.store.burst_fp(self.id, own, t0, out["fingerprint"], out.get("quality_max"), out.get("frames_mean"))
             if self.cache is not None:
                 from model import box_pos
                 self.cache.add(self.id, own, t0, feats, rel, valid, motion,
