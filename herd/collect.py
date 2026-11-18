@@ -20,7 +20,7 @@ collector looks at the whole stretch:
      too many groups without one.
 
 On the 09 Nov barn (4 corner cameras, 13 cows, 30 min, the labelled boxes): IDF1 over all cameras 46.1 -> 52.5
-(the second half, once the gallery knew the cows: 54.4 -> 63.8); on the five other runs of that recording +2 to +9
+(the second half, once the gallery knew the cows: 54.4 -> 65.0); on the five other runs of that recording +2 to +9
 over all cameras. The store gets the groups as track_links and the names as track_names (report.track_map reads
 them first): every report follows.
 
@@ -43,7 +43,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from common import floor_mapper, load_config  # noqa: E402
 
 PARAMS = dict(min_len=15, near=120.0, far=300.0, margin=50.0, cannot_share=0.5, cannot_min=5, neg_w=1.0,
-              seq_gap=30.0, seq_dist=120.0, seq_w=4.0, name_w=1.0, merge_min=2.0, over_s=3, name_overlap_s=5)
+              seq_gap=30.0, seq_dist=120.0, seq_w=4.0, name_w=1.0, merge_min=1.0, over_s=3, name_overlap_s=5)
 
 
 def load(store, cfg):
@@ -111,8 +111,8 @@ def affinities(rows, cam_of, votes, p):
                         and np.linalg.norm(xa - xb) <= p["seq_dist"]:
                     A[key] += p["seq_w"] * (1 - gap / p["seq_gap"] / 2)
         va, vb = votes.get(a), votes.get(b)
-        if va and vb and p["name_w"]:
-            na, nb = sum(va.values()), sum(vb.values())
+        na, nb = (sum(va.values()) if va else 0), (sum(vb.values()) if vb else 0)
+        if na > 0 and nb > 0 and p["name_w"]:
             agree = sum(min(va[c] / na, vb[c] / nb) for c in va)          # 0 .. 1: the same name
             A[key] += p["name_w"] * (2 * agree - 1) * min(na, nb, 5)
     return long, A, never
