@@ -2269,3 +2269,14 @@ def test_collect_groups_two_cameras_cows_by_place_and_names_one_cow_at_a_time():
         assert names == {"c1-a": "A", "c2-a": "A", "c1-b": "B", "c2-b": "B"}
         collect.write(s, groups, names)
         assert report.track_map(s) == names and len(s.track_roots()) == 2           # the reports follow
+
+
+def test_store_keeps_burst_fingerprints():
+    """[store] keep_fingerprints: a burst's fingerprint kept as float16 beside it, read back as float32."""
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        s = Store(os.path.join(d, "s.sqlite"))
+        v = np.linspace(-1, 1, 256).astype(np.float32)
+        s.burst_fp("cam1", "t1", 100.0, v, 0.7)
+        (cam, tr, ts, q, f), = s.burst_fps()
+        assert (cam, tr, ts, q) == ("cam1", "t1", 100.0, 0.7) and f.dtype == np.float32 and np.abs(f - v).max() < 1e-3

@@ -82,7 +82,9 @@ DEFAULTS = {
                "mad_z": 3.0, "rumination_drop": 0.20, "lying_directions": ["low", "high"],
                "lying_change": 0.20},
     "report": {"period_days": 3},
-    "store": {"path": "herd.sqlite"},
+    # keep_fingerprints: every burst's fingerprint (float16) in the store's burst_fp - for matching tried afresh
+    # offline (trial keeps them); ~0.5 kB a burst
+    "store": {"path": "herd.sqlite", "keep_fingerprints": False},
     # the barn's bursts kept for training identity on the barn's own cows (barn_dataset.py)
     "training_cache": {"enabled": False, "every_n": 10, "folder": "training_cache", "max_gb": 200},
     # Where a camera works at all. Far cows are too small to identify or to read a

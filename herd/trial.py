@@ -1215,6 +1215,7 @@ def main(argv=None):
               "cow-seconds no more seconds). To follow walking cows more often set track_fps instead "
               "(the tracker only) and keep fps = 1", flush=True)
     cfg["training_cache"]["enabled"] = False
+    cfg["store"]["keep_fingerprints"] = True            # every burst's fingerprint: matching tried afresh offline
     cfg["identity"]["new_cow_min_bursts"] = args.min_bursts
     first = copy.deepcopy(cfg)
     first["sampling"]["burst_every_s"] = args.burst_every

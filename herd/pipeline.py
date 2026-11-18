@@ -705,6 +705,8 @@ class Camera:
                               decision["margin"], decision["p"], out["rumination"], out["posture"],
                               out["activity"], out["lameness"], out["quality_max"], int(valid.sum()),
                               int(out["ruminating"])))
+            if self.cfg["store"].get("keep_fingerprints") and hasattr(self.store, "burst_fp"):
+                self.store.burst_fp(self.id, own, t0, out["fingerprint"], out.get("quality_max"))
             if self.cache is not None:
                 from model import box_pos
                 self.cache.add(self.id, own, t0, feats, rel, valid, motion,

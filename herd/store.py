@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS cannot_link (track_a TEXT, track_b TEXT, ts REAL, PRI
 CREATE TABLE IF NOT EXISTS cow_aliases (old_cow TEXT PRIMARY KEY, canonical_cow TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS track_links (ts REAL, track TEXT PRIMARY KEY, joined_to TEXT);
 CREATE TABLE IF NOT EXISTS track_names (track TEXT PRIMARY KEY, cow TEXT, ts REAL);
+CREATE TABLE IF NOT EXISTS burst_fp (cam TEXT, track TEXT, ts REAL, quality REAL, fp BLOB);
 CREATE TABLE IF NOT EXISTS track_evidence (track_a TEXT, track_b TEXT, llr REAL, seconds INTEGER, ts REAL,
                                            PRIMARY KEY (track_a, track_b));
 CREATE TABLE IF NOT EXISTS merge_reviews (old_cow TEXT, into_cow TEXT, llr REAL, margin REAL, ts REAL, state TEXT,
@@ -74,6 +75,20 @@ class Store:
         with self.lock:
             self.db.executemany("INSERT INTO seconds VALUES (?,?,?,?,?,?,?,?,?,?)", rows)
             self.db.commit()
+
+    def burst_fp(self, cam, track, ts, fingerprint, quality=None):
+        """A burst's fingerprint kept ([store] keep_fingerprints; trial keeps them): float16, its own table."""
+        import numpy as np
+        blob = np.asarray(fingerprint, np.float16).tobytes()
+        with self.lock:
+            self.db.execute("INSERT INTO burst_fp VALUES (?,?,?,?,?)", (cam, track, ts, quality, blob))
+            self.db.commit()
+
+    def burst_fps(self):
+        """-> [(cam, track, ts, quality, fingerprint float32)]."""
+        import numpy as np
+        return [(c, t, ts, q, np.frombuffer(b, np.float16).astype(np.float32))
+                for c, t, ts, q, b in self.query("SELECT cam, track, ts, quality, fp FROM burst_fp")]
 
     def burst(self, row):
         """cam, track, ts, state, cow, sim, margin, p, rumination_p, posture,
