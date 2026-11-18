@@ -37,6 +37,7 @@ Recordings for them:
     herd.py fix-videos --videos DIR --out DIR2             damaged recordings -> clean .mp4 the tools read
 A dress rehearsal on recordings (two passes: the gallery fills, then who is who, drawn per camera):
     herd.py trial --config barn.toml --videos DIR --out D [--boxes B --labels L]   (L: your ids -> IDF1)
+    herd.py collect --config barn.toml --store S   every camera's tracks grouped into cows and named at once
 Cameras sharing floor calibrated by the cows moving in both (nothing measured; then [mct] link):
     herd.py autocalib --config barn.toml --store D/pass2/herd.sqlite --videos DIR --out C [--apply]
     herd.py crosscam --config barn.toml --boxes B --labels L [--apply]   (which cow on the neighbour camera,
@@ -146,6 +147,9 @@ def main():
     if cmd == "trial":
         import trial
         return trial.main(argv)
+    if cmd == "collect":
+        import collect
+        return collect.main(argv)
     if cmd == "crosscam":
         import crosscam
         return crosscam.main(argv)

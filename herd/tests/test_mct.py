@@ -2240,3 +2240,32 @@ def test_burst_takes_burst_fps_frames_a_second():
     half = pipeline.thin_frames(frames, 12.5)
     assert len(half) == 88 and all(abs((b[0] - a[0]) - 0.08) < 1e-6 for a, b in zip(half, half[1:]))
     assert len(pipeline.thin_frames(frames, 8.0)) == 56
+
+
+def test_collect_groups_two_cameras_cows_by_place_and_names_one_cow_at_a_time():
+    """collect.py: two cameras each see cows A and B side by side 2 m apart for a minute; their tracks are grouped by
+    where they stood (each the other's nearest, the next far), never two tracks one camera saw at once; each group
+    named by its bursts - B's bursts mostly say A on one camera, but A's group holds A then: B gets B."""
+    import collect
+    import report
+    from store import Store
+    fp = [[0, 0, 0, 0], [1, 0, 1000, 0], [0, 1, 0, 1000], [1, 1, 1000, 1000]]       # frame 0-1 -> floor cm
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": "cam1", "floor_points": fp}, {"id": "cam2", "floor_points": fp}]
+    with tempfile.TemporaryDirectory() as d:
+        s = Store(os.path.join(d, "s.sqlite"))
+        rows = []
+        for t in range(100, 160):
+            for cam, (ta, tb), dx in (("cam1", ("c1-a", "c1-b"), 0.0), ("cam2", ("c2-a", "c2-b"), 0.004)):
+                rows.append((cam, ta, float(t), 0.30 + dx, 0.30, 0.40 + dx, 0.50, "standing", "none", 0.0))   # A ~ (3.5 m, 5 m)
+                rows.append((cam, tb, float(t), 0.50 + dx, 0.30, 0.60 + dx, 0.50, "standing", "none", 0.0))   # B 2 m on
+        s.seconds(rows)
+        for tr, cows in (("c1-a", "AAAB"), ("c2-a", "AAA"), ("c1-b", "BBB"), ("c2-b", "AAB")):
+            for k, cow in enumerate(cows):
+                s.burst(("cam1" if tr.startswith("c1") else "cam2", tr, 100.0 + 10 * k, "confirmed", cow, 0.9, 0.2, 0.9,
+                         0.1, "standing", "none", None, 0.5, 100))
+        groups, names = collect.collect(s, cfg)
+        assert sorted(sorted(g) for g in groups) == [["c1-a", "c2-a"], ["c1-b", "c2-b"]]
+        assert names == {"c1-a": "A", "c2-a": "A", "c1-b": "B", "c2-b": "B"}
+        collect.write(s, groups, names)
+        assert report.track_map(s) == names and len(s.track_roots()) == 2           # the reports follow

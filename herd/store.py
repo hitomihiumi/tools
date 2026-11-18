@@ -45,6 +45,7 @@ CREATE TABLE IF NOT EXISTS verdicts (alert_id INTEGER, ts REAL, confirmed INTEGE
 CREATE TABLE IF NOT EXISTS cannot_link (track_a TEXT, track_b TEXT, ts REAL, PRIMARY KEY (track_a, track_b));
 CREATE TABLE IF NOT EXISTS cow_aliases (old_cow TEXT PRIMARY KEY, canonical_cow TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS track_links (ts REAL, track TEXT PRIMARY KEY, joined_to TEXT);
+CREATE TABLE IF NOT EXISTS track_names (track TEXT PRIMARY KEY, cow TEXT, ts REAL);
 CREATE TABLE IF NOT EXISTS track_evidence (track_a TEXT, track_b TEXT, llr REAL, seconds INTEGER, ts REAL,
                                            PRIMARY KEY (track_a, track_b));
 CREATE TABLE IF NOT EXISTS merge_reviews (old_cow TEXT, into_cow TEXT, llr REAL, margin REAL, ts REAL, state TEXT,
@@ -130,6 +131,16 @@ class Store:
             self.db.execute("UPDATE track_links SET joined_to = ? WHERE joined_to = ?", (new_root, track))
             self.db.execute("DELETE FROM track_links WHERE track = joined_to")
             self.db.commit()
+
+    def put_track_names(self, names, ts=0.0):
+        """{track: cow} from collect.py (the old ones gone): what report.track_map reads first."""
+        with self.lock:
+            self.db.execute("DELETE FROM track_names")
+            self.db.executemany("INSERT INTO track_names VALUES (?,?,?)", [(t, c, ts) for t, c in names.items()])
+            self.db.commit()
+
+    def track_names(self):
+        return dict(self.query("SELECT track, cow FROM track_names"))
 
     def track_roots(self):
         """track -> the track it was finally joined to (links followed to the end)."""

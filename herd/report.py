@@ -70,6 +70,9 @@ def track_map(store, min_share=2 / 3, joins=True):
     makes the two names one (pipeline.merge_by_place). joins=False: each track by its own
     bursts alone (what the night compares)."""
     aliases = store.aliases() if hasattr(store, "aliases") else {}   # a merged profile counts as its cow
+    named = store.track_names() if joins and hasattr(store, "track_names") else {}
+    if named:                                    # collect.py named every group of the stretch at once: its names
+        return {t: aliases.get(c, c) for t, c in named.items()}
     roots = (store.track_roots() if hasattr(store, "track_roots") else {}) if joins else {}
     votes = collections.defaultdict(lambda: collections.defaultdict(collections.Counter))   # group -> cam -> cow
     for track, cam, cow, n in store.query("SELECT track, cam, cow, COUNT(*) FROM bursts WHERE state='confirmed' "

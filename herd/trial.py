@@ -1003,6 +1003,37 @@ def overlap(cfg):
     return cfg
 
 
+def collected(src, cfg, folder):
+    """--collect: the store copied to folder/herd.sqlite, its tracks grouped and named again by collect.py (every
+    camera, the whole stretch at once) -> the copy's path."""
+    import sqlite3
+    import collect
+    from store import Store
+    os.makedirs(folder, exist_ok=True)
+    dst = os.path.join(folder, "herd.sqlite")
+    if os.path.exists(dst):
+        os.remove(dst)
+    with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:
+        a.backup(b)
+    store = Store(dst)
+    groups, names = collect.collect(store, cfg)
+    collect.write(store, groups, names)
+    print(f"[collect] {sum(len(g) for g in groups)} tracks in {len(groups)} groups, {len(set(names.values()))} names "
+          f"-> {dst}", flush=True)
+    return dst
+
+
+def scored_into(store_path, cfg, args, folder):
+    """score store_path with --boxes / --labels into folder/score.json, printed."""
+    sc = score(store_path, cfg, args.boxes, args.labels, page_dir=folder, cameras=args.cameras)
+    name = "score.json" if not args.cameras else f"score_{'_'.join(args.cameras)}.json"
+    with open(os.path.join(folder, name), "w", encoding="utf-8") as fh:
+        json.dump(sc, fh, indent=2)
+    print_score(sc)
+    print(f"-> {os.path.join(folder, name)}")
+    return sc
+
+
 def tracks_of_labels(store, cfg, boxes_dir, labels_path, min_iou=0.3, max_dt=0.6):
     """Your boxes with cow ids against a pass's tracks at the same camera and second -> ({track: your id} where at
     least two of your boxes fall on the track and two thirds of them say one id, the last of your frames' time on
@@ -1068,7 +1099,7 @@ def relink(cfg, out):
     if os.path.isdir(os.path.join(out, "pass2", "gallery")):
         shutil.copytree(os.path.join(out, "pass2", "gallery"), os.path.join(folder, "gallery"))
     store = Store(dst)
-    for t in ("track_links", "track_evidence", "merge_reviews", "cow_aliases", "track_handovers"):
+    for t in ("track_links", "track_names", "track_evidence", "merge_reviews", "cow_aliases", "track_handovers"):
         store.execute(f"DELETE FROM {t}")
     store.execute("DELETE FROM events WHERE kind IN ('merged-by-place', 'clocks', 'merge-reviews')")
     cfg = copy.deepcopy(cfg)
@@ -1124,6 +1155,10 @@ def main(argv=None):
                    help="labels.json (with --boxes) whose cow ids name the gallery after the first pass: each id a cow "
                         "made of the first pass's bursts of the tracks your boxes fall on, up to your last frame there "
                         "(score the second pass on frames after it: a cow met once, as at a barn's start)")
+    p.add_argument("--collect", action="store_true",
+                   help="the second pass's tracks grouped into cows and named again by collect.py (every camera, the "
+                        "whole stretch at once) -> OUT/collect/ (herd.sqlite, score.json); with --relink, the relinked "
+                        "store's; with --score-only, the trial already in --out")
     p.add_argument("--overlap", action="store_true",
                    help="an experiment: every camera counts its whole tracking_mask (masks share floor) and a cow "
                         "counted by two cameras at once may be one cow - does one cow get one id on both? "
@@ -1133,6 +1168,8 @@ def main(argv=None):
         cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
         out = os.path.abspath(args.out.rstrip("\\"))
         dst = relink(cfg, out)
+        if args.collect:
+            dst = collected(dst, cfg, os.path.join(os.path.dirname(dst), "collect"))
         if args.boxes and args.labels:
             sc = score(dst, cfg, args.boxes, args.labels, page_dir=os.path.dirname(dst), cameras=args.cameras)
             with open(os.path.join(os.path.dirname(dst), "score.json"), "w", encoding="utf-8") as fh:
@@ -1145,6 +1182,10 @@ def main(argv=None):
             p.error("--score-only needs --boxes and --labels")
         cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
         out = os.path.abspath(args.out.rstrip("\\"))
+        if args.collect:
+            scored_into(collected(os.path.join(out, "pass2", "herd.sqlite"), cfg, os.path.join(out, "collect")), cfg,
+                        args, os.path.join(out, "collect"))
+            return
         sc = score(os.path.join(out, "pass2", "herd.sqlite"), cfg, args.boxes, args.labels, page_dir=out,
                    cameras=args.cameras)
         name = "score.json" if not args.cameras else f"score_{'_'.join(args.cameras)}.json"
@@ -1264,6 +1305,11 @@ def main(argv=None):
         with open(os.path.join(out, "score.json"), "w", encoding="utf-8") as fh:
             json.dump(sc, fh, indent=2)
         print_score(sc)
+    if args.collect:
+        dst = collected(store2, cfg, os.path.join(out, "collect"))
+        if args.boxes and args.labels:
+            print("[trial] the same, its tracks grouped and named by collect.py:")
+            scored_into(dst, cfg, args, os.path.join(out, "collect"))
     for k, v in stopped.items():
         for cam, done, err in v:
             print(f"[trial] !! {k}: {cam} stopped at {int(done // 60)}:{int(done % 60):02d} of its recording by an error "
