@@ -2078,6 +2078,24 @@ def test_trial_scores_a_cow_counted_outside_the_mask_and_says_who_counted_none()
         a = sc["all"]
         assert a["your_boxes"] == 6 and a["found_with_a_cow"] == 6 and abs(a["idf1"] - 1.0) < 1e-9
         assert sc["counted_by_none"] == {"moments": 9, "none": 3, "cows": {"9": 3}}
+        k = a["counts"]
+        assert (k["idtp"], k["idfp"], k["idfn"]) == (6, 0, 0) and k["dataset"] == {"idtp": 6, "idfp": 0, "idfn": 0,
+                                                                                   "your_boxes": 6}
+        # one of your boxes given the other cow's name, one not found: IDFP and IDFN by their kinds
+        labels2 = os.path.join(d, "labels2.json")
+        lab2 = {"boxes": [[0.1, 0.4, 0.3, 0.6, "4"], [0.85, 0.4, 0.95, 0.6, "7"], [0.3, 0.1, 0.4, 0.2, "8"]],
+                "status": "done"}
+        lab_w = {"boxes": [[0.1, 0.4, 0.3, 0.6, "7"], [0.85, 0.4, 0.95, 0.6, "7"]], "status": "done"}
+        json.dump({"frames": {frames[0]["file"]: lab_w, frames[1]["file"]: lab2, frames[2]["file"]: lab2}},
+                  open(labels2, "w"))
+        cfg["cameras"] = [{"id": "cam1"}]
+        sc = trial.score(st, cfg, boxes, labels2)
+        k = sc["cameras"]["cam1"]["counts"]
+        # 8 boxes of yours: "8" never found (2), "7" on P1 once (the name P1 holds is your 4's): wrong
+        assert k["dataset"]["idtp"] == 8 and k["idfn_by"]["not_found"] == 2 and k["idfn_by"]["wrong_name"] == 1
+        assert k["idtp"] == 5 and k["idfp"] == k["idfp_by"]["wrong_name"] == 1 and k["idfn"] == 3
+        assert abs(sc["cameras"]["cam1"]["idf1"] - 2 * 5 / (2 * 5 + 1 + 3)) < 1e-9
+        trial.print_counts(sc)
 
 
 def test_trial_pairs_two_cameras_frames_by_their_file_time_whatever_the_time_offset():

@@ -138,6 +138,21 @@ def idf1(co, n_true, n_pred):
             "mapping": {ts[i]: ps[j] for i, j in zip(r, c) if M[i, j] > 0}}
 
 
+def id_counts(co, mapping, r):
+    """IDTP, IDFP, IDFN of one camera (or all) under a one-to-one mapping, each by where it comes from; r: the
+    counts your_boxes, found, found_with_a_cow, its_named_boxes. Against them, what your labels would give a
+    system right every time: IDTP = your boxes, IDFP = IDFN = 0."""
+    tp = int(sum(n for (t, p), n in co.items() if mapping.get(t) == p))
+    wrong = int(r["found_with_a_cow"]) - tp                         # found, named, not the name she holds
+    fn = {"not_found": int(r["your_boxes"] - r["found"]),            # no box of its on yours
+          "found_without_a_name": int(r["found"] - r["found_with_a_cow"]),
+          "wrong_name": wrong}
+    fp = {"wrong_name": wrong,                                      # the same boxes: a wrong name is both
+          "named_where_you_have_no_box": int(r["its_named_boxes"] - r["found_with_a_cow"])}
+    return {"idtp": tp, "idfn": sum(fn.values()), "idfn_by": fn, "idfp": sum(fp.values()), "idfp_by": fp,
+            "dataset": {"idtp": int(r["your_boxes"]), "idfp": 0, "idfn": 0, "your_boxes": int(r["your_boxes"])}}
+
+
 def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page_dir=None, cameras=None):
     """Your labelled boxes (status done, with an id) against the second pass at the same camera and second.
 
@@ -242,11 +257,13 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     out = {"all": idf1(co, tot("your_boxes"), tot("its_named_boxes")), "cameras": {}}
     out["all"].update({k: tot(k) for k in ("frames", "frames_not_played", "your_boxes", "found", "found_with_a_cow",
                                            "its_named_boxes")})
+    out["all"]["counts"] = id_counts(co, out["all"]["mapping"], out["all"])
     for c in allc:
         r = idf1(cam_co[c], n[(c, "your_boxes")], n[(c, "its_named_boxes")])
         r.update({k: n[(c, k)] for k in ("frames", "frames_not_played", "your_boxes", "found", "found_with_a_cow",
                                          "its_named_boxes")})
-        r.pop("mapping")
+        r["counts"] = id_counts(cam_co[c], r.pop("mapping"), r)                   # its own one-to-one mapping
+        r["counts_in_all"] = id_counts(cam_co[c], out["all"]["mapping"], r)       # all cameras' one mapping
         out["cameras"][c] = r
     by_pred, by_true = collections.defaultdict(collections.Counter), collections.defaultdict(collections.Counter)
     for (t, p), k in co.items():
@@ -596,6 +613,31 @@ def clock_shift(store, frames):
     return best * 3600.0
 
 
+def print_counts(sc):
+    """IDTP / IDFP / IDFN per camera, each by its kind, beside what your labels would give (a system right every
+    time) - per camera under its own mapping, then under all cameras' one mapping (what IDF1 over all counts)."""
+    if "counts" not in sc["all"]:
+        return
+    head = (f"  {'':6s} {'IDTP':>6s} {'IDFP':>6s} {'= wrong':>8s} {'+ extra':>8s} {'IDFN':>6s} {'= missed':>9s} "
+            f"{'+ no name':>10s} {'+ wrong':>8s} {'IDF1':>6s} | dataset: {'IDTP':>5s} {'IDFP':>4s} {'IDFN':>4s}")
+    row = lambda name, k, f1: (f"  {name:6s} {k['idtp']:6d} {k['idfp']:6d} {k['idfp_by']['wrong_name']:8d} "
+                               f"{k['idfp_by']['named_where_you_have_no_box']:8d} {k['idfn']:6d} "
+                               f"{k['idfn_by']['not_found']:9d} {k['idfn_by']['found_without_a_name']:10d} "
+                               f"{k['idfn_by']['wrong_name']:8d} {f1:6.1%} |          {k['dataset']['idtp']:5d} "
+                               f"{k['dataset']['idfp']:4d} {k['dataset']['idfn']:4d}")
+    f1 = lambda k: 2 * k["idtp"] / max(1, 2 * k["idtp"] + k["idfp"] + k["idfn"])
+    for title, key in (("each camera, its own one-to-one mapping (per-camera IDF1):", "counts"),
+                       ("each camera under all cameras' one mapping (adds up to IDF1 over all):", "counts_in_all")):
+        print(f"\n  {title}")
+        print("  (wrong: found, named, not her name; extra: named where you have no box; missed: no box of its on"
+              " yours; no name: found, no name)" if key == "counts" else "", end="\n" if key == "counts" else "")
+        print(head)
+        for c, r in sorted(sc["cameras"].items()):
+            print(row(c, r[key], f1(r[key])))
+        if key == "counts_in_all":
+            print(row("all", sc["all"]["counts"], f1(sc["all"]["counts"])))
+
+
 def print_score(sc):
     a = sc["all"]
     if sc.get("clock_shift_s"):
@@ -607,6 +649,7 @@ def print_score(sc):
           f"{a['idr']:.1%}: of your boxes, the right cow)")
     for c, r in sorted(sc["cameras"].items()):
         print(f"  {c}: IDF1 {r['idf1']:.1%} (IDP {r['idp']:.1%}, IDR {r['idr']:.1%}) on {r['your_boxes']} boxes")
+    print_counts(sc)
     x = sc.get("cross_camera")
     if x and x["cows_on_two_cameras"]:
         print(f"  your cows scored on two cameras or more: {x['cows_on_two_cameras']}; the same cow of its on all of "
