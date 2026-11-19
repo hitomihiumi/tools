@@ -29,14 +29,14 @@ url = "rtsp://y"
 """
 
 
-def _video(path, seconds, fps=5, size=(640, 360)):
-    """A cow (a white block) walking across a dark pen, so frames differ."""
+def _video(path, seconds, fps=5, size=(640, 360), still=False):
+    """A cow (a white block) walking across a dark pen, so frames differ (still: she lies in one place)."""
     import cv2
     os.makedirs(os.path.dirname(path), exist_ok=True)
     w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, size)
     for i in range(seconds * fps):
         img = np.full((size[1], size[0], 3), 40, np.uint8)
-        x = int((i / (seconds * fps)) * (size[0] - 120))
+        x = 100 if still else int((i / (seconds * fps)) * (size[0] - 120))
         img[150:300, x:x + 120] = 230
         w.write(img)
     w.release()
@@ -465,6 +465,25 @@ def test_moments_page_marks_a_moment_a_camera_has_no_frame_of(capsys):
         data = json.loads(page.split("const D = ", 1)[1].split(";\n", 1)[0])
         assert data["missing"] == {"cam1": 1, "cam2": 1} and data["complete"] == 2
         assert data["labels"]["frames/cam1/100.jpg"]["boxes"] == [[0.1, 0.1, 0.3, 0.3, "7"]]
+
+
+def test_frames_of_every_camera_at_the_same_moments():
+    """Cameras whose recordings began seconds apart are cut on one grid of moments (not each from its own start),
+    and a camera nothing moves on keeps its frames while another camera's moment changed."""
+    import box_dataset
+    with tempfile.TemporaryDirectory() as d:
+        cfg, _ = _setup(d)
+        rec = os.path.join(d, "rec2")
+        _video(os.path.join(rec, "cam1_2026-10-20_06-00-00.mp4"), 60)
+        _video(os.path.join(rec, "cam2_2026-10-20_06-00-03.mp4"), 60, still=True)
+        out = os.path.join(d, "boxes")
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--every", "10", "--detector", "none"])
+        fr = json.load(open(os.path.join(out, "frames.json")))["frames"]
+        at = {c: sorted(f["time"] for f in fr if f["cam"] == c) for c in ("cam1", "cam2")}
+        assert at["cam1"] == [f"2026-10-20 06:00:{s:02d}" for s in (5, 15, 25, 35, 45, 55)]
+        assert at["cam2"] == at["cam1"]                                # the same moments, still as she is
+        ms = box_dataset.moments(fr, 1.0)
+        assert len(ms) == 6 and all(set(c) == {"cam1", "cam2"} for _, c in ms)
 
 
 def test_frames_cut_at_another_cameras_moments_on_the_barns_clock():

@@ -99,6 +99,38 @@ def moments_plan(recs, moments, index, cam, offset, near=0.6):
     return out
 
 
+def plan_common(by_cam, every, max_n):
+    """{camera: [(path, start ts, fps, n frames)]} -> [{camera: (path, frame index, its time)}]: one grid of moments
+    for every camera - every `every` s from the earliest recording's start (half a step in), where at least one
+    camera records - thinned evenly to at most max_n moments; each camera at each moment its recording has. (Each
+    camera's own grid from its own recording's start put cameras that began a few seconds apart on moments of their
+    own: no moment had every camera.)"""
+    recs = [r for rs in by_cam.values() for r in rs]
+    if not recs or every <= 0:
+        return []
+    t0 = min(ts for _, ts, _, _ in recs) + every / 2
+    ks = set()
+    for _, ts, fps, n in recs:
+        end = ts + n / fps
+        ks.update(range(int(np.ceil((ts - t0) / every)), int(np.floor((end - 1e-6 - t0) / every)) + 1))
+    ks = sorted(ks)
+    if max_n and len(ks) > max_n:
+        ks = [ks[i] for i in np.unique(np.round(np.linspace(0, len(ks) - 1, max_n)).astype(int))]
+    out = []
+    for k in ks:
+        t = t0 + k * every
+        at = {}
+        for cam, rs in by_cam.items():
+            for path, ts, fps, n in rs:
+                i = int(round((t - ts) * fps))
+                if 0 <= i < n:
+                    at[cam] = (path, i, ts + i / fps)
+                    break
+        if at:
+            out.append(at)
+    return out
+
+
 def changed(a, b, min_change):
     """Two small grey thumbnails differ by more than min_change (0-255, mean) - a frame worth labelling."""
     return b is None or float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean()) >= min_change
@@ -195,43 +227,57 @@ def cmd_frames(args):
     if args.cameras and args.again:
         recut(index, out, by_cam, cams, width, set(args.cameras))
     moments = same_moments(index, args.moments_of, cams, args.barn_clock) if args.moments_of else None
-    for cam, rs in sorted(by_cam.items()):
-        c = cams[cam]
-        if moments is not None:
-            if cam in args.moments_of:
-                continue
-            plan = moments_plan(rs, moments, index, cam, float(c.get("time_offset_s") or 0.0) if args.barn_clock else 0.0)
-        else:
-            plan = plan_times(rs, args.every, args.max)
-        folder = os.path.join(out, "frames", cam)
-        os.makedirs(folder, exist_ok=True)
-        kept, last, cap, cap_path = 0, None, None, None
-        for path, i, ts in plan:
-            name = f"{cam}_{dt.datetime.fromtimestamp(ts, tz):%Y%m%d_%H%M%S}.jpg"
-            rel = f"frames/{cam}/{name}"
+    if moments is not None:                   # those cameras at the other cameras' moments: every one of them
+        steps = [({cam: step}, False) for cam, rs in sorted(by_cam.items()) if cam not in args.moments_of
+                 for step in moments_plan(rs, moments, index, cam,
+                                          float(cams[cam].get("time_offset_s") or 0.0) if args.barn_clock else 0.0)]
+    else:                                     # one grid of moments for every camera
+        steps = [(m, True) for m in plan_common(by_cam, args.every, args.max)]
+    caps, last = {}, {}
+    kept, looked = collections.Counter(), collections.Counter()
+    skipped = 0
+    for step, check in steps:
+        cut = {}
+        for cam, (path, i, ts) in sorted(step.items()):
+            looked[cam] += 1
+            rel = f"frames/{cam}/{cam}_{dt.datetime.fromtimestamp(ts, tz):%Y%m%d_%H%M%S}.jpg"
             if rel in have:
-                kept += 1
+                kept[cam] += 1
                 continue
-            if path != cap_path:
-                if cap is not None:
-                    cap.release()
-                cap, cap_path = cv2.VideoCapture(path), path
-            img = cut_frame(cap, i, c, width)
-            if img is None:
-                continue
-            small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY), (64, 36), interpolation=cv2.INTER_AREA)
-            if moments is None and not changed(small, last, args.min_change):   # the other cameras' moments: all of them
-                continue
-            last = small
+            if caps.get(cam, (None, None))[1] != path:
+                if cam in caps:
+                    caps[cam][0].release()
+                caps[cam] = (cv2.VideoCapture(path), path)
+            img = cut_frame(caps[cam][0], i, cams[cam], width)
+            if img is not None:
+                cut[cam] = (rel, i, ts, img)
+        if not cut:
+            continue
+        smalls = {cam: cv2.resize(cv2.cvtColor(v[3], cv2.COLOR_RGB2GRAY), (64, 36), interpolation=cv2.INTER_AREA)
+                  for cam, v in cut.items()}
+        # a moment is skipped only when it barely changed on every camera: one camera's quiet moment is still that
+        # moment of the others (the cameras' frames of one moment are what scoring and calibration pair)
+        if check and not any(changed(smalls[c], last.get(c), args.min_change) for c in cut):
+            skipped += 1
+            continue
+        for cam, (rel, i, ts, img) in cut.items():
+            last[cam] = smalls[cam]
+            os.makedirs(os.path.join(out, "frames", cam), exist_ok=True)
             Image.fromarray(img).save(os.path.join(out, rel), quality=92)
+            c = cams[cam]
             index["frames"].append({"file": rel, "cam": cam, "ts": ts, "w": img.shape[1], "h": img.shape[0],
                                     "time": dt.datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M:%S"),
                                     "frame": i, "exclude": c.get("exclude") or []})
             have.add(rel)
-            kept += 1
-        if cap is not None:
-            cap.release()
-        print(f"[boxes] {cam}: {kept} frames from {len(rs)} recordings ({len(plan)} looked at)", flush=True)
+            kept[cam] += 1
+    for cap, _ in caps.values():
+        cap.release()
+    for cam, rs in sorted(by_cam.items()):
+        if looked[cam] or moments is None:
+            print(f"[boxes] {cam}: {kept[cam]} frames from {len(rs)} recordings ({looked[cam]} looked at)", flush=True)
+    if skipped:
+        print(f"[boxes] {skipped} moments left out: hardly changed on every camera (--min-change {args.min_change:g})",
+              flush=True)
     index["frames"].sort(key=lambda f: (f["cam"], f["ts"]))
     if args.detector != "none":
         detect(index, out, args.detector or cfg["detector"]["weights"], cfg)

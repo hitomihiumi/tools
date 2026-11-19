@@ -307,6 +307,9 @@ Open `docker/data/boxes/moments.html`: a row a moment, a column a camera, your b
 colour an id: the same cow on every camera at a glance); "no frame" in red where a camera has none, "only moments
 where a camera has no frame" hides the rest. The log and the page say how to fill them (`boxes frames ... --moments-of
 <camera> --cameras ...`: those cameras cut at that camera's moments).
+`boxes frames` cuts every camera on one grid of moments (every `--every` s from the earliest recording's start) and
+leaves a moment out only when it hardly changed on every camera, so a set cut now has every camera at every moment
+it records; a set cut before that (each camera on its own grid) is better cut again into a new folder.
 
 **One id, one cow on every camera?** Cross-camera training and checking only work when a cow has the
 same id on every camera. See it, and fix it:
