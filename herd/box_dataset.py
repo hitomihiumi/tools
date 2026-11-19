@@ -301,6 +301,130 @@ def cmd_page(args):
           f"{os.path.join(out, 'boxes.html')}")
 
 
+def moments(frames, near=1.0):
+    """The cut frames as moments: sorted by time, a frame within `near` s of a moment's first frame is of that moment
+    (trial pairs two cameras' frames the same way, by file time) -> [(ts, {cam: [frame, ...]})]."""
+    out = []
+    for f in sorted(frames, key=lambda f: f["ts"]):
+        if out and f["ts"] - out[-1][0] <= near:
+            out[-1][1].setdefault(f["cam"], []).append(f)
+        else:
+            out.append((f["ts"], {f["cam"]: [f]}))
+    return out
+
+
+MOMENTS_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frames by moment</title>
+<style>
+:root { --bg: #f6f6f4; --fg: #1d1d1b; --mute: #6b6b66; --line: #d9d9d4; --card: #fff; --bad: #c62828; --badbg: #fdecea;
+        --warn: #a15c00; --ok: #2e7d32; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ececea; --mute: #9a9a95; --line: #33332f; --card: #20201e;
+        --bad: #ef7d74; --badbg: #3a1f1d; --warn: #e2a24a; --ok: #7cc47f; } }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); padding: 10px 16px; }
+h1 { font-size: 17px; margin: 0 0 6px; }
+.sum { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--mute); }
+.sum b { color: var(--fg); }
+.sum .bad b { color: var(--bad); }
+.ctl { margin-top: 6px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.grid { display: grid; gap: 6px; padding: 8px 16px 40px; }
+.head { position: sticky; top: var(--head, 96px); z-index: 1; background: var(--bg); font-weight: 600; padding: 4px 0; }
+.t { color: var(--mute); font-variant-numeric: tabular-nums; padding-top: 4px; white-space: nowrap; }
+.cell { background: var(--card); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; min-height: 60px; }
+.cell .pic { position: relative; }
+.cell img { display: block; width: 100%; height: auto; }
+.cell svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.cell .cap { display: flex; justify-content: space-between; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--mute); }
+.cell.missing { border: 2px dashed var(--bad); background: var(--badbg); display: flex; align-items: center;
+                justify-content: center; color: var(--bad); font-weight: 600; }
+.cell.twice { outline: 2px solid var(--warn); }
+.done { color: var(--ok); } .skip { color: var(--warn); }
+.row.complete.hide { display: none; }
+</style></head><body>
+<header><h1>Frames by moment</h1><div class="sum" id="sum"></div>
+<div class="ctl"><label><input type="checkbox" id="only"> only moments where a camera has no frame</label>
+<label><input type="checkbox" id="boxes" checked> your boxes</label><span id="hint" class="t"></span></div></header>
+<div class="grid" id="grid"></div>
+<script>
+const D = __DATA__;
+const cams = D.cams, grid = document.getElementById("grid");
+grid.style.gridTemplateColumns = `90px repeat(${cams.length}, minmax(140px, 1fr))`;
+const fmt = ts => new Date((ts + D.tz * 3600) * 1000).toISOString().slice(11, 19);
+const colour = id => `hsl(${(parseInt(id, 10) || [...String(id)].reduce((a, c) => a + c.charCodeAt(0), 0)) * 47 % 360} 85% 55%)`;
+const sum = document.getElementById("sum");
+sum.innerHTML = `<span><b>${D.moments.length}</b> moments, <b>${D.complete}</b> on every camera (within ${D.near} s)</span>` +
+  cams.map(c => `<span class="${D.missing[c] ? "bad" : ""}">${c}: <b>${D.count[c]}</b> frames, <b>${D.missing[c]}</b> moments without one</span>`).join("");
+const head = [`<div class="head"></div>`].concat(cams.map(c => `<div class="head">${c}</div>`));
+let html = head.join("");
+for (const m of D.moments) {
+  const full = cams.every(c => m.at[c]);
+  let row = `<div class="t row ${full ? "complete" : ""}">${fmt(m.ts)}</div>`;
+  for (const c of cams) {
+    const fs = m.at[c];
+    if (!fs) { row += `<div class="cell row missing ${full ? "complete" : ""}">no frame</div>`; continue; }
+    const f = fs[0], lab = D.labels[f.file] || {}, bx = lab.boxes || [];
+    const dt = f.ts - m.ts, st = lab.status || "";
+    const svg = bx.map(b => `<rect x="${b[0] * 100}%" y="${b[1] * 100}%" width="${(b[2] - b[0]) * 100}%" height="${(b[3] - b[1]) * 100}%"
+        fill="none" stroke="${b[4] ? colour(b[4]) : "#bbb"}" stroke-width="2"/>` + (b[4] ? `<text x="${b[0] * 100 + 0.5}%" y="${b[1] * 100 + 6}%"
+        fill="${colour(b[4])}" font-size="13" font-weight="700" stroke="#000" stroke-width="0.6">${b[4]}</text>` : "")).join("");
+    row += `<div class="cell row ${fs.length > 1 ? "twice" : ""} ${full ? "complete" : ""}" title="${f.file}">
+      <div class="pic"><a href="${f.file}" target="_blank"><img loading="lazy" src="${f.file}" alt="${c} ${fmt(f.ts)}"></a>
+      <svg class="bx">${svg}</svg></div>
+      <div class="cap"><span>${dt ? (dt > 0 ? "+" : "") + dt.toFixed(1) + " s" : fmt(f.ts)}${fs.length > 1 ? " · " + fs.length + " frames" : ""}</span>
+      <span class="${st}">${st ? st + " · " : ""}${bx.length} boxes</span></div></div>`;
+  }
+  html += row;
+}
+grid.innerHTML = html;
+const setHead = () => document.documentElement.style.setProperty("--head", document.querySelector("header").offsetHeight + "px");
+setHead(); addEventListener("resize", setHead);
+document.getElementById("only").onchange = e => grid.querySelectorAll(".complete").forEach(x => x.classList.toggle("hide", e.target.checked));
+document.getElementById("boxes").onchange = e => grid.querySelectorAll("svg.bx").forEach(x => x.style.display = e.target.checked ? "" : "none");
+if (D.missing_any) document.getElementById("hint").textContent = "fill them: herd.py boxes frames ... --moments-of " + D.fullest + " --cameras " + cams.filter(c => D.missing[c] && c !== D.fullest).join(" ");
+</script></body></html>
+"""
+
+
+def cmd_moments(args):
+    """D/moments.html: every moment's frames side by side, one column a camera - a moment some camera has no frame of
+    is marked (and listed in the log); with --labels your boxes drawn on them, coloured by cow id."""
+    out = os.path.abspath(args.data)
+    index = json.load(open(os.path.join(out, "frames.json"), encoding="utf-8"))
+    frames = index["frames"]
+    cams = sorted({f["cam"] for f in frames})
+    ms = moments(frames, args.near)
+    labels = read_labels(args.labels)
+    count = collections.Counter(f["cam"] for f in frames)
+    missing = {c: sum(1 for _, at in ms if c not in at) for c in cams}
+    twice = sum(1 for _, at in ms for v in at.values() if len(v) > 1)
+    tz = 0.0
+    if args.config:
+        tz = float(load_config(args.config)["farm"]["timezone_offset_hours"])
+    data = {"cams": cams, "near": args.near, "tz": tz, "count": dict(count), "missing": missing,
+            "missing_any": any(missing.values()), "fullest": max(cams, key=lambda c: (count[c], c)),
+            "complete": sum(1 for _, at in ms if all(c in at for c in cams)),
+            "moments": [{"ts": ts, "at": {c: [{"file": f["file"], "ts": f["ts"]} for f in v] for c, v in at.items()}}
+                        for ts, at in ms],
+            "labels": {k: {"status": v.get("status"), "boxes": [list(map(float, b[:4])) + [str(b[4]).strip() if len(b) > 4 and
+                                                                                           b[4] not in (None, "") else ""]
+                                                                for b in v.get("boxes", [])]}
+                       for k, v in labels.items()}}
+    path = os.path.join(out, "moments.html")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(MOMENTS_PAGE.replace("__DATA__", json.dumps(data).replace("</", "<\\/")))
+    full = data["complete"]
+    print(f"[boxes] {len(ms)} moments (frames within {args.near:g} s of each other), {full} with a frame of every camera"
+          + (f"; {twice} times a camera has two frames in one moment" if twice else ""))
+    for c in cams:
+        print(f"  {c}: {count[c]} frames, no frame in {missing[c]} moments")
+    if any(missing.values()):
+        lack = [c for c in cams if missing[c] and c != data["fullest"]]
+        print(f"  fill them: herd.py boxes frames --config ... --videos ... --out {args.data} --moments-of "
+              f"{data['fullest']} --cameras {' '.join(lack)}")
+    print(f"-> {path}")
+
+
 def split_blocks(frames, val_share, block_s, seed):
     """Done frames -> (train, valid): whole blocks (a camera's hour) go to valid, so no valid frame has a
     training frame of the same minutes beside it; at least one block each when there are two."""
@@ -1239,6 +1363,12 @@ def main(argv=None):
     g = sub.add_parser("page", help="the labelling page again (after a code update, or with a labels.json)")
     g.add_argument("--data", required=True)
     g.add_argument("--labels", default=None)
+    mo = sub.add_parser("moments", help="the cut frames by moment, every camera side by side -> moments.html (a moment "
+                                        "some camera has no frame of marked)")
+    mo.add_argument("--data", required=True)
+    mo.add_argument("--labels", default=None, help="your labels.json: its boxes drawn, coloured by cow id")
+    mo.add_argument("--near", type=float, default=1.0, help="frames this many s apart are one moment (as trial pairs them)")
+    mo.add_argument("--config", default=None, help="the barn's config: times shown in the farm's time zone")
     gl = sub.add_parser("gallery", help="every id of every camera as a row of her crops -> ids.html (check, rename)")
     gl.add_argument("--data", required=True)
     gl.add_argument("--labels", required=True)
@@ -1269,7 +1399,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.cmd == "frames" and not (args.videos or args.video):
         p.error("frames: --videos DIR or --video cam=file")
-    {"frames": cmd_frames, "page": cmd_page, "export": cmd_export, "ids": cmd_ids, "gallery": cmd_gallery}[args.cmd](args)
+    {"frames": cmd_frames, "page": cmd_page, "export": cmd_export, "ids": cmd_ids, "gallery": cmd_gallery,
+     "moments": cmd_moments}[args.cmd](args)
 
 
 if __name__ == "__main__":

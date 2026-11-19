@@ -296,6 +296,18 @@ It writes `docker/data/herd_barn_ids_<date>.tgz`: each named box cut as the barn
 the cows held out. Every frame with named boxes counts, done or not (`--done-only`: only done ones). Put it in the pod's `/workspace`; `reid_pod.sh` adds the set `barn_ids` to training.
 The same labels.json also makes the detector's set (`boxes export`).
 
+**Every camera at every moment?** Cross-camera scoring and calibration pair two cameras' frames of one moment
+(within 1 s). See which moments some camera has no frame of:
+
+```bash
+docker compose run --rm herd boxes moments --data /data/boxes --labels /data/labels.json --config /data/barn.toml
+```
+
+Open `docker/data/boxes/moments.html`: a row a moment, a column a camera, your boxes drawn with their ids (one
+colour an id: the same cow on every camera at a glance); "no frame" in red where a camera has none, "only moments
+where a camera has no frame" hides the rest. The log and the page say how to fill them (`boxes frames ... --moments-of
+<camera> --cameras ...`: those cameras cut at that camera's moments).
+
 **One id, one cow on every camera?** Cross-camera training and checking only work when a cow has the
 same id on every camera. See it, and fix it:
 

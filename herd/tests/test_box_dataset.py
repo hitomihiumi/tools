@@ -445,6 +445,28 @@ def test_fix_videos_command():
     assert "copy" in cp and "libx264" not in cp
 
 
+def test_moments_page_marks_a_moment_a_camera_has_no_frame_of(capsys):
+    """boxes moments: the frames grouped into moments (within --near s), every camera a column; a moment some camera
+    has no frame of is counted, said, and the page lists it; your boxes go on it with their ids."""
+    import box_dataset
+    with tempfile.TemporaryDirectory() as d:
+        frames = ([{"file": f"frames/cam1/{t}.jpg", "cam": "cam1", "ts": float(t)} for t in (100, 120, 140)] +
+                  [{"file": f"frames/cam2/{t}.jpg", "cam": "cam2", "ts": t + 0.4} for t in (100, 140, 160)])
+        json.dump({"frames": frames}, open(os.path.join(d, "frames.json"), "w"))
+        ms = box_dataset.moments(frames, 1.0)
+        assert [round(ts) for ts, _ in ms] == [100, 120, 140, 160] and set(ms[0][1]) == {"cam1", "cam2"}
+        lp = os.path.join(d, "labels.json")
+        json.dump({"frames": {"frames/cam1/100.jpg": {"status": "done", "boxes": [[0.1, 0.1, 0.3, 0.3, "7"]]}}}, open(lp, "w"))
+        box_dataset.main(["moments", "--data", d, "--labels", lp])
+        said = capsys.readouterr().out
+        assert "4 moments" in said and "2 with a frame of every camera" in said
+        assert "cam1: 3 frames, no frame in 1 moments" in said and "cam2: 3 frames, no frame in 1 moments" in said
+        page = open(os.path.join(d, "moments.html"), encoding="utf-8").read()
+        data = json.loads(page.split("const D = ", 1)[1].split(";\n", 1)[0])
+        assert data["missing"] == {"cam1": 1, "cam2": 1} and data["complete"] == 2
+        assert data["labels"]["frames/cam1/100.jpg"]["boxes"] == [[0.1, 0.1, 0.3, 0.3, "7"]]
+
+
 def test_frames_cut_at_another_cameras_moments_on_the_barns_clock():
     """--moments-of cam1 --cameras cam2: cam2 cut at cam1's moments (where its recording has them) - at the same
     file time, or with --barn-clock its own time_offset_s taken off (the same instant of the barn)."""
