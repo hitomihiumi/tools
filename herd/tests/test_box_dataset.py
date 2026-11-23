@@ -157,6 +157,7 @@ def test_frames_page_and_export_for_the_detector():
         html = open(os.path.join(out, "boxes.html"), encoding="utf-8").read()
         data = json.loads(html.split("const DATA = ", 1)[1].split(";\n", 1)[0])
         assert len(data["frames"]) == 18 and "Save labels.json" in html
+        assert 'id="swmap"' in html and 'id="swfrom"' in html and "function swGo()" in html   # change ids in a range
         # again: nothing new is cut or detected
         box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--every", "10", "--detector", "none"])
         assert len(json.load(open(os.path.join(out, "frames.json")))["frames"]) == 18

@@ -1022,7 +1022,10 @@ cow id, from her box on the other cameras' frames of the same moment (within 2 s
 here", else only what it lacks; "from cam1" takes them from that camera only (on all frames, over what is there: needed);
 what you set on a box with a cow id is set on her other cameras' boxes of that moment too, over what they had ("set on her
 other cameras too") - once a box has both the next box missing one is selected. <kbd>P</kbd> also takes posture
-and activity from the frame before for boxes in the same place (check them).</p>
+and activity from the frame before for boxes in the same place (check them). <b>Two cows mixed up</b> on some
+frames: <b>change ids</b> - type <code>2=3 3=2</code> (swaps them; <code>5=x</code> takes an id off), open the first wrong
+frame, <b>from here</b>, the last one, <b>to here</b> (that camera's frames between them), <b>change</b>; <b>undo the change</b>
+takes it back.</p>
 <div class="bar">
 <button id="prev">&larr;</button><span id="pos"></span><button id="next">&rarr;</button>
 <select id="cam"></select><label><input type="checkbox" id="todo"> only not done</label>
@@ -1035,6 +1038,14 @@ and activity from the frame before for boxes in the same place (check them).</p>
 <button id="fillid" title="the ids typed by hand carried through all of this camera's frames, by where the cows are (F)">fill ids through the recording (F)</button>
 <label title="fill only the frames you have opened and edited"><input type="checkbox" id="onlyedited"> only frames I edited</label>
 <span class="mute">select a box, <kbd>I</kbd> - type her tag - <kbd>Enter</kbd> (the next box without an id is selected)</span></div>
+<div class="bar" id="swapbar"><b>change ids</b>
+<input id="swmap" size="14" placeholder="2=3 3=2" title="old=new pairs, all at once: 2=3 3=2 swaps the two cows; 5=x takes id 5 off">
+<select id="swcam" title="the camera whose frames change"></select>
+<span class="mute">frames</span><button id="swfrom" title="the range starts at the frame open now">from here</button><span id="swfromv"></span>
+<button id="swto" title="the range ends at the frame open now">to here</button><span id="swtov"></span>
+<button id="swall" title="no range: every frame">all frames</button>
+<button class="main" id="swgo">change</button><button id="swundo" disabled>undo the change</button>
+<span class="mute" id="swinfo"></span></div>
 <div class="bar" id="attbar"><span class="mute">posture</span>
 <button class="att" data-k="posture" data-v="standing" title="1">standing <kbd>1</kbd></button>
 <button class="att" data-k="posture" data-v="lying" title="2">lying <kbd>2</kbd></button>
@@ -1109,6 +1120,7 @@ function fit() {
   cv.width = Math.round(img.naturalWidth * scale); cv.height = Math.round(img.naturalHeight * scale);
 }
 function status() {
+  if ($("swinfo")) swShow();
   const f = frame(), s = f && labels[f.file] ? (stale(f) ? "stale" : labels[f.file].status || "") : "";
   $("status").textContent = s === "done" ? "done" : s === "skip" ? "skipped" : s === "stale" ? "cut again - check it, Enter" : "not done";
   $("status").className = s;
@@ -1328,6 +1340,68 @@ function attFromCams(all) {
     (over ? " (over what they had)" : "") +
     (all ? ` (${fr} frame passes)` : "") + ": check them";
 }
+// change ids (2=3 3=2 swaps them) on a camera's frames, between two frames chosen with "from here" / "to here"
+let swFrom = null, swTo = null, swBefore = null;
+function swMap() {
+  const m = {}, bad = [];
+  $("swmap").value.split(/[\s,;]+/).filter(Boolean).forEach(p => {
+    const kv = p.split(/[=:]/);
+    if (kv.length !== 2 || !kv[0].trim() || !kv[1].trim()) { bad.push(p); return; }
+    const [a, b] = kv.map(v => v.trim());
+    if (a in m && m[a] !== b) bad.push(p); else m[a] = b;
+  });
+  return [m, bad];
+}
+const swCamOf = () => $("swcam").value === "*" ? "" : ($("swcam").value || (frame() || {}).cam || "");
+function swFrames() {
+  const c = swCamOf();
+  return DATA.frames.filter(g => (!c || g.cam === c) && (swFrom === null || g.ts >= swFrom - 0.5) &&
+                                 (swTo === null || g.ts <= swTo + 0.5));
+}
+function swPlan() {                // [[frame, its new boxes, boxes changed]] for the frames in range with those ids
+  const [m] = swMap(), out = [];
+  if (!Object.keys(m).length) return out;
+  swFrames().forEach(g => {
+    const l = labels[g.file]; if (!l) return;
+    let n = 0;
+    const bs = (l.boxes || []).map(b => {
+      const id = String(idOf(b)).trim(); if (!id || !(id in m)) return b;
+      n++;
+      const to = m[id];
+      return to.toLowerCase() === "x" ? pack(b, "", false, attOf(b)) : pack(b, to, autoOf(b), attOf(b));
+    });
+    if (n) out.push([g, bs, n]);
+  });
+  return out;
+}
+function swShow() {
+  const t = ts => { const g = DATA.frames.find(f => f.ts === ts); return g ? g.time.slice(11) : ""; };
+  $("swfromv").textContent = swFrom === null ? "first" : t(swFrom);
+  $("swtov").textContent = swTo === null ? "last" : t(swTo);
+  const [m, bad] = swMap(), c = swCamOf(), fr = swFrames();
+  if (bad.length) { $("swinfo").textContent = `not old=new: ${bad.join(" ")}`; $("swgo").disabled = true; return; }
+  const plan = swPlan(), n = plan.reduce((k, p) => k + p[2], 0);
+  $("swgo").disabled = !n;
+  $("swinfo").textContent = !Object.keys(m).length ? `${fr.length} frames of ${c || "every camera"} - type old=new` :
+    `${n} boxes on ${plan.length} of ${fr.length} frames of ${c || "every camera"} would change`;
+}
+function swGo() {
+  const plan = swPlan(); if (!plan.length) return;
+  const [m] = swMap(), n = plan.reduce((k, p) => k + p[2], 0);
+  const what = Object.entries(m).map(([a, b]) => `${a} -> ${b.toLowerCase() === "x" ? "(no id)" : b}`).join(", ");
+  if (!confirm(`${what}: ${n} boxes on ${plan.length} frames of ${swCamOf() || "every camera"}?`)) return;
+  swBefore = JSON.stringify(labels);
+  plan.forEach(([g, bs]) => { labels[g.file] = Object.assign({}, labels[g.file], {boxes: bs.map(rnd)}); });
+  store(); open(); idList(); swShow();
+  $("swundo").disabled = false;
+  $("info").textContent += ` - ids changed (${what}): ${n} boxes on ${plan.length} frames`;
+}
+function swUndo() {
+  if (!swBefore) return;
+  labels = JSON.parse(swBefore); swBefore = null;
+  store(); open(); idList(); swShow();
+  $("swundo").disabled = true;
+}
 function edited() {
   const f = frame();
   const was = labels[f.file] || {};
@@ -1420,6 +1494,15 @@ $("prev").onclick = () => go(-1); $("next").onclick = () => go(1);
 $("done").onclick = () => mark("done"); $("skip").onclick = () => mark("skip");
 $("reset").onclick = () => { const f = frame(); if (!f) return; push(); [boxes, cands] = detBoxes(f); sel = -1; edited(); };
 ["cam", "todo"].forEach(id => $(id).onchange = () => { filter(order[at]); open(); });
+$("swcam").innerHTML = '<option value="">this frame\'s camera</option><option value="*">every camera</option>' +
+  cams.map(c => `<option value="${c}">${c}</option>`).join("");
+$("swmap").oninput = swShow; $("swcam").onchange = swShow;
+$("swmap").addEventListener("keydown", e => { if (e.key === "Enter") { swGo(); e.preventDefault(); } });
+const swHere = f => { if (!$("swcam").value) $("swcam").value = f.cam; };     // the range is that camera's
+$("swfrom").onclick = () => { const f = frame(); if (!f) return; swHere(f); swFrom = f.ts; if (swTo !== null && swTo < swFrom) swTo = null; swShow(); };
+$("swto").onclick = () => { const f = frame(); if (!f) return; swHere(f); swTo = f.ts; if (swFrom !== null && swFrom > swTo) swFrom = null; swShow(); };
+$("swall").onclick = () => { swFrom = swTo = null; swShow(); };
+$("swgo").onclick = swGo; $("swundo").onclick = swUndo;
 document.addEventListener("keydown", e => {
   if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
   if ((e.ctrlKey || e.metaKey) && e.key === "z") { if (undo.length) { [boxes, cands] = JSON.parse(undo.pop()); sel = -1; edited(); } e.preventDefault(); return; }

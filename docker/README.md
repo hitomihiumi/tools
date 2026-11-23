@@ -325,7 +325,9 @@ camera's cows, the right the second's; click the cow on the right that the selec
 `x` removes the id), **Save labels.json**, move it to `docker/data/`, then `boxes ids` again (and on
 the box page, Load labels.json).
 
-**Swap two ids on a camera** (or change any ids of boxes already labelled), from the command line:
+**Swap two ids on a camera**, on the box page: the **change ids** bar - type `2=3 3=2`, open the first frame
+where they are mixed up, **from here**, the last one, **to here**, **change** (it says first how many boxes on how
+many frames; **undo the change** takes it back). Or from the command line:
 
 ```bash
 docker compose run --rm herd boxes relabel --data /data/boxes --labels /data/labels.json 2=3 3=2 --camera cam2
