@@ -325,6 +325,17 @@ camera's cows, the right the second's; click the cow on the right that the selec
 `x` removes the id), **Save labels.json**, move it to `docker/data/`, then `boxes ids` again (and on
 the box page, Load labels.json).
 
+**Swap two ids on a camera** (or change any ids of boxes already labelled), from the command line:
+
+```bash
+docker compose run --rm herd boxes relabel --data /data/boxes --labels /data/labels.json 2=3 3=2 --camera cam2
+```
+
+The pairs apply at once, so `2=3 3=2` swaps the two cows (`5=x` takes id 5 off). `--camera` again for more
+cameras (none: every camera); `--from 12:10:00 --to 12:20:00` only frames of that stretch (the time as the pages
+show it). It writes over labels.json and keeps the old one as `labels.json.bak`; then, on the box page, Load
+labels.json.
+
 **Check the models on your labels** (before training anything on them - none of these frames was
 ever seen by the models):
 

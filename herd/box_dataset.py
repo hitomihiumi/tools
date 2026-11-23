@@ -761,6 +761,80 @@ def cmd_gallery(args):
           f"ids on 2+ cameras -> {out} (open it in a browser)")
 
 
+def id_map(pairs):
+    """["2=3", "3=2"] (or "2:3") -> {"2": "3", "3": "2"}: every pair at once, so 2=3 3=2 swaps the two; "x" removes."""
+    out = {}
+    for p in pairs:
+        for part in p.split(","):
+            if not part.strip():
+                continue
+            sep = "=" if "=" in part else ":"
+            if sep not in part:
+                raise SystemExit(f"[relabel] {part!r}: old=new, e.g. 2=3 3=2")
+            a, b = (v.strip() for v in part.split(sep, 1))
+            if not a or not b:
+                raise SystemExit(f"[relabel] {part!r}: old=new, e.g. 2=3 3=2")
+            if a in out and out[a] != b:
+                raise SystemExit(f"[relabel] {a} given twice: {out[a]} and {b}")
+            out[a] = b
+    return out
+
+
+def in_span(time, start, end):
+    """A frame's "YYYY-MM-DD HH:MM:SS" within [start, end]: each "HH:MM:SS" (any day) or a full date and time."""
+    def at(lim):
+        return time[11:] if len(lim) <= 8 else time
+    return not ((start and at(start) < start) or (end and at(end) > end))
+
+
+def cmd_relabel(args):
+    """Cow ids of boxes already labelled, changed on some cameras (and a stretch of time): 2=3 3=2 swaps them."""
+    src = os.path.abspath(args.data)
+    index = json.load(open(os.path.join(src, "frames.json"), encoding="utf-8"))
+    raw = json.load(open(args.labels, encoding="utf-8"))
+    labels = raw.get("frames", raw)
+    m = id_map(args.map)
+    cams = set(args.camera or [])
+    known = {f["cam"] for f in index["frames"]}
+    if cams - known:
+        raise SystemExit(f"[relabel] no such camera: {', '.join(sorted(cams - known))} (cameras: {', '.join(sorted(known))})")
+    if args.start and len(args.start) == 5:
+        args.start += ":00"
+    if args.end and len(args.end) == 5:
+        args.end += ":59"
+    changed_n = collections.Counter()
+    frames_n = 0
+    for f in index["frames"]:
+        lab = labels.get(f["file"])
+        if not lab or (cams and f["cam"] not in cams) or not in_span(f.get("time", ""), args.start, args.end):
+            continue
+        boxes, hit = [], False
+        for b in lab.get("boxes", []):
+            cow = str(b[4]).strip() if len(b) > 4 else ""
+            if cow in m:
+                new = m[cow]
+                b = list(b[:4]) if new.lower() == "x" else list(b[:4]) + [new] + list(b[5:])
+                changed_n[(f["cam"], cow, new)] += 1
+                hit = True
+            boxes.append(b)
+        if hit:
+            lab["boxes"] = boxes
+            frames_n += 1
+    for (cam, a, b), n in sorted(changed_n.items()):
+        print(f"[relabel] {cam}: {a} -> {'(no id)' if b.lower() == 'x' else b}: {n} boxes", flush=True)
+    if not changed_n:
+        print("[relabel] no box has those ids there: nothing changed", flush=True)
+        return
+    out = args.out or args.labels
+    if out == args.labels and not args.no_backup:
+        shutil.copyfile(args.labels, args.labels + ".bak")
+        print(f"[relabel] the labels as they were: {args.labels}.bak", flush=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(raw, fh, ensure_ascii=False)
+    print(f"[relabel] {sum(changed_n.values())} boxes in {frames_n} frames -> {out} "
+          f"(on the box page: Load labels.json)", flush=True)
+
+
 GALLERY = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cow ids by camera</title>
@@ -1419,6 +1493,18 @@ def main(argv=None):
     gl.add_argument("--data", required=True)
     gl.add_argument("--labels", required=True)
     gl.add_argument("--thumbs", type=int, default=8, help="crops a row")
+    rl = sub.add_parser("relabel", help="change cow ids of boxes already labelled: 2=3 3=2 swaps them (on --camera, "
+                                        "between --from and --to)")
+    rl.add_argument("--data", required=True)
+    rl.add_argument("--labels", required=True)
+    rl.add_argument("map", nargs="+", help="old=new pairs, all at once: 2=3 3=2 swaps 2 and 3; 5=x removes id 5")
+    rl.add_argument("--camera", action="append", default=None, help="only this camera's boxes (again for more); "
+                    "default every camera")
+    rl.add_argument("--from", dest="start", default=None, help="only frames from this time: HH:MM:SS (or "
+                    "\"YYYY-MM-DD HH:MM:SS\"), the farm's time as the pages show it")
+    rl.add_argument("--to", dest="end", default=None, help="only frames up to this time (as --from)")
+    rl.add_argument("--out", default=None, help="write here (default: over --labels, the old one kept as .bak)")
+    rl.add_argument("--no-backup", action="store_true")
     x = sub.add_parser("export", help="labels.json -> herd_det_barn_<date>.tgz (COCO, for run_pod.sh detector)")
     x.add_argument("--data", required=True)
     x.add_argument("--labels", required=True)
@@ -1446,7 +1532,7 @@ def main(argv=None):
     if args.cmd == "frames" and not (args.videos or args.video):
         p.error("frames: --videos DIR or --video cam=file")
     {"frames": cmd_frames, "page": cmd_page, "export": cmd_export, "ids": cmd_ids, "gallery": cmd_gallery,
-     "moments": cmd_moments}[args.cmd](args)
+     "relabel": cmd_relabel, "moments": cmd_moments}[args.cmd](args)
 
 
 if __name__ == "__main__":

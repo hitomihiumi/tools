@@ -736,3 +736,29 @@ def test_ids_gallery_rows_by_camera():
         assert set(rows) == {("cam1", "4"), ("cam2", "4"), ("cam1", "7"), ("cam2", "7")}
         assert rows[("cam1", "7")]["auto"] == rows[("cam1", "7")]["n"] == 12 and len(rows[("cam1", "4")]["thumbs"]) == 3
         assert all(os.path.exists(os.path.join(out, t["src"])) for r in data["rows"] for t in r["thumbs"])
+
+
+def test_relabel_swaps_ids_on_one_camera_from_a_time(capsys):
+    """boxes relabel 2=3 3=2 --camera cam2 --from: on cam2 from then on 2 and 3 swapped (at once, not 2->3->2),
+    their posture kept; other cameras and earlier frames as they were; the old labels kept as .bak."""
+    import box_dataset
+    with tempfile.TemporaryDirectory() as d:
+        frames = [{"file": f"frames/{c}/{c}_{s}.jpg", "cam": c, "ts": float(s), "time": f"2026-11-09 12:0{s}:00"}
+                  for c in ("cam1", "cam2") for s in (1, 2, 3)]
+        json.dump({"frames": frames}, open(os.path.join(d, "frames.json"), "w"))
+        box = lambda cow: [0.1, 0.1, 0.2, 0.2, cow, 0, {"posture": "lying"}]
+        labels = {f["file"]: {"status": "done", "boxes": [box("2"), box("3"), box("5"), [0.5, 0.5, 0.6, 0.6]]}
+                  for f in frames}
+        lp = os.path.join(d, "labels.json")
+        json.dump({"frames": labels}, open(lp, "w"))
+        box_dataset.main(["relabel", "--data", d, "--labels", lp, "2=3", "3=2", "5=x", "--camera", "cam2",
+                          "--from", "12:02"])
+        said = capsys.readouterr().out
+        assert "cam2: 2 -> 3: 2 boxes" in said and "cam2: 5 -> (no id): 2 boxes" in said
+        new = json.load(open(lp))["frames"]
+        ids = lambda f: [b[4] if len(b) > 4 else None for b in new[f]["boxes"]]
+        assert ids("frames/cam2/cam2_3.jpg") == ["3", "2", None, None]
+        assert ids("frames/cam2/cam2_1.jpg") == ids("frames/cam1/cam1_3.jpg") == ["2", "3", "5", None]
+        assert new["frames/cam2/cam2_2.jpg"]["boxes"][0] == [0.1, 0.1, 0.2, 0.2, "3", 0, {"posture": "lying"}]
+        assert json.load(open(lp + ".bak"))["frames"] == labels
+        assert box_dataset.id_map(["2:3,3:2"]) == {"2": "3", "3": "2"}
