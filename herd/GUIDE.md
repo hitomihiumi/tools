@@ -283,6 +283,11 @@ every cow:
 
 On the first start the gallery is empty and enrols the whole herd this way. Every
 night the centres are rebuilt from confirmed bursts only, so a mistake is not learnt.
+`[identity] enroll_joined = true` groups tracks of two cameras joined by where the cow
+stood (`[mct] mode = "link"`) first, as one cow whatever they look like - unless one camera
+saw two of them at once (`cannot_link`). Off by default: on the 09 Nov barn (four corner
+cameras, 13 cows, 33 groups by look) the place joins were about half two neighbours, and it
+mixed cows in the gallery (second half IDF1 60% -> 51%).
 From Tuesday 10:00 the gallery expects new cows and retires those not seen for 48 h
 after it. `names.json` (optional) maps the names to ear tags in reports.
 
@@ -380,6 +385,17 @@ cow that much further — wrong joins 2330 → 1309, tracks 78% pure, IDF1 the s
 **For calibrated cameras this is the mode to use** (`mode = "link"`): IDF1 over all cameras
 0.244 → 0.498, tracks a cow 24 → 9. With the identity model set `reacquire_sim = 0.9` (its space is tighter: at 0.7 a
 camera took back the wrong cow).
+
+**The collector (`herd.py collect`, `trial --collect`).** The linker above joins pairs as the seconds come;
+`collect.py` takes a whole stretch at once: tracks of 15 s or more grouped into cows by where two cameras saw them
+at one second (each the other's nearest within `near`, the next `margin` further; far apart: never one cow), one
+camera's track going on as another, never two tracks one camera saw at once, the bursts' names a little; then each
+group named by its bursts' votes, one name to one cow at a time. Written as `track_links` and `track_names`
+(`report.track_map` reads them first). The 09 Nov barn (4 corner cameras, 13 cows, 30 min): IDF1 over all cameras
+46.1% -> 52.4%, its second half 54.4% -> 65.0%; on the five other runs of that recording +2 to +9 over all cameras
+(wrong names 1372 -> 690 boxes; unnamed 333 -> 920: a group it is not sure of keeps no name). With the encoder's
+vectors kept (`[store] keep_fingerprints`, on in a trial) two cameras' tracks that look alike count a little
+(`look_w`): 48.3% -> 49.9%, second half 57.0% -> 59.3% on a run that kept them.
 
 **By look alone, cows are not passed between cameras.** MmCows (60 min, 4 cameras):
 a cow seen by two cameras at once got one track in 0.1–1.4% of the cases, and every

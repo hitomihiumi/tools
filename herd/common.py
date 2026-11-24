@@ -37,8 +37,10 @@ DEFAULTS = {
     # her track); what is written stays once a second
     "sampling": {"fps": 1.0, "track_fps": 1.0, "burst_every_s": 60, "burst_seconds": 7.0, "burst_fps": 25.0,
                  "burst_detect_fps": 5.0, "frame_width": 1920},   # Full HD: far cows keep their pixels
+    # burst_crop: a burst's crops this many px (0: crop, as the model was taught). The barn's labelled frames
+    # (herd.py resolution): the same-cow nearest 92.2% at 168 as at 224, posture 77 -> 72% (the 1 fps crops stay)
     "model": {"checkpoint": "", "encoder": "facebook/dinov2-small", "crop": 224, "grid": 2, "rumination": "",
-              "identity": ""},
+              "identity": "", "burst_crop": 0},
     "detector": {"weights": "", "threshold": None, "tiles": None},   # None: as the detector was trained
     # still_*: a cow lost is waited for still_s at the same place, still_long_s when she had not moved for
     # still_for_s before (as [mct])
@@ -68,6 +70,10 @@ DEFAULTS = {
                  # tracks two cameras count (their masks, which share no floor) at the same second this many
                  # seconds: two cows (0: off - when masks were drawn overlapping)
                  "counted_apart_s": 10,
+                 # the night's new cows: tracks the linker joined across cameras grouped as one cow first. Off: on
+                 # the 09 Nov barn (4 corner cameras, place joins ~half of them two neighbours) it mixed cows
+                 # (second half IDF1 60 -> 51)
+                 "enroll_joined": False,
                  # a confirmed burst's crop kept as the cow's face per camera, one each face_every_s, the last
                  # face_keep (gallery/faces/): what a person compares in herd.py merges page
                  "face_every_s": 600.0, "face_keep": 6},
@@ -76,7 +82,9 @@ DEFAULTS = {
                "mad_z": 3.0, "rumination_drop": 0.20, "lying_directions": ["low", "high"],
                "lying_change": 0.20},
     "report": {"period_days": 3},
-    "store": {"path": "herd.sqlite"},
+    # keep_fingerprints: every burst's fingerprint (float16) in the store's burst_fp - for matching tried afresh
+    # offline (trial keeps them); ~0.5 kB a burst
+    "store": {"path": "herd.sqlite", "keep_fingerprints": False},
     # the barn's bursts kept for training identity on the barn's own cows (barn_dataset.py)
     "training_cache": {"enabled": False, "every_n": 10, "folder": "training_cache", "max_gb": 200},
     # Where a camera works at all. Far cows are too small to identify or to read a
@@ -406,17 +414,22 @@ def floor_mapper(cam, mct):
     (>= 4, u v in 0-1 of the frame, X Y measured on the floor): a floor homography, applied to the
     box's bottom centre (where a cow touches the floor, as seen from above-and-aside) - or, with
     floor_at = "centre", to the box's centre (herd.py crosscam: two cameras facing each other see a cow's
-    two sides, whose bottoms lie apart; their centres agree better)."""
+    two sides, whose bottoms lie apart; their centres agree better).
+    A proj_mat with `distortion` (herd.py's corner-camera fit) maps onto the straightened frame: the box centre
+    is straightened first (undistort, the frame's `aspect`), as floor_points' are."""
     import numpy as np
     if cam.get("proj_mat"):
         P = np.asarray(cam["proj_mat"], float).reshape(3, 4)
         w, h = cam.get("proj_size") or (1.0, 1.0)
         lo, hi = mct["body_height_lying"], mct["body_height_standing"]
+        k, ar = cam.get("distortion") or 0.0, cam.get("aspect") or 16 / 9
+        und = (lambda u, v: undistort(u, v, k, ar)) if k else (lambda u, v: (u, v))
 
         def f(box, p_lying=0.5):
             z = p_lying * lo + (1 - p_lying) * hi
             H = np.stack([P[:, 0], P[:, 1], P[:, 2] * z + P[:, 3]], 1)
-            q = np.linalg.solve(H, [(box[0] + box[2]) / 2 * w, (box[1] + box[3]) / 2 * h, 1.0])
+            u, v = und((box[0] + box[2]) / 2, (box[1] + box[3]) / 2)
+            q = np.linalg.solve(H, [u * w, v * h, 1.0])
             return (float(q[0] / q[2]), float(q[1] / q[2]))
         return f
     pts = cam.get("floor_points")

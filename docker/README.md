@@ -296,6 +296,21 @@ It writes `docker/data/herd_barn_ids_<date>.tgz`: each named box cut as the barn
 the cows held out. Every frame with named boxes counts, done or not (`--done-only`: only done ones). Put it in the pod's `/workspace`; `reid_pod.sh` adds the set `barn_ids` to training.
 The same labels.json also makes the detector's set (`boxes export`).
 
+**Every camera at every moment?** Cross-camera scoring and calibration pair two cameras' frames of one moment
+(within 1 s). See which moments some camera has no frame of:
+
+```bash
+docker compose run --rm herd boxes moments --data /data/boxes --labels /data/labels.json --config /data/barn.toml
+```
+
+Open `docker/data/boxes/moments.html`: a row a moment, a column a camera, your boxes drawn with their ids (one
+colour an id: the same cow on every camera at a glance); "no frame" in red where a camera has none, "only moments
+where a camera has no frame" hides the rest. The log and the page say how to fill them (`boxes frames ... --moments-of
+<camera> --cameras ...`: those cameras cut at that camera's moments).
+`boxes frames` cuts every camera on one grid of moments (every `--every` s from the earliest recording's start) and
+leaves a moment out only when it hardly changed on every camera, so a set cut now has every camera at every moment
+it records; a set cut before that (each camera on its own grid) is better cut again into a new folder.
+
 **One id, one cow on every camera?** Cross-camera training and checking only work when a cow has the
 same id on every camera. See it, and fix it:
 
@@ -309,6 +324,19 @@ camera's cows, the right the second's; click the cow on the right that the selec
 "new cow". A camera with the same cow under two ids is flagged. Or type in a row the cow it really is (rows with the same name become one cow on every camera;
 `x` removes the id), **Save labels.json**, move it to `docker/data/`, then `boxes ids` again (and on
 the box page, Load labels.json).
+
+**Swap two ids on a camera**, on the box page: the **change ids** bar - type `2=3 3=2`, open the first frame
+where they are mixed up, **from here**, the last one, **to here**, **change** (it says first how many boxes on how
+many frames; **undo the change** takes it back). Or from the command line:
+
+```bash
+docker compose run --rm herd boxes relabel --data /data/boxes --labels /data/labels.json 2=3 3=2 --camera cam2
+```
+
+The pairs apply at once, so `2=3 3=2` swaps the two cows (`5=x` takes id 5 off). `--camera` again for more
+cameras (none: every camera); `--from 12:10:00 --to 12:20:00` only frames of that stretch (the time as the pages
+show it). It writes over labels.json and keeps the old one as `labels.json.bak`; then, on the box page, Load
+labels.json.
 
 **Check the models on your labels** (before training anything on them - none of these frames was
 ever seen by the models):

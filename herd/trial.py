@@ -138,6 +138,21 @@ def idf1(co, n_true, n_pred):
             "mapping": {ts[i]: ps[j] for i, j in zip(r, c) if M[i, j] > 0}}
 
 
+def id_counts(co, mapping, r):
+    """IDTP, IDFP, IDFN of one camera (or all) under a one-to-one mapping, each by where it comes from; r: the
+    counts your_boxes, found, found_with_a_cow, its_named_boxes. Against them, what your labels would give a
+    system right every time: IDTP = your boxes, IDFP = IDFN = 0."""
+    tp = int(sum(n for (t, p), n in co.items() if mapping.get(t) == p))
+    wrong = int(r["found_with_a_cow"]) - tp                         # found, named, not the name she holds
+    fn = {"not_found": int(r["your_boxes"] - r["found"]),            # no box of its on yours
+          "found_without_a_name": int(r["found"] - r["found_with_a_cow"]),
+          "wrong_name": wrong}
+    fp = {"wrong_name": wrong,                                      # the same boxes: a wrong name is both
+          "named_where_you_have_no_box": int(r["its_named_boxes"] - r["found_with_a_cow"])}
+    return {"idtp": tp, "idfn": sum(fn.values()), "idfn_by": fn, "idfp": sum(fp.values()), "idfp_by": fp,
+            "dataset": {"idtp": int(r["your_boxes"]), "idfp": 0, "idfn": 0, "your_boxes": int(r["your_boxes"])}}
+
+
 def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page_dir=None, cameras=None):
     """Your labelled boxes (status done, with an id) against the second pass at the same camera and second.
 
@@ -178,7 +193,10 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         if lab.get("status") != "done" or not f or f["cam"] not in cams:
             continue
         cam = f["cam"]
-        f = dict(f, ts=f["ts"] + shift + float(cams[cam].get("time_offset_s") or 0.0))   # the run's clock for it
+        # your frames of one moment carry one file time on every camera; a camera's time_offset_s moves only where its
+        # boxes are looked up in this run (the run's clock) - the moments of two cameras are still paired by file time
+        at = f["ts"] + shift
+        f = dict(f, ts=at + float(cams[cam].get("time_offset_s") or 0.0))   # the run's clock for it
         named = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
                  and str(b[4]).strip().lower() != "x"]
         rows = store.query("SELECT track, ts, x1, y1, x2, y2, posture, activity FROM seconds WHERE cam = ? AND ts "
@@ -218,7 +236,7 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
                  or (in_zone(t[0], cams[cam], w_, h_, tracking=True) and any(iou(t[0], q[0]) >= max(min_iou, 0.5) for q in pred))]
         for t in named:                            # who counts each of your cows: none of the cameras?
             if in_zone(t[0], cams[cam], w_, h_, tracking=True):
-                counted_by[(t[1], f["ts"])].append(any(iou(t[0], q[0]) >= min_iou for q in pred))
+                counted_by[(t[1], at)].append(any(iou(t[0], q[0]) >= min_iou for q in pred))
         view.append({"cam": cam, "ts": f["ts"], "file": file, "w": f.get("w", 1920), "h": f.get("h", 1080),
                      "mine": [[*map(float, b), i, (b, i) in truth] for b, i in named],   # [.., scored: in its mask]
                      "its": [[*map(float, r[2:6]), tm.get(r[0]), r[0], roots.get(r[0], r[0])] for r in rows if r[1] == sec],
@@ -229,21 +247,23 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
         n[(cam, "found")] += len(hit)
         n[(cam, "found_with_a_cow")] += sum(1 for _, j in hit if pred[j][1])
         for i, j in hit:
-            seen_track[truth[i][1]].append((cam, f["ts"], pred[j][2], pred[j][1]))
+            seen_track[truth[i][1]].append((cam, at, pred[j][2], pred[j][1]))
             if pred[j][1]:
                 co[(truth[i][1], pred[j][1])] += 1
                 cam_co[cam][(truth[i][1], pred[j][1])] += 1
-                seen_as[truth[i][1]].append((cam, f["ts"], pred[j][1]))
+                seen_as[truth[i][1]].append((cam, at, pred[j][1]))
     allc = sorted({c for c, _ in n})
     tot = lambda what: sum(n[(c, what)] for c in allc)
     out = {"all": idf1(co, tot("your_boxes"), tot("its_named_boxes")), "cameras": {}}
     out["all"].update({k: tot(k) for k in ("frames", "frames_not_played", "your_boxes", "found", "found_with_a_cow",
                                            "its_named_boxes")})
+    out["all"]["counts"] = id_counts(co, out["all"]["mapping"], out["all"])
     for c in allc:
         r = idf1(cam_co[c], n[(c, "your_boxes")], n[(c, "its_named_boxes")])
         r.update({k: n[(c, k)] for k in ("frames", "frames_not_played", "your_boxes", "found", "found_with_a_cow",
                                          "its_named_boxes")})
-        r.pop("mapping")
+        r["counts"] = id_counts(cam_co[c], r.pop("mapping"), r)                   # its own one-to-one mapping
+        r["counts_in_all"] = id_counts(cam_co[c], out["all"]["mapping"], r)       # all cameras' one mapping
         out["cameras"][c] = r
     by_pred, by_true = collections.defaultdict(collections.Counter), collections.defaultdict(collections.Counter)
     for (t, p), k in co.items():
@@ -593,6 +613,31 @@ def clock_shift(store, frames):
     return best * 3600.0
 
 
+def print_counts(sc):
+    """IDTP / IDFP / IDFN per camera, each by its kind, beside what your labels would give (a system right every
+    time) - per camera under its own mapping, then under all cameras' one mapping (what IDF1 over all counts)."""
+    if "counts" not in sc["all"]:
+        return
+    head = (f"  {'':6s} {'IDTP':>6s} {'IDFP':>6s} {'= wrong':>8s} {'+ extra':>8s} {'IDFN':>6s} {'= missed':>9s} "
+            f"{'+ no name':>10s} {'+ wrong':>8s} {'IDF1':>6s} | dataset: {'IDTP':>5s} {'IDFP':>4s} {'IDFN':>4s}")
+    row = lambda name, k, f1: (f"  {name:6s} {k['idtp']:6d} {k['idfp']:6d} {k['idfp_by']['wrong_name']:8d} "
+                               f"{k['idfp_by']['named_where_you_have_no_box']:8d} {k['idfn']:6d} "
+                               f"{k['idfn_by']['not_found']:9d} {k['idfn_by']['found_without_a_name']:10d} "
+                               f"{k['idfn_by']['wrong_name']:8d} {f1:6.1%} |          {k['dataset']['idtp']:5d} "
+                               f"{k['dataset']['idfp']:4d} {k['dataset']['idfn']:4d}")
+    f1 = lambda k: 2 * k["idtp"] / max(1, 2 * k["idtp"] + k["idfp"] + k["idfn"])
+    for title, key in (("each camera, its own one-to-one mapping (per-camera IDF1):", "counts"),
+                       ("each camera under all cameras' one mapping (adds up to IDF1 over all):", "counts_in_all")):
+        print(f"\n  {title}")
+        print("  (wrong: found, named, not her name; extra: named where you have no box; missed: no box of its on"
+              " yours; no name: found, no name)" if key == "counts" else "", end="\n" if key == "counts" else "")
+        print(head)
+        for c, r in sorted(sc["cameras"].items()):
+            print(row(c, r[key], f1(r[key])))
+        if key == "counts_in_all":
+            print(row("all", sc["all"]["counts"], f1(sc["all"]["counts"])))
+
+
 def print_score(sc):
     a = sc["all"]
     if sc.get("clock_shift_s"):
@@ -604,6 +649,7 @@ def print_score(sc):
           f"{a['idr']:.1%}: of your boxes, the right cow)")
     for c, r in sorted(sc["cameras"].items()):
         print(f"  {c}: IDF1 {r['idf1']:.1%} (IDP {r['idp']:.1%}, IDR {r['idr']:.1%}) on {r['your_boxes']} boxes")
+    print_counts(sc)
     x = sc.get("cross_camera")
     if x and x["cows_on_two_cameras"]:
         print(f"  your cows scored on two cameras or more: {x['cows_on_two_cameras']}; the same cow of its on all of "
@@ -957,6 +1003,78 @@ def overlap(cfg):
     return cfg
 
 
+def collected(src, cfg, folder):
+    """--collect: the store copied to folder/herd.sqlite, its tracks grouped and named again by collect.py (every
+    camera, the whole stretch at once) -> the copy's path."""
+    import sqlite3
+    import collect
+    from store import Store
+    os.makedirs(folder, exist_ok=True)
+    dst = os.path.join(folder, "herd.sqlite")
+    if os.path.exists(dst):
+        os.remove(dst)
+    with sqlite3.connect(src) as a, sqlite3.connect(dst) as b:
+        a.backup(b)
+    store = Store(dst)
+    groups, names = collect.collect(store, cfg)
+    collect.write(store, groups, names)
+    print(f"[collect] {sum(len(g) for g in groups)} tracks in {len(groups)} groups, {len(set(names.values()))} names "
+          f"-> {dst}", flush=True)
+    return dst
+
+
+def scored_into(store_path, cfg, args, folder):
+    """score store_path with --boxes / --labels into folder/score.json, printed."""
+    sc = score(store_path, cfg, args.boxes, args.labels, page_dir=folder, cameras=args.cameras)
+    name = "score.json" if not args.cameras else f"score_{'_'.join(args.cameras)}.json"
+    with open(os.path.join(folder, name), "w", encoding="utf-8") as fh:
+        json.dump(sc, fh, indent=2)
+    print_score(sc)
+    print(f"-> {os.path.join(folder, name)}")
+    return sc
+
+
+def tracks_of_labels(store, cfg, boxes_dir, labels_path, min_iou=0.3, max_dt=0.6):
+    """Your boxes with cow ids against a pass's tracks at the same camera and second -> ({track: your id} where at
+    least two of your boxes fall on the track and two thirds of them say one id, the last of your frames' time on
+    the run's clock). The gallery's names then are yours: --seed-labels."""
+    from box_dataset import read_labels
+    frames = {f["file"]: f for f in json.load(open(os.path.join(boxes_dir, "frames.json"), encoding="utf-8"))["frames"]}
+    cams = {c["id"]: c for c in cfg["cameras"]}
+    votes = collections.defaultdict(collections.Counter)
+    last = None
+    for file, lab in read_labels(labels_path).items():
+        f = frames.get(file)
+        if not f or f["cam"] not in cams or lab.get("status") == "skip":
+            continue
+        ts = f["ts"] + float(cams[f["cam"]].get("time_offset_s") or 0.0)
+        last = ts if last is None else max(last, ts)
+        rows = store.query("SELECT track, ts, x1, y1, x2, y2 FROM seconds WHERE cam = ? AND ts BETWEEN ? AND ?",
+                           (f["cam"], ts - max_dt, ts + max_dt))
+        if not rows:
+            continue
+        sec = min({r[1] for r in rows}, key=lambda t: abs(t - ts))
+        rows = [r for r in rows if r[1] == sec]
+        named = [(b[:4], str(b[4]).strip()) for b in lab.get("boxes", []) if len(b) >= 5 and str(b[4]).strip()
+                 and str(b[4]).strip().lower() != "x"]
+        for i, j in match([b for b, _ in named], [list(r[2:6]) for r in rows], min_iou):
+            votes[rows[j][0]][named[i][1]] += 1
+    # a burst's track is the one its camera's track was joined to then ([mct] link: the root) - those named too,
+    # by all their tracks' boxes together (a join of two of your cows has no two-thirds majority: left out)
+    roots = store.track_roots() if hasattr(store, "track_roots") else {}
+    by_root = collections.defaultdict(collections.Counter)
+    for track, v in votes.items():
+        if track in roots:
+            by_root[roots[track]].update(v)
+    out = {}
+    for group in (votes, by_root):
+        for track, v in group.items():
+            cow, n = v.most_common(1)[0]
+            if n >= 2 and n >= 2 / 3 * sum(v.values()):
+                out.setdefault(track, cow)
+    return out, last
+
+
 def relink(cfg, out):
     """--relink: the second pass's store copied to OUT/relink/ (and its gallery), its cross-camera joins, evidence,
     the night's merges and the questions to a person cleared, and each second of it played again through
@@ -981,7 +1099,7 @@ def relink(cfg, out):
     if os.path.isdir(os.path.join(out, "pass2", "gallery")):
         shutil.copytree(os.path.join(out, "pass2", "gallery"), os.path.join(folder, "gallery"))
     store = Store(dst)
-    for t in ("track_links", "track_evidence", "merge_reviews", "cow_aliases", "track_handovers"):
+    for t in ("track_links", "track_names", "track_evidence", "merge_reviews", "cow_aliases", "track_handovers"):
         store.execute(f"DELETE FROM {t}")
     store.execute("DELETE FROM events WHERE kind IN ('merged-by-place', 'clocks', 'merge-reviews')")
     cfg = copy.deepcopy(cfg)
@@ -1033,6 +1151,14 @@ def main(argv=None):
                    "this config's [mct] and floor_points (each camera's tracks as they were: minutes, no GPU) -> "
                    "OUT/relink/; scored with --boxes and --labels")
     p.add_argument("--cameras", nargs="*", default=None, help="score these cameras only (one id across them)")
+    p.add_argument("--seed-labels", default=None,
+                   help="labels.json (with --boxes) whose cow ids name the gallery after the first pass: each id a cow "
+                        "made of the first pass's bursts of the tracks your boxes fall on, up to your last frame there "
+                        "(score the second pass on frames after it: a cow met once, as at a barn's start)")
+    p.add_argument("--collect", action="store_true",
+                   help="the second pass's tracks grouped into cows and named again by collect.py (every camera, the "
+                        "whole stretch at once) -> OUT/collect/ (herd.sqlite, score.json); with --relink, the relinked "
+                        "store's; with --score-only, the trial already in --out")
     p.add_argument("--overlap", action="store_true",
                    help="an experiment: every camera counts its whole tracking_mask (masks share floor) and a cow "
                         "counted by two cameras at once may be one cow - does one cow get one id on both? "
@@ -1042,6 +1168,8 @@ def main(argv=None):
         cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
         out = os.path.abspath(args.out.rstrip("\\"))
         dst = relink(cfg, out)
+        if args.collect:
+            dst = collected(dst, cfg, os.path.join(os.path.dirname(dst), "collect"))
         if args.boxes and args.labels:
             sc = score(dst, cfg, args.boxes, args.labels, page_dir=os.path.dirname(dst), cameras=args.cameras)
             with open(os.path.join(os.path.dirname(dst), "score.json"), "w", encoding="utf-8") as fh:
@@ -1054,6 +1182,10 @@ def main(argv=None):
             p.error("--score-only needs --boxes and --labels")
         cfg = overlap(load_config(args.config)) if args.overlap else load_config(args.config)
         out = os.path.abspath(args.out.rstrip("\\"))
+        if args.collect:
+            scored_into(collected(os.path.join(out, "pass2", "herd.sqlite"), cfg, os.path.join(out, "collect")), cfg,
+                        args, os.path.join(out, "collect"))
+            return
         sc = score(os.path.join(out, "pass2", "herd.sqlite"), cfg, args.boxes, args.labels, page_dir=out,
                    cameras=args.cameras)
         name = "score.json" if not args.cameras else f"score_{'_'.join(args.cameras)}.json"
@@ -1083,6 +1215,7 @@ def main(argv=None):
               "cow-seconds no more seconds). To follow walking cows more often set track_fps instead "
               "(the tracker only) and keep fps = 1", flush=True)
     cfg["training_cache"]["enabled"] = False
+    cfg["store"]["keep_fingerprints"] = True            # every burst's fingerprint: matching tried afresh offline
     cfg["identity"]["new_cow_min_bursts"] = args.min_bursts
     first = copy.deepcopy(cfg)
     first["sampling"]["burst_every_s"] = args.burst_every
@@ -1098,7 +1231,16 @@ def main(argv=None):
     apply_thresholds(first, getattr(models, "id_thresholds", {}) or {}, DEFAULTS, None)
     g = gallery_mod.Gallery(folder, first, abstain)
     last = max(ts for _, _, ts in recs) + 3600
-    res = g.nightly(last, Store(os.path.join(out, "pass1", "herd.sqlite")).cannot_link_pairs())
+    s1 = Store(os.path.join(out, "pass1", "herd.sqlite"))
+    if args.seed_labels:
+        if not args.boxes:
+            p.error("--seed-labels needs --boxes (the frames your labels are on)")
+        named, until = tracks_of_labels(s1, cfg, args.boxes, args.seed_labels)
+        seeded = g.enroll_named(last, named, until)
+        print(f"[trial] the gallery named from {args.seed_labels}: {len(seeded)} cows ({', '.join(seeded)}) from the "
+              f"first pass's bursts of {len(named)} tracks, up to your last frame there", flush=True)
+    together = list(s1.track_roots().items()) if first["identity"].get("enroll_joined") else None
+    res = g.nightly(last, s1.cannot_link_pairs(), together=together)
     print(f"[trial] the night: {len(res['enrolled'])} cows enrolled ({res['pool']} bursts left unknown"
           + (f"; {res['held_back_herd_full']} more held back: max_cows reached" if res.get("held_back_herd_full") else "")
           + ")", flush=True)
@@ -1164,6 +1306,11 @@ def main(argv=None):
         with open(os.path.join(out, "score.json"), "w", encoding="utf-8") as fh:
             json.dump(sc, fh, indent=2)
         print_score(sc)
+    if args.collect:
+        dst = collected(store2, cfg, os.path.join(out, "collect"))
+        if args.boxes and args.labels:
+            print("[trial] the same, its tracks grouped and named by collect.py:")
+            scored_into(dst, cfg, args, os.path.join(out, "collect"))
     for k, v in stopped.items():
         for cam, done, err in v:
             print(f"[trial] !! {k}: {cam} stopped at {int(done // 60)}:{int(done % 60):02d} of its recording by an error "

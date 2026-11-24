@@ -386,6 +386,11 @@ def cpu_pool():
     return _CROP_POOL
 
 
+def torch_index(mask):
+    """A numpy bool mask as an index of a torch tensor's first dimension (a list of positions)."""
+    return [int(i) for i in np.flatnonzero(mask)]
+
+
 def thin_frames(frames, fps):
     """[(ts, img)] -> at most fps of them a second, evenly ([sampling] burst_fps: a burst's frames - each a crop a
     cow, encoded - fewer than the stream's 25; 0, or a stream slower than that: all)."""
@@ -645,7 +650,9 @@ class Camera:
         part["detect"] += time.perf_counter() - t
         chains = link_chains([(ts, self.zone(found, img)) for (ts, img), found in zip(sampled, detections)],
                              self.cfg["tracker"]["iou"])
-        size = self.models.crop_size
+        # [model] burst_crop: a burst's crops this many px (a multiple of 14) - the encoder's work goes with its
+        # patches (168: 56% of 224's) and the identity holds at it; the 1 fps crops (posture) stay at the model's
+        size = self.cfg["model"].get("burst_crop") or self.models.crop_size
         cows = crops_n = rum_yes = 0
         rum_p = []
         done = []                                   # the burst's cows, decided together below
@@ -681,6 +688,10 @@ class Camera:
             t = time.perf_counter()
             out = self.models.burst(feats, rel, valid, boxes, motion)
             part["temporal"] += time.perf_counter() - t
+            if self.cfg["store"].get("keep_fingerprints"):        # the encoder's own vectors too (DINOv2), averaged
+                keep = valid if valid.any() else np.ones(len(valid), bool)
+                out["frames_mean"] = feats.float()[torch_index(keep)].mean(0).cpu().numpy() \
+                    if hasattr(feats, "float") else np.asarray(feats, np.float32)[keep].mean(0)
             area = float(np.mean([(b[2] - b[0]) * (b[3] - b[1]) for b in ch.values()]))
             # kept until the burst's decision: only what the training cache needs, not every crop
             keep_feats = feats.float().cpu().numpy() if self.cache is not None else None
@@ -703,6 +714,8 @@ class Camera:
                               decision["margin"], decision["p"], out["rumination"], out["posture"],
                               out["activity"], out["lameness"], out["quality_max"], int(valid.sum()),
                               int(out["ruminating"])))
+            if self.cfg["store"].get("keep_fingerprints") and hasattr(self.store, "burst_fp"):
+                self.store.burst_fp(self.id, own, t0, out["fingerprint"], out.get("quality_max"), out.get("frames_mean"))
             if self.cache is not None:
                 from model import box_pos
                 self.cache.add(self.id, own, t0, feats, rel, valid, motion,
@@ -879,7 +892,9 @@ class SharedGallery:
             self.store.event(ts, "change-over", "weekly cow change-over started")
         if ts >= self.next_nightly:
             merged = merge_by_place(self.g, self.store, self.cfg, ts)
-            res = self.g.nightly(ts, self.cannot_link)
+            together = list(self.store.track_roots().items()) \
+                if self.cfg["identity"].get("enroll_joined") and hasattr(self.store, "track_roots") else None
+            res = self.g.nightly(ts, self.cannot_link, together)        # tracks joined across cameras: one cow
             if merged:
                 res["merged_by_place"] = merged
             self.store.event(ts, "nightly", json.dumps(res))

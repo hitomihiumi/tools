@@ -227,3 +227,29 @@ def test_crosscam_depth_stretches_a_squashed_floor_plan(capsys):
             p1 = np.array(floor_mapper(new[cam], cfg["mct"])(box))
             e = np.array([np.cos(np.radians(r["degrees"])), np.sin(np.radians(r["degrees"]))])
             assert np.allclose(crosscam.stretch([p0], np.array(r["centre"]), e, r["stretch"])[0], p1, atol=1.0)
+
+
+def test_floor_mapper_proj_mat_with_lens():
+    """A proj_mat onto the straightened frame with a lens bend: the box centre is straightened first, then taken
+    back to the plane at the cow's body height - the floor point she stands on, lying or standing."""
+    import numpy as np
+    from autocalib import distort
+    from common import DEFAULTS, floor_mapper
+    f, ar, k = 1.1, 16 / 9, -0.3
+    R = np.array([[1.0, 0, 0], [0, 0, -1.0], [0, 1.0, 0]])            # looking along +Y, picture y down = world -Z
+    th = np.radians(35)                                                  # tilted down
+    R = np.array([[1, 0, 0], [0, np.cos(th), np.sin(th)], [0, -np.sin(th), np.cos(th)]]) @ R
+    C = np.array([500.0, -300.0, 400.0])
+    K = np.array([[f / ar, 0, 0.5], [0, f, 0.5], [0, 0, 1.0]])
+    P = K @ np.c_[R, -R @ C]
+    cam = {"proj_mat": P.tolist(), "proj_size": [1.0, 1.0], "distortion": k, "aspect": ar}
+    fm = floor_mapper(cam, DEFAULTS["mct"])
+    for X, Y, lying in ((520.0, 400.0, 1.0), (300.0, 700.0, 0.0), (800.0, 250.0, 1.0)):
+        z = DEFAULTS["mct"]["body_height_lying"] if lying else DEFAULTS["mct"]["body_height_standing"]
+        q = P @ [X, Y, z, 1.0]
+        u, v = distort(q[0] / q[2], q[1] / q[2], k, ar)
+        got = fm([u - 0.05, v - 0.04, u + 0.05, v + 0.04], lying)
+        assert np.hypot(got[0] - X, got[1] - Y) < 1.0, (X, Y, got)
+    # without the lens in the config the same box lands elsewhere: the bend is not ignored
+    plain = floor_mapper({**cam, "distortion": 0}, DEFAULTS["mct"])
+    assert np.hypot(*(np.subtract(plain([u - 0.05, v - 0.04, u + 0.05, v + 0.04], 1.0), (800.0, 250.0)))) > 5

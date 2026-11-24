@@ -29,14 +29,14 @@ url = "rtsp://y"
 """
 
 
-def _video(path, seconds, fps=5, size=(640, 360)):
-    """A cow (a white block) walking across a dark pen, so frames differ."""
+def _video(path, seconds, fps=5, size=(640, 360), still=False):
+    """A cow (a white block) walking across a dark pen, so frames differ (still: she lies in one place)."""
     import cv2
     os.makedirs(os.path.dirname(path), exist_ok=True)
     w = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, size)
     for i in range(seconds * fps):
         img = np.full((size[1], size[0], 3), 40, np.uint8)
-        x = int((i / (seconds * fps)) * (size[0] - 120))
+        x = 100 if still else int((i / (seconds * fps)) * (size[0] - 120))
         img[150:300, x:x + 120] = 230
         w.write(img)
     w.release()
@@ -157,6 +157,7 @@ def test_frames_page_and_export_for_the_detector():
         html = open(os.path.join(out, "boxes.html"), encoding="utf-8").read()
         data = json.loads(html.split("const DATA = ", 1)[1].split(";\n", 1)[0])
         assert len(data["frames"]) == 18 and "Save labels.json" in html
+        assert 'id="swmap"' in html and 'id="swfrom"' in html and "function swGo()" in html   # change ids in a range
         # again: nothing new is cut or detected
         box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--every", "10", "--detector", "none"])
         assert len(json.load(open(os.path.join(out, "frames.json")))["frames"]) == 18
@@ -445,6 +446,78 @@ def test_fix_videos_command():
     assert "copy" in cp and "libx264" not in cp
 
 
+def test_moments_page_marks_a_moment_a_camera_has_no_frame_of(capsys):
+    """boxes moments: the frames grouped into moments (within --near s), every camera a column; a moment some camera
+    has no frame of is counted, said, and the page lists it; your boxes go on it with their ids."""
+    import box_dataset
+    with tempfile.TemporaryDirectory() as d:
+        frames = ([{"file": f"frames/cam1/{t}.jpg", "cam": "cam1", "ts": float(t)} for t in (100, 120, 140)] +
+                  [{"file": f"frames/cam2/{t}.jpg", "cam": "cam2", "ts": t + 0.4} for t in (100, 140, 160)])
+        json.dump({"frames": frames}, open(os.path.join(d, "frames.json"), "w"))
+        ms = box_dataset.moments(frames, 1.0)
+        assert [round(ts) for ts, _ in ms] == [100, 120, 140, 160] and set(ms[0][1]) == {"cam1", "cam2"}
+        lp = os.path.join(d, "labels.json")
+        json.dump({"frames": {"frames/cam1/100.jpg": {"status": "done", "boxes": [[0.1, 0.1, 0.3, 0.3, "7"]]}}}, open(lp, "w"))
+        box_dataset.main(["moments", "--data", d, "--labels", lp])
+        said = capsys.readouterr().out
+        assert "4 moments" in said and "2 with a frame of every camera" in said
+        assert "cam1: 3 frames, no frame in 1 moments" in said and "cam2: 3 frames, no frame in 1 moments" in said
+        page = open(os.path.join(d, "moments.html"), encoding="utf-8").read()
+        data = json.loads(page.split("const D = ", 1)[1].split(";\n", 1)[0])
+        assert data["missing"] == {"cam1": 1, "cam2": 1} and data["complete"] == 2
+        assert data["labels"]["frames/cam1/100.jpg"]["boxes"] == [[0.1, 0.1, 0.3, 0.3, "7"]]
+
+
+def test_frames_of_every_camera_at_the_same_moments():
+    """Cameras whose recordings began seconds apart are cut on one grid of moments (not each from its own start),
+    and a camera nothing moves on keeps its frames while another camera's moment changed."""
+    import box_dataset
+    with tempfile.TemporaryDirectory() as d:
+        cfg, _ = _setup(d)
+        rec = os.path.join(d, "rec2")
+        _video(os.path.join(rec, "cam1_2026-10-20_06-00-00.mp4"), 60)
+        _video(os.path.join(rec, "cam2_2026-10-20_06-00-03.mp4"), 60, still=True)
+        out = os.path.join(d, "boxes")
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--every", "10", "--detector", "none"])
+        fr = json.load(open(os.path.join(out, "frames.json")))["frames"]
+        at = {c: sorted(f["time"] for f in fr if f["cam"] == c) for c in ("cam1", "cam2")}
+        assert at["cam1"] == [f"2026-10-20 06:00:{s:02d}" for s in (5, 15, 25, 35, 45, 55)]
+        assert at["cam2"] == at["cam1"]                                # the same moments, still as she is
+        ms = box_dataset.moments(fr, 1.0)
+        assert len(ms) == 6 and all(set(c) == {"cam1", "cam2"} for _, c in ms)
+
+
+def test_frames_cut_at_another_cameras_moments_on_the_barns_clock():
+    """--moments-of cam1 --cameras cam2: cam2 cut at cam1's moments (where its recording has them) - at the same
+    file time, or with --barn-clock its own time_offset_s taken off (the same instant of the barn)."""
+    import box_dataset
+    with tempfile.TemporaryDirectory() as d:
+        cfg, rec = _setup(d)
+        out = os.path.join(d, "boxes")
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--every", "10", "--detector", "none"])
+        before = json.load(open(os.path.join(out, "frames.json")))["frames"]
+        c1 = sorted(f["ts"] for f in before if f["cam"] == "cam1")
+        text = open(cfg).read()
+        open(cfg, "w").write(text.replace('id = "cam2"', 'id = "cam2"\ntime_offset_s = 2.0', 1))
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--moments-of", "cam1",
+                          "--cameras", "cam2", "--detector", "none", "--barn-clock"])
+        fr = json.load(open(os.path.join(out, "frames.json")))["frames"]
+        new = sorted(f["ts"] for f in fr if f["cam"] == "cam2" and f["file"] not in {b["file"] for b in before})
+        # cam2's recording runs 06:00:10-06:01:10: cam1's moments 06:00:15 ... 06:00:55, 2 s earlier on cam2's clock
+        want = [t - 2.0 for t in c1 if c1[0] + 5 <= t <= c1[0] + 55]
+        assert len(new) == len(want) == 5 and max(abs(a - b) for a, b in zip(new, want)) < 0.21
+        assert {f["file"] for f in before} <= {f["file"] for f in fr}                 # nothing cut before is lost
+        # again: nothing more to cut (each moment has its frame now)
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--moments-of", "cam1",
+                          "--cameras", "cam2", "--detector", "none", "--barn-clock"])
+        assert len(json.load(open(os.path.join(out, "frames.json")))["frames"]) == len(fr)
+        # at the same file time (the default): cam1's moments cam2 has no frame at - 06:00:15 ... 06:00:55 are taken
+        # by its own frames every 10 s already (06:00:15, 25, ...), so nothing new
+        box_dataset.main(["frames", "--config", cfg, "--videos", rec, "--out", out, "--moments-of", "cam1",
+                          "--cameras", "cam2", "--detector", "none"])
+        assert len(json.load(open(os.path.join(out, "frames.json")))["frames"]) == len(fr)
+
+
 def test_one_camera_cut_again_after_its_zone_changed():
     import box_dataset
     with tempfile.TemporaryDirectory() as d:
@@ -664,3 +737,29 @@ def test_ids_gallery_rows_by_camera():
         assert set(rows) == {("cam1", "4"), ("cam2", "4"), ("cam1", "7"), ("cam2", "7")}
         assert rows[("cam1", "7")]["auto"] == rows[("cam1", "7")]["n"] == 12 and len(rows[("cam1", "4")]["thumbs"]) == 3
         assert all(os.path.exists(os.path.join(out, t["src"])) for r in data["rows"] for t in r["thumbs"])
+
+
+def test_relabel_swaps_ids_on_one_camera_from_a_time(capsys):
+    """boxes relabel 2=3 3=2 --camera cam2 --from: on cam2 from then on 2 and 3 swapped (at once, not 2->3->2),
+    their posture kept; other cameras and earlier frames as they were; the old labels kept as .bak."""
+    import box_dataset
+    with tempfile.TemporaryDirectory() as d:
+        frames = [{"file": f"frames/{c}/{c}_{s}.jpg", "cam": c, "ts": float(s), "time": f"2026-11-09 12:0{s}:00"}
+                  for c in ("cam1", "cam2") for s in (1, 2, 3)]
+        json.dump({"frames": frames}, open(os.path.join(d, "frames.json"), "w"))
+        box = lambda cow: [0.1, 0.1, 0.2, 0.2, cow, 0, {"posture": "lying"}]
+        labels = {f["file"]: {"status": "done", "boxes": [box("2"), box("3"), box("5"), [0.5, 0.5, 0.6, 0.6]]}
+                  for f in frames}
+        lp = os.path.join(d, "labels.json")
+        json.dump({"frames": labels}, open(lp, "w"))
+        box_dataset.main(["relabel", "--data", d, "--labels", lp, "2=3", "3=2", "5=x", "--camera", "cam2",
+                          "--from", "12:02"])
+        said = capsys.readouterr().out
+        assert "cam2: 2 -> 3: 2 boxes" in said and "cam2: 5 -> (no id): 2 boxes" in said
+        new = json.load(open(lp))["frames"]
+        ids = lambda f: [b[4] if len(b) > 4 else None for b in new[f]["boxes"]]
+        assert ids("frames/cam2/cam2_3.jpg") == ["3", "2", None, None]
+        assert ids("frames/cam2/cam2_1.jpg") == ids("frames/cam1/cam1_3.jpg") == ["2", "3", "5", None]
+        assert new["frames/cam2/cam2_2.jpg"]["boxes"][0] == [0.1, 0.1, 0.2, 0.2, "3", 0, {"posture": "lying"}]
+        assert json.load(open(lp + ".bak"))["frames"] == labels
+        assert box_dataset.id_map(["2:3,3:2"]) == {"2": "3", "3": "2"}

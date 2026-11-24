@@ -74,6 +74,63 @@ def plan_times(recs, every, max_n):
     return out
 
 
+def same_moments(index, of, cams, barn_clock=False):
+    """--moments-of: the moments of these cameras' frames already cut -> sorted [ts]: their files' time (as trial
+    pairs two cameras' frames), or with barn_clock on the barn's one clock (each camera's time_offset_s added)."""
+    off = lambda c: float(cams.get(c, {}).get("time_offset_s") or 0.0) if barn_clock else 0.0
+    return sorted({round(f["ts"] + off(f["cam"]), 3) for f in index["frames"] if f["cam"] in of})
+
+
+def moments_plan(recs, moments, index, cam, offset, near=0.6):
+    """[(path, start ts, fps, n frames)] of one camera -> [(path, frame index, its file time)] at those moments
+    (its file time = the moment - offset: its time_offset_s on the barn's clock, else 0), but those it has a frame
+    within `near` s of already."""
+    have = [f["ts"] for f in index["frames"] if f["cam"] == cam]
+    out = []
+    for m in moments:
+        ts = m - offset
+        if any(abs(ts - h) <= near for h in have):
+            continue
+        for path, start, fps, n in recs:
+            i = int(round((ts - start) * fps))
+            if 0 <= i < n:
+                out.append((path, i, start + i / fps))
+                break
+    return out
+
+
+def plan_common(by_cam, every, max_n):
+    """{camera: [(path, start ts, fps, n frames)]} -> [{camera: (path, frame index, its time)}]: one grid of moments
+    for every camera - every `every` s from the earliest recording's start (half a step in), where at least one
+    camera records - thinned evenly to at most max_n moments; each camera at each moment its recording has. (Each
+    camera's own grid from its own recording's start put cameras that began a few seconds apart on moments of their
+    own: no moment had every camera.)"""
+    recs = [r for rs in by_cam.values() for r in rs]
+    if not recs or every <= 0:
+        return []
+    t0 = min(ts for _, ts, _, _ in recs) + every / 2
+    ks = set()
+    for _, ts, fps, n in recs:
+        end = ts + n / fps
+        ks.update(range(int(np.ceil((ts - t0) / every)), int(np.floor((end - 1e-6 - t0) / every)) + 1))
+    ks = sorted(ks)
+    if max_n and len(ks) > max_n:
+        ks = [ks[i] for i in np.unique(np.round(np.linspace(0, len(ks) - 1, max_n)).astype(int))]
+    out = []
+    for k in ks:
+        t = t0 + k * every
+        at = {}
+        for cam, rs in by_cam.items():
+            for path, ts, fps, n in rs:
+                i = int(round((t - ts) * fps))
+                if 0 <= i < n:
+                    at[cam] = (path, i, ts + i / fps)
+                    break
+        if at:
+            out.append(at)
+    return out
+
+
 def changed(a, b, min_change):
     """Two small grey thumbnails differ by more than min_change (0-255, mean) - a frame worth labelling."""
     return b is None or float(np.abs(a.astype(np.int16) - b.astype(np.int16)).mean()) >= min_change
@@ -169,38 +226,58 @@ def cmd_frames(args):
         by_cam[cam].append((path, ts) + info)
     if args.cameras and args.again:
         recut(index, out, by_cam, cams, width, set(args.cameras))
-    for cam, rs in sorted(by_cam.items()):
-        c = cams[cam]
-        plan = plan_times(rs, args.every, args.max)
-        folder = os.path.join(out, "frames", cam)
-        os.makedirs(folder, exist_ok=True)
-        kept, last, cap, cap_path = 0, None, None, None
-        for path, i, ts in plan:
-            name = f"{cam}_{dt.datetime.fromtimestamp(ts, tz):%Y%m%d_%H%M%S}.jpg"
-            rel = f"frames/{cam}/{name}"
+    moments = same_moments(index, args.moments_of, cams, args.barn_clock) if args.moments_of else None
+    if moments is not None:                   # those cameras at the other cameras' moments: every one of them
+        steps = [({cam: step}, False) for cam, rs in sorted(by_cam.items()) if cam not in args.moments_of
+                 for step in moments_plan(rs, moments, index, cam,
+                                          float(cams[cam].get("time_offset_s") or 0.0) if args.barn_clock else 0.0)]
+    else:                                     # one grid of moments for every camera
+        steps = [(m, True) for m in plan_common(by_cam, args.every, args.max)]
+    caps, last = {}, {}
+    kept, looked = collections.Counter(), collections.Counter()
+    skipped = 0
+    for step, check in steps:
+        cut = {}
+        for cam, (path, i, ts) in sorted(step.items()):
+            looked[cam] += 1
+            rel = f"frames/{cam}/{cam}_{dt.datetime.fromtimestamp(ts, tz):%Y%m%d_%H%M%S}.jpg"
             if rel in have:
-                kept += 1
+                kept[cam] += 1
                 continue
-            if path != cap_path:
-                if cap is not None:
-                    cap.release()
-                cap, cap_path = cv2.VideoCapture(path), path
-            img = cut_frame(cap, i, c, width)
-            if img is None:
-                continue
-            small = cv2.resize(cv2.cvtColor(img, cv2.COLOR_RGB2GRAY), (64, 36), interpolation=cv2.INTER_AREA)
-            if not changed(small, last, args.min_change):
-                continue
-            last = small
+            if caps.get(cam, (None, None))[1] != path:
+                if cam in caps:
+                    caps[cam][0].release()
+                caps[cam] = (cv2.VideoCapture(path), path)
+            img = cut_frame(caps[cam][0], i, cams[cam], width)
+            if img is not None:
+                cut[cam] = (rel, i, ts, img)
+        if not cut:
+            continue
+        smalls = {cam: cv2.resize(cv2.cvtColor(v[3], cv2.COLOR_RGB2GRAY), (64, 36), interpolation=cv2.INTER_AREA)
+                  for cam, v in cut.items()}
+        # a moment is skipped only when it barely changed on every camera: one camera's quiet moment is still that
+        # moment of the others (the cameras' frames of one moment are what scoring and calibration pair)
+        if check and not any(changed(smalls[c], last.get(c), args.min_change) for c in cut):
+            skipped += 1
+            continue
+        for cam, (rel, i, ts, img) in cut.items():
+            last[cam] = smalls[cam]
+            os.makedirs(os.path.join(out, "frames", cam), exist_ok=True)
             Image.fromarray(img).save(os.path.join(out, rel), quality=92)
+            c = cams[cam]
             index["frames"].append({"file": rel, "cam": cam, "ts": ts, "w": img.shape[1], "h": img.shape[0],
                                     "time": dt.datetime.fromtimestamp(ts, tz).strftime("%Y-%m-%d %H:%M:%S"),
                                     "frame": i, "exclude": c.get("exclude") or []})
             have.add(rel)
-            kept += 1
-        if cap is not None:
-            cap.release()
-        print(f"[boxes] {cam}: {kept} frames from {len(rs)} recordings ({len(plan)} looked at)", flush=True)
+            kept[cam] += 1
+    for cap, _ in caps.values():
+        cap.release()
+    for cam, rs in sorted(by_cam.items()):
+        if looked[cam] or moments is None:
+            print(f"[boxes] {cam}: {kept[cam]} frames from {len(rs)} recordings ({looked[cam]} looked at)", flush=True)
+    if skipped:
+        print(f"[boxes] {skipped} moments left out: hardly changed on every camera (--min-change {args.min_change:g})",
+              flush=True)
     index["frames"].sort(key=lambda f: (f["cam"], f["ts"]))
     if args.detector != "none":
         detect(index, out, args.detector or cfg["detector"]["weights"], cfg)
@@ -268,6 +345,130 @@ def cmd_page(args):
     done = sum(1 for v in labels.values() if v.get("status") == "done")
     print(f"[boxes] {len(index['frames'])} frames ({done} done in {args.labels or 'no labels file'}) -> "
           f"{os.path.join(out, 'boxes.html')}")
+
+
+def moments(frames, near=1.0):
+    """The cut frames as moments: sorted by time, a frame within `near` s of a moment's first frame is of that moment
+    (trial pairs two cameras' frames the same way, by file time) -> [(ts, {cam: [frame, ...]})]."""
+    out = []
+    for f in sorted(frames, key=lambda f: f["ts"]):
+        if out and f["ts"] - out[-1][0] <= near:
+            out[-1][1].setdefault(f["cam"], []).append(f)
+        else:
+            out.append((f["ts"], {f["cam"]: [f]}))
+    return out
+
+
+MOMENTS_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frames by moment</title>
+<style>
+:root { --bg: #f6f6f4; --fg: #1d1d1b; --mute: #6b6b66; --line: #d9d9d4; --card: #fff; --bad: #c62828; --badbg: #fdecea;
+        --warn: #a15c00; --ok: #2e7d32; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161615; --fg: #ececea; --mute: #9a9a95; --line: #33332f; --card: #20201e;
+        --bad: #ef7d74; --badbg: #3a1f1d; --warn: #e2a24a; --ok: #7cc47f; } }
+body { margin: 0; background: var(--bg); color: var(--fg); font: 14px/1.4 system-ui, sans-serif; }
+header { position: sticky; top: 0; z-index: 2; background: var(--bg); border-bottom: 1px solid var(--line); padding: 10px 16px; }
+h1 { font-size: 17px; margin: 0 0 6px; }
+.sum { display: flex; flex-wrap: wrap; gap: 6px 18px; color: var(--mute); }
+.sum b { color: var(--fg); }
+.sum .bad b { color: var(--bad); }
+.ctl { margin-top: 6px; display: flex; gap: 14px; flex-wrap: wrap; align-items: center; }
+.grid { display: grid; gap: 6px; padding: 8px 16px 40px; }
+.head { position: sticky; top: var(--head, 96px); z-index: 1; background: var(--bg); font-weight: 600; padding: 4px 0; }
+.t { color: var(--mute); font-variant-numeric: tabular-nums; padding-top: 4px; white-space: nowrap; }
+.cell { background: var(--card); border: 1px solid var(--line); border-radius: 6px; overflow: hidden; min-height: 60px; }
+.cell .pic { position: relative; }
+.cell img { display: block; width: 100%; height: auto; }
+.cell svg { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.cell .cap { display: flex; justify-content: space-between; gap: 6px; padding: 3px 6px; font-size: 12px; color: var(--mute); }
+.cell.missing { border: 2px dashed var(--bad); background: var(--badbg); display: flex; align-items: center;
+                justify-content: center; color: var(--bad); font-weight: 600; }
+.cell.twice { outline: 2px solid var(--warn); }
+.done { color: var(--ok); } .skip { color: var(--warn); }
+.row.complete.hide { display: none; }
+</style></head><body>
+<header><h1>Frames by moment</h1><div class="sum" id="sum"></div>
+<div class="ctl"><label><input type="checkbox" id="only"> only moments where a camera has no frame</label>
+<label><input type="checkbox" id="boxes" checked> your boxes</label><span id="hint" class="t"></span></div></header>
+<div class="grid" id="grid"></div>
+<script>
+const D = __DATA__;
+const cams = D.cams, grid = document.getElementById("grid");
+grid.style.gridTemplateColumns = `90px repeat(${cams.length}, minmax(140px, 1fr))`;
+const fmt = ts => new Date((ts + D.tz * 3600) * 1000).toISOString().slice(11, 19);
+const colour = id => `hsl(${(parseInt(id, 10) || [...String(id)].reduce((a, c) => a + c.charCodeAt(0), 0)) * 47 % 360} 85% 55%)`;
+const sum = document.getElementById("sum");
+sum.innerHTML = `<span><b>${D.moments.length}</b> moments, <b>${D.complete}</b> on every camera (within ${D.near} s)</span>` +
+  cams.map(c => `<span class="${D.missing[c] ? "bad" : ""}">${c}: <b>${D.count[c]}</b> frames, <b>${D.missing[c]}</b> moments without one</span>`).join("");
+const head = [`<div class="head"></div>`].concat(cams.map(c => `<div class="head">${c}</div>`));
+let html = head.join("");
+for (const m of D.moments) {
+  const full = cams.every(c => m.at[c]);
+  let row = `<div class="t row ${full ? "complete" : ""}">${fmt(m.ts)}</div>`;
+  for (const c of cams) {
+    const fs = m.at[c];
+    if (!fs) { row += `<div class="cell row missing ${full ? "complete" : ""}">no frame</div>`; continue; }
+    const f = fs[0], lab = D.labels[f.file] || {}, bx = lab.boxes || [];
+    const dt = f.ts - m.ts, st = lab.status || "";
+    const svg = bx.map(b => `<rect x="${b[0] * 100}%" y="${b[1] * 100}%" width="${(b[2] - b[0]) * 100}%" height="${(b[3] - b[1]) * 100}%"
+        fill="none" stroke="${b[4] ? colour(b[4]) : "#bbb"}" stroke-width="2"/>` + (b[4] ? `<text x="${b[0] * 100 + 0.5}%" y="${b[1] * 100 + 6}%"
+        fill="${colour(b[4])}" font-size="13" font-weight="700" stroke="#000" stroke-width="0.6">${b[4]}</text>` : "")).join("");
+    row += `<div class="cell row ${fs.length > 1 ? "twice" : ""} ${full ? "complete" : ""}" title="${f.file}">
+      <div class="pic"><a href="${f.file}" target="_blank"><img loading="lazy" src="${f.file}" alt="${c} ${fmt(f.ts)}"></a>
+      <svg class="bx">${svg}</svg></div>
+      <div class="cap"><span>${dt ? (dt > 0 ? "+" : "") + dt.toFixed(1) + " s" : fmt(f.ts)}${fs.length > 1 ? " · " + fs.length + " frames" : ""}</span>
+      <span class="${st}">${st ? st + " · " : ""}${bx.length} boxes</span></div></div>`;
+  }
+  html += row;
+}
+grid.innerHTML = html;
+const setHead = () => document.documentElement.style.setProperty("--head", document.querySelector("header").offsetHeight + "px");
+setHead(); addEventListener("resize", setHead);
+document.getElementById("only").onchange = e => grid.querySelectorAll(".complete").forEach(x => x.classList.toggle("hide", e.target.checked));
+document.getElementById("boxes").onchange = e => grid.querySelectorAll("svg.bx").forEach(x => x.style.display = e.target.checked ? "" : "none");
+if (D.missing_any) document.getElementById("hint").textContent = "fill them: herd.py boxes frames ... --moments-of " + D.fullest + " --cameras " + cams.filter(c => D.missing[c] && c !== D.fullest).join(" ");
+</script></body></html>
+"""
+
+
+def cmd_moments(args):
+    """D/moments.html: every moment's frames side by side, one column a camera - a moment some camera has no frame of
+    is marked (and listed in the log); with --labels your boxes drawn on them, coloured by cow id."""
+    out = os.path.abspath(args.data)
+    index = json.load(open(os.path.join(out, "frames.json"), encoding="utf-8"))
+    frames = index["frames"]
+    cams = sorted({f["cam"] for f in frames})
+    ms = moments(frames, args.near)
+    labels = read_labels(args.labels)
+    count = collections.Counter(f["cam"] for f in frames)
+    missing = {c: sum(1 for _, at in ms if c not in at) for c in cams}
+    twice = sum(1 for _, at in ms for v in at.values() if len(v) > 1)
+    tz = 0.0
+    if args.config:
+        tz = float(load_config(args.config)["farm"]["timezone_offset_hours"])
+    data = {"cams": cams, "near": args.near, "tz": tz, "count": dict(count), "missing": missing,
+            "missing_any": any(missing.values()), "fullest": max(cams, key=lambda c: (count[c], c)),
+            "complete": sum(1 for _, at in ms if all(c in at for c in cams)),
+            "moments": [{"ts": ts, "at": {c: [{"file": f["file"], "ts": f["ts"]} for f in v] for c, v in at.items()}}
+                        for ts, at in ms],
+            "labels": {k: {"status": v.get("status"), "boxes": [list(map(float, b[:4])) + [str(b[4]).strip() if len(b) > 4 and
+                                                                                           b[4] not in (None, "") else ""]
+                                                                for b in v.get("boxes", [])]}
+                       for k, v in labels.items()}}
+    path = os.path.join(out, "moments.html")
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write(MOMENTS_PAGE.replace("__DATA__", json.dumps(data).replace("</", "<\\/")))
+    full = data["complete"]
+    print(f"[boxes] {len(ms)} moments (frames within {args.near:g} s of each other), {full} with a frame of every camera"
+          + (f"; {twice} times a camera has two frames in one moment" if twice else ""))
+    for c in cams:
+        print(f"  {c}: {count[c]} frames, no frame in {missing[c]} moments")
+    if any(missing.values()):
+        lack = [c for c in cams if missing[c] and c != data["fullest"]]
+        print(f"  fill them: herd.py boxes frames --config ... --videos ... --out {args.data} --moments-of "
+              f"{data['fullest']} --cameras {' '.join(lack)}")
+    print(f"-> {path}")
 
 
 def split_blocks(frames, val_share, block_s, seed):
@@ -560,6 +761,80 @@ def cmd_gallery(args):
           f"ids on 2+ cameras -> {out} (open it in a browser)")
 
 
+def id_map(pairs):
+    """["2=3", "3=2"] (or "2:3") -> {"2": "3", "3": "2"}: every pair at once, so 2=3 3=2 swaps the two; "x" removes."""
+    out = {}
+    for p in pairs:
+        for part in p.split(","):
+            if not part.strip():
+                continue
+            sep = "=" if "=" in part else ":"
+            if sep not in part:
+                raise SystemExit(f"[relabel] {part!r}: old=new, e.g. 2=3 3=2")
+            a, b = (v.strip() for v in part.split(sep, 1))
+            if not a or not b:
+                raise SystemExit(f"[relabel] {part!r}: old=new, e.g. 2=3 3=2")
+            if a in out and out[a] != b:
+                raise SystemExit(f"[relabel] {a} given twice: {out[a]} and {b}")
+            out[a] = b
+    return out
+
+
+def in_span(time, start, end):
+    """A frame's "YYYY-MM-DD HH:MM:SS" within [start, end]: each "HH:MM:SS" (any day) or a full date and time."""
+    def at(lim):
+        return time[11:] if len(lim) <= 8 else time
+    return not ((start and at(start) < start) or (end and at(end) > end))
+
+
+def cmd_relabel(args):
+    """Cow ids of boxes already labelled, changed on some cameras (and a stretch of time): 2=3 3=2 swaps them."""
+    src = os.path.abspath(args.data)
+    index = json.load(open(os.path.join(src, "frames.json"), encoding="utf-8"))
+    raw = json.load(open(args.labels, encoding="utf-8"))
+    labels = raw.get("frames", raw)
+    m = id_map(args.map)
+    cams = set(args.camera or [])
+    known = {f["cam"] for f in index["frames"]}
+    if cams - known:
+        raise SystemExit(f"[relabel] no such camera: {', '.join(sorted(cams - known))} (cameras: {', '.join(sorted(known))})")
+    if args.start and len(args.start) == 5:
+        args.start += ":00"
+    if args.end and len(args.end) == 5:
+        args.end += ":59"
+    changed_n = collections.Counter()
+    frames_n = 0
+    for f in index["frames"]:
+        lab = labels.get(f["file"])
+        if not lab or (cams and f["cam"] not in cams) or not in_span(f.get("time", ""), args.start, args.end):
+            continue
+        boxes, hit = [], False
+        for b in lab.get("boxes", []):
+            cow = str(b[4]).strip() if len(b) > 4 else ""
+            if cow in m:
+                new = m[cow]
+                b = list(b[:4]) if new.lower() == "x" else list(b[:4]) + [new] + list(b[5:])
+                changed_n[(f["cam"], cow, new)] += 1
+                hit = True
+            boxes.append(b)
+        if hit:
+            lab["boxes"] = boxes
+            frames_n += 1
+    for (cam, a, b), n in sorted(changed_n.items()):
+        print(f"[relabel] {cam}: {a} -> {'(no id)' if b.lower() == 'x' else b}: {n} boxes", flush=True)
+    if not changed_n:
+        print("[relabel] no box has those ids there: nothing changed", flush=True)
+        return
+    out = args.out or args.labels
+    if out == args.labels and not args.no_backup:
+        shutil.copyfile(args.labels, args.labels + ".bak")
+        print(f"[relabel] the labels as they were: {args.labels}.bak", flush=True)
+    with open(out, "w", encoding="utf-8") as fh:
+        json.dump(raw, fh, ensure_ascii=False)
+    print(f"[relabel] {sum(changed_n.values())} boxes in {frames_n} frames -> {out} "
+          f"(on the box page: Load labels.json)", flush=True)
+
+
 GALLERY = r"""<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Cow ids by camera</title>
@@ -743,8 +1018,14 @@ this camera's frames, forwards and backwards, as long as the cow's box clearly c
 a typed id is never overwritten, and fixing a blue one makes it typed). <b>What she does</b> (to check and teach posture and
 activity): select a box, <kbd>1</kbd> standing, <kbd>2</kbd> lying; <kbd>3</kbd> feeding, <kbd>4</kbd> drinking, <kbd>5</kbd>
 neither, <kbd>6</kbd> ruminating (chewing the cud); <kbd>0</kbd> clears both; <kbd>C</kbd> takes them, for each box with a
-cow id, from her box on the other cameras' frames of the same moment (within 2 s; only what is missing, never over yours) - once a box has both the next box missing one is selected. <kbd>P</kbd> also takes posture
-and activity from the frame before for boxes in the same place (check them).</p>
+cow id, from her box on the other cameras' frames of the same moment (within 2 s) - over what the box has with "over what is
+here", else only what it lacks; "from cam1" takes them from that camera only (on all frames, over what is there: needed);
+what you set on a box with a cow id is set on her other cameras' boxes of that moment too, over what they had ("set on her
+other cameras too") - once a box has both the next box missing one is selected. <kbd>P</kbd> also takes posture
+and activity from the frame before for boxes in the same place (check them). <b>Two cows mixed up</b> on some
+frames: <b>change ids</b> - type <code>2=3 3=2</code> (swaps them; <code>5=x</code> takes an id off), open the first wrong
+frame, <b>from here</b>, the last one, <b>to here</b> (that camera's frames between them), <b>change</b>; <b>undo the change</b>
+takes it back.</p>
 <div class="bar">
 <button id="prev">&larr;</button><span id="pos"></span><button id="next">&rarr;</button>
 <select id="cam"></select><label><input type="checkbox" id="todo"> only not done</label>
@@ -757,6 +1038,14 @@ and activity from the frame before for boxes in the same place (check them).</p>
 <button id="fillid" title="the ids typed by hand carried through all of this camera's frames, by where the cows are (F)">fill ids through the recording (F)</button>
 <label title="fill only the frames you have opened and edited"><input type="checkbox" id="onlyedited"> only frames I edited</label>
 <span class="mute">select a box, <kbd>I</kbd> - type her tag - <kbd>Enter</kbd> (the next box without an id is selected)</span></div>
+<div class="bar" id="swapbar"><b>change ids</b>
+<input id="swmap" size="14" placeholder="2=3 3=2" title="old=new pairs, all at once: 2=3 3=2 swaps the two cows; 5=x takes id 5 off">
+<select id="swcam" title="the camera whose frames change"></select>
+<span class="mute">frames</span><button id="swfrom" title="the range starts at the frame open now">from here</button><span id="swfromv"></span>
+<button id="swto" title="the range ends at the frame open now">to here</button><span id="swtov"></span>
+<button id="swall" title="no range: every frame">all frames</button>
+<button class="main" id="swgo">change</button><button id="swundo" disabled>undo the change</button>
+<span class="mute" id="swinfo"></span></div>
 <div class="bar" id="attbar"><span class="mute">posture</span>
 <button class="att" data-k="posture" data-v="standing" title="1">standing <kbd>1</kbd></button>
 <button class="att" data-k="posture" data-v="lying" title="2">lying <kbd>2</kbd></button>
@@ -768,6 +1057,9 @@ and activity from the frame before for boxes in the same place (check them).</p>
 <button id="attclear" title="0">clear <kbd>0</kbd></button>
 <button id="attcams" title="for boxes with a cow id: her posture / activity from the other cameras' frames of the same moment (C)">from other cameras (C)</button>
 <button id="attcamsall" title="the same on every frame">... on all frames</button>
+<label title="from other cameras: over what this box already has (else only what it lacks)"><input type="checkbox" id="attover" checked> over what is here</label>
+<select id="attsrc" title="the camera whose posture / activity the others take (on all frames with 'over what is here': needed)"><option value="">from any other camera</option></select>
+<label title="a posture / activity you set goes to this cow (same id) on the other cameras' frames of the same moment (within 2 s), over what they had"><input type="checkbox" id="attsync" checked> set on her other cameras too</label>
 <span class="mute">select a box first; pressed again, a choice is taken back</span></div>
 <datalist id="ids"></datalist>
 <div class="bar"><span id="info"></span><span id="status"></span><span class="mute" id="stat"></span></div>
@@ -790,6 +1082,7 @@ function detBoxes(f) {
 }
 const cams = [...new Set(DATA.frames.map(f => f.cam))];
 $("cam").innerHTML = '<option value="">all cameras</option>' + cams.map(c => `<option>${c}</option>`).join("");
+$("attsrc").innerHTML = '<option value="">from any other camera</option>' + cams.map(c => `<option value="${c}">from ${c}</option>`).join("");
 function filter(keep) {
   const c = $("cam").value, todo = $("todo").checked;
   order = DATA.frames.map((f, i) => i).filter(i => (!c || DATA.frames[i].cam === c) &&
@@ -827,6 +1120,7 @@ function fit() {
   cv.width = Math.round(img.naturalWidth * scale); cv.height = Math.round(img.naturalHeight * scale);
 }
 function status() {
+  if ($("swinfo")) swShow();
   const f = frame(), s = f && labels[f.file] ? (stale(f) ? "stale" : labels[f.file].status || "") : "";
   $("status").textContent = s === "done" ? "done" : s === "skip" ? "skipped" : s === "stale" ? "cut again - check it, Enter" : "not done";
   $("status").className = s;
@@ -898,11 +1192,31 @@ function setAtt(k, v) {            // k: posture | activity; v: a value, or "" t
   boxes[sel] = pack(boxes[sel], idOf(boxes[sel]), autoOf(boxes[sel]), a);
   edited();
   const now = attOf(boxes[sel]) || {};
+  const synced = $("attsync").checked ? syncOtherCams(idOf(boxes[sel]), k ? [k] : ["posture", "activity"], now) : 0;
+  if (synced) $("info").textContent = `${frame().cam}  ${frame().time}  - set on her other cameras too: ${synced} box(es)`;
   if (k && now.posture && now.activity && !(was.posture && was.activity)) {   // this one done: the next missing one
     const order_ = boxes.map((b, i) => [i, b]).sort((p, q) => p[1][0] - q[1][0]);
     const nx = order_.find(([i, b]) => i !== sel && !((attOf(b) || {}).posture && (attOf(b) || {}).activity));
     if (nx) { sel = nx[0]; draw(); }
   }
+}
+function syncOtherCams(id, keys, now) {   // this cow (id) on the other cameras' frames of this moment: keys as here
+  const f = frame(); if (!f || !id) return 0;
+  let n = 0;
+  DATA.frames.filter(g => g.cam !== f.cam && Math.abs(g.ts - f.ts) <= 2 && labels[g.file]).forEach(g => {
+    let changed = false;
+    const bs = (labels[g.file].boxes || []).map(b => {
+      if (idOf(b) !== id) return b;
+      const a = Object.assign({}, attOf(b) || {}), was = JSON.stringify(a);
+      keys.forEach(k => { if (now[k]) a[k] = now[k]; else delete a[k]; });
+      if (JSON.stringify(a) === was) return b;
+      changed = true; n++;
+      return pack(b, idOf(b), autoOf(b), a);
+    });
+    if (changed) labels[g.file] = Object.assign({}, labels[g.file], {boxes: bs.map(rnd)});
+  });
+  if (n) store();
+  return n;
 }
 function knownIds() {
   const n = {};
@@ -981,8 +1295,9 @@ function idsFromPrevious() {      // each box without an id takes the id of the 
   edited();
   $("info").textContent = `${f.cam}  ${f.time}  - ${n} ids, ${na} postures / activities from ${prev.time}: check them`;
 }
-function fromOtherCams(f) {      // posture / activity a box lacks, from her box (same cow id) on the other cameras'
-  const near = DATA.frames.filter(g => g.cam !== f.cam && Math.abs(g.ts - f.ts) <= 2 && labels[g.file]);   // frames
+function fromOtherCams(f, over, src) {   // posture / activity from her box (same cow id) on the other cameras' frames
+  // (or one camera's: src) of the same moment - what this box lacks, or (over) over what it has
+  const near = DATA.frames.filter(g => g.cam !== f.cam && (!src || g.cam === src) && Math.abs(g.ts - f.ts) <= 2 && labels[g.file]);
   const theirs = {};                                                            // of the same moment
   near.forEach(g => (labels[g.file].boxes || []).forEach(b => {
     const a = attOf(b); if (!b[4] || !a) return;
@@ -994,7 +1309,7 @@ function fromOtherCams(f) {      // posture / activity a box lacks, from her box
   const out = bs.map(b => {
     const t = b[4] && theirs[b[4]]; if (!t) return b;
     const a = Object.assign({}, attOf(b) || {}), was = JSON.stringify(a);
-    ["posture", "activity"].forEach(k => { if (!a[k] && t[k]) a[k] = t[k]; });
+    ["posture", "activity"].forEach(k => { if (t[k] && (over || !a[k])) a[k] = t[k]; });
     if (JSON.stringify(a) === was) return b;
     n++; return pack(b, idOf(b), autoOf(b), a);
   });
@@ -1002,24 +1317,90 @@ function fromOtherCams(f) {      // posture / activity a box lacks, from her box
 }
 function attFromCams(all) {
   const cur = frame(); if (!cur) return;
+  const over = $("attover").checked, src = $("attsrc").value;
+  if (all && over && !src) { alert("over what is there on all frames: choose the camera to take them from (its values go to the other cameras)"); return; }
+  if (!all && src && src === cur.cam) { alert(`this is ${src}, the camera chosen to take them from: open another camera's frame`); return; }
   let n = 0, fr = 0;
   if (!all) {
-    const [out, k] = fromOtherCams(cur);
+    const [out, k] = fromOtherCams(cur, over, src);
     if (k) { push(); boxes = out; edited(); }
     n = k; fr = k ? 1 : 0;
   } else {
-    for (let pass = 0; pass < 2; pass++)            // twice: a frame filled may fill another of its moment
+    for (let pass = 0; pass < (src ? 1 : 2); pass++)   // twice: a frame filled may fill another of its moment
       DATA.frames.forEach(g => {
-        if (!labels[g.file]) return;
-        const [out, k] = fromOtherCams(g);
+        if (!labels[g.file] || (src && g.cam === src)) return;
+        const [out, k] = fromOtherCams(g, over, src);
         if (!k) return;
         labels[g.file] = Object.assign({}, labels[g.file], {boxes: out.map(rnd)});
         n += k; fr++;
       });
     store(); open();
   }
-  $("info").textContent = `${cur.cam}  ${cur.time}  - posture / activity for ${n} boxes from the other cameras` +
+  $("info").textContent = `${cur.cam}  ${cur.time}  - posture / activity for ${n} boxes from ${src || "the other cameras"}` +
+    (over ? " (over what they had)" : "") +
     (all ? ` (${fr} frame passes)` : "") + ": check them";
+}
+// change ids (2=3 3=2 swaps them) on a camera's frames, between two frames chosen with "from here" / "to here"
+let swFrom = null, swTo = null, swBefore = null;
+function swMap() {
+  const m = {}, bad = [];
+  $("swmap").value.split(/[\s,;]+/).filter(Boolean).forEach(p => {
+    const kv = p.split(/[=:]/);
+    if (kv.length !== 2 || !kv[0].trim() || !kv[1].trim()) { bad.push(p); return; }
+    const [a, b] = kv.map(v => v.trim());
+    if (a in m && m[a] !== b) bad.push(p); else m[a] = b;
+  });
+  return [m, bad];
+}
+const swCamOf = () => $("swcam").value === "*" ? "" : ($("swcam").value || (frame() || {}).cam || "");
+function swFrames() {
+  const c = swCamOf();
+  return DATA.frames.filter(g => (!c || g.cam === c) && (swFrom === null || g.ts >= swFrom - 0.5) &&
+                                 (swTo === null || g.ts <= swTo + 0.5));
+}
+function swPlan() {                // [[frame, its new boxes, boxes changed]] for the frames in range with those ids
+  const [m] = swMap(), out = [];
+  if (!Object.keys(m).length) return out;
+  swFrames().forEach(g => {
+    const l = labels[g.file]; if (!l) return;
+    let n = 0;
+    const bs = (l.boxes || []).map(b => {
+      const id = String(idOf(b)).trim(); if (!id || !(id in m)) return b;
+      n++;
+      const to = m[id];
+      return to.toLowerCase() === "x" ? pack(b, "", false, attOf(b)) : pack(b, to, autoOf(b), attOf(b));
+    });
+    if (n) out.push([g, bs, n]);
+  });
+  return out;
+}
+function swShow() {
+  const t = ts => { const g = DATA.frames.find(f => f.ts === ts); return g ? g.time.slice(11) : ""; };
+  $("swfromv").textContent = swFrom === null ? "first" : t(swFrom);
+  $("swtov").textContent = swTo === null ? "last" : t(swTo);
+  const [m, bad] = swMap(), c = swCamOf(), fr = swFrames();
+  if (bad.length) { $("swinfo").textContent = `not old=new: ${bad.join(" ")}`; $("swgo").disabled = true; return; }
+  const plan = swPlan(), n = plan.reduce((k, p) => k + p[2], 0);
+  $("swgo").disabled = !n;
+  $("swinfo").textContent = !Object.keys(m).length ? `${fr.length} frames of ${c || "every camera"} - type old=new` :
+    `${n} boxes on ${plan.length} of ${fr.length} frames of ${c || "every camera"} would change`;
+}
+function swGo() {
+  const plan = swPlan(); if (!plan.length) return;
+  const [m] = swMap(), n = plan.reduce((k, p) => k + p[2], 0);
+  const what = Object.entries(m).map(([a, b]) => `${a} -> ${b.toLowerCase() === "x" ? "(no id)" : b}`).join(", ");
+  if (!confirm(`${what}: ${n} boxes on ${plan.length} frames of ${swCamOf() || "every camera"}?`)) return;
+  swBefore = JSON.stringify(labels);
+  plan.forEach(([g, bs]) => { labels[g.file] = Object.assign({}, labels[g.file], {boxes: bs.map(rnd)}); });
+  store(); open(); idList(); swShow();
+  $("swundo").disabled = false;
+  $("info").textContent += ` - ids changed (${what}): ${n} boxes on ${plan.length} frames`;
+}
+function swUndo() {
+  if (!swBefore) return;
+  labels = JSON.parse(swBefore); swBefore = null;
+  store(); open(); idList(); swShow();
+  $("swundo").disabled = true;
 }
 function edited() {
   const f = frame();
@@ -1113,6 +1494,15 @@ $("prev").onclick = () => go(-1); $("next").onclick = () => go(1);
 $("done").onclick = () => mark("done"); $("skip").onclick = () => mark("skip");
 $("reset").onclick = () => { const f = frame(); if (!f) return; push(); [boxes, cands] = detBoxes(f); sel = -1; edited(); };
 ["cam", "todo"].forEach(id => $(id).onchange = () => { filter(order[at]); open(); });
+$("swcam").innerHTML = '<option value="">this frame\'s camera</option><option value="*">every camera</option>' +
+  cams.map(c => `<option value="${c}">${c}</option>`).join("");
+$("swmap").oninput = swShow; $("swcam").onchange = swShow;
+$("swmap").addEventListener("keydown", e => { if (e.key === "Enter") { swGo(); e.preventDefault(); } });
+const swHere = f => { if (!$("swcam").value) $("swcam").value = f.cam; };     // the range is that camera's
+$("swfrom").onclick = () => { const f = frame(); if (!f) return; swHere(f); swFrom = f.ts; if (swTo !== null && swTo < swFrom) swTo = null; swShow(); };
+$("swto").onclick = () => { const f = frame(); if (!f) return; swHere(f); swTo = f.ts; if (swFrom !== null && swFrom > swTo) swFrom = null; swShow(); };
+$("swall").onclick = () => { swFrom = swTo = null; swShow(); };
+$("swgo").onclick = swGo; $("swundo").onclick = swUndo;
 document.addEventListener("keydown", e => {
   if (e.target.tagName === "SELECT" || e.target.tagName === "INPUT") return;
   if ((e.ctrlKey || e.metaKey) && e.key === "z") { if (undo.length) { [boxes, cands] = JSON.parse(undo.pop()); sel = -1; edited(); } e.preventDefault(); return; }
@@ -1165,15 +1555,39 @@ def main(argv=None):
     f.add_argument("--min-change", type=float, default=3.0, help="a frame this little changed (0-255) is skipped")
     f.add_argument("--detector", default=None, help="a best/ folder (default: the config's); none: no first guess")
     f.add_argument("--cameras", nargs="*", default=None, help="only these cameras")
+    f.add_argument("--moments-of", nargs="+", default=None,
+                   help="cut the other cameras (or --cameras) at the moments these cameras' frames were cut, at the "
+                        "same file time, where they have no frame yet: the same moment on every camera")
+    f.add_argument("--barn-clock", action="store_true",
+                   help="--moments-of on the barn's clock: each camera's time_offset_s taken into account (the same "
+                        "instant, not the same file time)")
     f.add_argument("--again", action="store_true", help="with --cameras: their frames already cut are cut again "
                    "with the zone as the config has it now (an exclude zone changed) and looked at again")
     g = sub.add_parser("page", help="the labelling page again (after a code update, or with a labels.json)")
     g.add_argument("--data", required=True)
     g.add_argument("--labels", default=None)
+    mo = sub.add_parser("moments", help="the cut frames by moment, every camera side by side -> moments.html (a moment "
+                                        "some camera has no frame of marked)")
+    mo.add_argument("--data", required=True)
+    mo.add_argument("--labels", default=None, help="your labels.json: its boxes drawn, coloured by cow id")
+    mo.add_argument("--near", type=float, default=1.0, help="frames this many s apart are one moment (as trial pairs them)")
+    mo.add_argument("--config", default=None, help="the barn's config: times shown in the farm's time zone")
     gl = sub.add_parser("gallery", help="every id of every camera as a row of her crops -> ids.html (check, rename)")
     gl.add_argument("--data", required=True)
     gl.add_argument("--labels", required=True)
     gl.add_argument("--thumbs", type=int, default=8, help="crops a row")
+    rl = sub.add_parser("relabel", help="change cow ids of boxes already labelled: 2=3 3=2 swaps them (on --camera, "
+                                        "between --from and --to)")
+    rl.add_argument("--data", required=True)
+    rl.add_argument("--labels", required=True)
+    rl.add_argument("map", nargs="+", help="old=new pairs, all at once: 2=3 3=2 swaps 2 and 3; 5=x removes id 5")
+    rl.add_argument("--camera", action="append", default=None, help="only this camera's boxes (again for more); "
+                    "default every camera")
+    rl.add_argument("--from", dest="start", default=None, help="only frames from this time: HH:MM:SS (or "
+                    "\"YYYY-MM-DD HH:MM:SS\"), the farm's time as the pages show it")
+    rl.add_argument("--to", dest="end", default=None, help="only frames up to this time (as --from)")
+    rl.add_argument("--out", default=None, help="write here (default: over --labels, the old one kept as .bak)")
+    rl.add_argument("--no-backup", action="store_true")
     x = sub.add_parser("export", help="labels.json -> herd_det_barn_<date>.tgz (COCO, for run_pod.sh detector)")
     x.add_argument("--data", required=True)
     x.add_argument("--labels", required=True)
@@ -1200,7 +1614,8 @@ def main(argv=None):
     args = p.parse_args(argv)
     if args.cmd == "frames" and not (args.videos or args.video):
         p.error("frames: --videos DIR or --video cam=file")
-    {"frames": cmd_frames, "page": cmd_page, "export": cmd_export, "ids": cmd_ids, "gallery": cmd_gallery}[args.cmd](args)
+    {"frames": cmd_frames, "page": cmd_page, "export": cmd_export, "ids": cmd_ids, "gallery": cmd_gallery,
+     "relabel": cmd_relabel, "moments": cmd_moments}[args.cmd](args)
 
 
 if __name__ == "__main__":

@@ -85,6 +85,66 @@ def test_enroll_never_merges_cows_seen_together():
         assert sizes == [6, 12]
 
 
+def test_enroll_makes_one_cow_of_tracks_joined_across_cameras():
+    """A cow's head on one camera and her tail on another look nothing alike: by look two cows, but the two
+    cameras' tracks joined by where she stood are one cow - unless one camera saw both tracks at once."""
+    rng = np.random.default_rng(3)
+    head, tail, other = (_unit(rng.normal(size=32)) for _ in range(3))
+    with tempfile.TemporaryDirectory() as d:
+        def pool(gal):
+            for k in range(6):
+                gal.pool.append({"ts": k, "track": "cam1-a", "fp": _near(head, rng, 0.02)})
+                gal.pool.append({"ts": k, "track": "cam3-b", "fp": _near(tail, rng, 0.02)})
+                gal.pool.append({"ts": k, "track": "cam1-c", "fp": _near(other, rng, 0.02)})
+        gal = _gallery(d, {}, new_cow_min_bursts=4)
+        pool(gal)
+        assert len(gal.enroll(100.0)) == 3                                     # by look alone: three cows
+        gal = _gallery(os.path.join(d, "2"), {}, new_cow_min_bursts=4, max_cows=2)
+        pool(gal)
+        made = gal.enroll(100.0, together=[("cam3-b", "cam1-a")])
+        assert len(made) == 2 and sorted(len(gal.history[c]) for c in made) == [6, 12]   # head and tail one cow
+        # a join of two tracks one camera saw at once is not taken: two cows
+        gal = _gallery(os.path.join(d, "3"), {}, new_cow_min_bursts=4)
+        pool(gal)
+        made = gal.enroll(100.0, cannot_link={("cam1-a", "cam1-c")},
+                          together=[("cam1-a", "cam3-b"), ("cam1-c", "cam3-b")])
+        assert sorted(len(gal.history[c]) for c in made) == [6, 12]
+
+
+def test_gallery_named_from_your_labels():
+    """--seed-labels: the tracks your boxes fall on name the gallery - each of your ids a cow of all her tracks'
+    bursts (head on one camera, tail on another), only bursts up to your last frame; the others stay in the pool."""
+    import trial
+    from store import Store
+    rng = np.random.default_rng(4)
+    head, tail, other = (_unit(rng.normal(size=32)) for _ in range(3))
+    with tempfile.TemporaryDirectory() as d:
+        st = Store(os.path.join(d, "s.sqlite"))
+        st.seconds([("cam1", "a", float(t), 0.1, 0.4, 0.3, 0.6, "standing", "none", 0.1) for t in range(100, 200)] +
+                   [("cam3", "b", float(t), 0.5, 0.4, 0.7, 0.6, "standing", "none", 0.1) for t in range(100, 200)] +
+                   [("cam1", "c", float(t), 0.6, 0.1, 0.8, 0.3, "standing", "none", 0.1) for t in range(100, 200)])
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"{c}/{t}.jpg", "cam": c, "ts": float(t)} for c in ("cam1", "cam3") for t in (110, 120, 130)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        lab = {"cam1": [[0.1, 0.4, 0.3, 0.6, "7"]], "cam3": [[0.5, 0.4, 0.7, 0.6, "7"]]}
+        lp = os.path.join(d, "labels.json")
+        json.dump({"frames": {f["file"]: {"status": "done", "boxes": lab[f["cam"]]} for f in frames}}, open(lp, "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1"}, {"id": "cam3"}]
+        named, until = trial.tracks_of_labels(st, cfg, boxes, lp)
+        assert named == {"a": "7", "b": "7"} and until == 130.0
+        gal = _gallery(d, {}, new_cow_min_bursts=4)
+        for k in range(10):
+            gal.pool.append({"ts": 100.0 + 10 * k, "track": "a", "fp": _near(head, rng, 0.02)})
+            gal.pool.append({"ts": 100.0 + 10 * k, "track": "b", "fp": _near(tail, rng, 0.02)})
+            gal.pool.append({"ts": 100.0 + 10 * k, "track": "c", "fp": _near(other, rng, 0.02)})
+        assert gal.enroll_named(300.0, named, until) == ["7"]
+        assert len(gal.history["7"]) == 8                                      # 4 bursts each up to 130 s
+        assert gal.match(_near(tail, rng, 0.02), 0.5, 0.5, 0.05)["cow"] in ("7", None)
+        assert sorted({p["track"] for p in gal.pool}) == ["a", "b", "c"]       # after 130 s, and c, wait
+
+
 def test_enroll_holds_back_when_the_herd_is_full():
     rng = np.random.default_rng(2)
     with tempfile.TemporaryDirectory() as d:
@@ -2018,6 +2078,53 @@ def test_trial_scores_a_cow_counted_outside_the_mask_and_says_who_counted_none()
         a = sc["all"]
         assert a["your_boxes"] == 6 and a["found_with_a_cow"] == 6 and abs(a["idf1"] - 1.0) < 1e-9
         assert sc["counted_by_none"] == {"moments": 9, "none": 3, "cows": {"9": 3}}
+        k = a["counts"]
+        assert (k["idtp"], k["idfp"], k["idfn"]) == (6, 0, 0) and k["dataset"] == {"idtp": 6, "idfp": 0, "idfn": 0,
+                                                                                   "your_boxes": 6}
+        # one of your boxes given the other cow's name, one not found: IDFP and IDFN by their kinds
+        labels2 = os.path.join(d, "labels2.json")
+        lab2 = {"boxes": [[0.1, 0.4, 0.3, 0.6, "4"], [0.85, 0.4, 0.95, 0.6, "7"], [0.3, 0.1, 0.4, 0.2, "8"]],
+                "status": "done"}
+        lab_w = {"boxes": [[0.1, 0.4, 0.3, 0.6, "7"], [0.85, 0.4, 0.95, 0.6, "7"]], "status": "done"}
+        json.dump({"frames": {frames[0]["file"]: lab_w, frames[1]["file"]: lab2, frames[2]["file"]: lab2}},
+                  open(labels2, "w"))
+        cfg["cameras"] = [{"id": "cam1"}]
+        sc = trial.score(st, cfg, boxes, labels2)
+        k = sc["cameras"]["cam1"]["counts"]
+        # 8 boxes of yours: "8" never found (2), "7" on P1 once (the name P1 holds is your 4's): wrong
+        assert k["dataset"]["idtp"] == 8 and k["idfn_by"]["not_found"] == 2 and k["idfn_by"]["wrong_name"] == 1
+        assert k["idtp"] == 5 and k["idfp"] == k["idfp_by"]["wrong_name"] == 1 and k["idfn"] == 3
+        assert abs(sc["cameras"]["cam1"]["idf1"] - 2 * 5 / (2 * 5 + 1 + 3)) < 1e-9
+        trial.print_counts(sc)
+
+
+def test_trial_pairs_two_cameras_frames_by_their_file_time_whatever_the_time_offset():
+    """A camera with time_offset_s 2.8: its boxes are looked up 2.8 s later in the run, but your frames of one moment
+    (one file time on both cameras) are still one moment of the cow on two cameras."""
+    import trial
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        st = os.path.join(d, "s.sqlite")
+        s = Store(st)
+        s.seconds([("cam1", "a", float(t), 0.1, 0.4, 0.3, 0.6, "standing", "none", 0.1) for t in range(100, 116)] +
+                  [("cam2", "b", float(t), 0.5, 0.4, 0.7, 0.6, "standing", "none", 0.1) for t in range(100, 116)])
+        for cam, tr in (("cam1", "a"), ("cam2", "b")):
+            for k in range(3):
+                s.burst((cam, tr, 101.0 + k, "confirmed", "P1", 0.9, 0.2, 0.9, 0.1, "standing", "none", None, 0.5, 100))
+        boxes = os.path.join(d, "boxes")
+        os.makedirs(boxes)
+        frames = [{"file": f"{c}/{t}.jpg", "cam": c, "ts": float(t), "w": 1920, "h": 1080}
+                  for c in ("cam1", "cam2") for t in (100, 105, 110)]
+        json.dump({"frames": frames}, open(os.path.join(boxes, "frames.json"), "w"))
+        box = {"cam1": [0.1, 0.4, 0.3, 0.6, "4"], "cam2": [0.5, 0.4, 0.7, 0.6, "4"]}
+        labels = os.path.join(d, "labels.json")
+        json.dump({"frames": {f["file"]: {"boxes": [box[f["cam"]]], "status": "done"} for f in frames}}, open(labels, "w"))
+        cfg = _cfg()
+        cfg["cameras"] = [{"id": "cam1"}, {"id": "cam2", "time_offset_s": 2.8}]
+        sc = trial.score(st, cfg, boxes, labels)
+        assert sc["all"]["found_with_a_cow"] == 6
+        assert sc["cross_camera"]["moments"] == 3 and sc["cross_camera"]["moments_same_cow"] == 3
+        assert sc["cross_camera_moments"]["moments"] == 3 and sc["cross_camera_moments"]["same_cow"] == 3
 
 
 def test_trial_scores_the_posture_and_activity_you_gave_boxes():
@@ -2133,3 +2240,53 @@ def test_burst_takes_burst_fps_frames_a_second():
     half = pipeline.thin_frames(frames, 12.5)
     assert len(half) == 88 and all(abs((b[0] - a[0]) - 0.08) < 1e-6 for a, b in zip(half, half[1:]))
     assert len(pipeline.thin_frames(frames, 8.0)) == 56
+
+
+def test_collect_groups_two_cameras_cows_by_place_and_names_one_cow_at_a_time():
+    """collect.py: two cameras each see cows A and B side by side 2 m apart for a minute; their tracks are grouped by
+    where they stood (each the other's nearest, the next far), never two tracks one camera saw at once; each group
+    named by its bursts - B's bursts mostly say A on one camera, but A's group holds A then: B gets B."""
+    import collect
+    import report
+    from store import Store
+    fp = [[0, 0, 0, 0], [1, 0, 1000, 0], [0, 1, 0, 1000], [1, 1, 1000, 1000]]       # frame 0-1 -> floor cm
+    cfg = _cfg()
+    cfg["cameras"] = [{"id": "cam1", "floor_points": fp}, {"id": "cam2", "floor_points": fp}]
+    with tempfile.TemporaryDirectory() as d:
+        s = Store(os.path.join(d, "s.sqlite"))
+        rows = []
+        for t in range(100, 160):
+            for cam, (ta, tb), dx in (("cam1", ("c1-a", "c1-b"), 0.0), ("cam2", ("c2-a", "c2-b"), 0.004)):
+                rows.append((cam, ta, float(t), 0.30 + dx, 0.30, 0.40 + dx, 0.50, "standing", "none", 0.0))   # A ~ (3.5 m, 5 m)
+                rows.append((cam, tb, float(t), 0.50 + dx, 0.30, 0.60 + dx, 0.50, "standing", "none", 0.0))   # B 2 m on
+        s.seconds(rows)
+        for tr, cows in (("c1-a", "AAAB"), ("c2-a", "AAA"), ("c1-b", "BBB"), ("c2-b", "AAB")):
+            for k, cow in enumerate(cows):
+                s.burst(("cam1" if tr.startswith("c1") else "cam2", tr, 100.0 + 10 * k, "confirmed", cow, 0.9, 0.2, 0.9,
+                         0.1, "standing", "none", None, 0.5, 100))
+        groups, names = collect.collect(s, cfg)
+        assert sorted(sorted(g) for g in groups) == [["c1-a", "c2-a"], ["c1-b", "c2-b"]]
+        assert names == {"c1-a": "A", "c2-a": "A", "c1-b": "B", "c2-b": "B"}
+        collect.write(s, groups, names)
+        assert report.track_map(s) == names and len(s.track_roots()) == 2           # the reports follow
+        # the encoder's vectors kept (burst_fp.frames): two cameras' tracks of one cow alike - the same groups
+        rng = np.random.default_rng(5)
+        look = {"a": rng.normal(size=16), "b": rng.normal(size=16)}
+        for tr in ("c1-a", "c2-a", "c1-b", "c2-b"):
+            s.burst_fp("cam1" if tr.startswith("c1") else "cam2", tr, 100.0, np.zeros(8),
+                       frames=look[tr[-1]] + 0.05 * rng.normal(size=16))
+        assert sorted(sorted(g) for g in collect.collect(s, cfg)[0]) == [["c1-a", "c2-a"], ["c1-b", "c2-b"]]
+        assert set(collect.looks(s, {t: "cam1" if t.startswith("c1") else "cam2" for t in ("c1-a", "c2-a", "c1-b", "c2-b")})) == set(("c1-a", "c2-a", "c1-b", "c2-b"))
+
+
+def test_store_keeps_burst_fingerprints():
+    """[store] keep_fingerprints: a burst's fingerprint kept as float16 beside it, read back as float32."""
+    from store import Store
+    with tempfile.TemporaryDirectory() as d:
+        s = Store(os.path.join(d, "s.sqlite"))
+        v = np.linspace(-1, 1, 256).astype(np.float32)
+        s.burst_fp("cam1", "t1", 100.0, v, 0.7, frames=v[:64])
+        (cam, tr, ts, q, f), = s.burst_fps()
+        assert (cam, tr, ts, q) == ("cam1", "t1", 100.0, 0.7) and f.dtype == np.float32 and np.abs(f - v).max() < 1e-3
+        (_, _, _, _, f, fr), = s.burst_fps(frames=True)
+        assert fr.shape == (64,) and np.abs(fr - v[:64]).max() < 1e-3
