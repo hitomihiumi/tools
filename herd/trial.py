@@ -170,6 +170,16 @@ def score(store_path, cfg, boxes_dir, labels_path, max_dt=0.6, min_iou=0.3, page
     frames = {f["file"]: f for f in json.load(open(os.path.join(boxes_dir, "frames.json"), encoding="utf-8"))["frames"]}
     cams = {c["id"]: c for c in cfg["cameras"] if not cameras or c["id"] in cameras}
     labels = read_labels(labels_path)
+    done = [k for k, v in labels.items() if v.get("status") == "done"]
+    if done and not any(k in frames for k in done):
+        # labels of another cut of the frames (another --every, another folder): nothing to score, say so
+        print(f"[score] none of your {len(done)} done frames ({labels_path}) is in {os.path.join(boxes_dir, 'frames.json')} "
+              f"({len(frames)} frames, e.g. {next(iter(frames), '-')}; yours e.g. {done[0]}): --boxes must be the "
+              f"folder those labels were made on", flush=True)
+    elif done:
+        miss = sum(1 for k in done if k not in frames)
+        if miss:
+            print(f"[score] {miss} of your {len(done)} done frames are not in {boxes_dir}/frames.json: left out", flush=True)
     shift = clock_shift(store, [frames[k] for k, v in labels.items() if v.get("status") == "done" and k in frames
                                 and frames[k]["cam"] in cams])
     co, cam_co = collections.Counter(), collections.defaultdict(collections.Counter)
